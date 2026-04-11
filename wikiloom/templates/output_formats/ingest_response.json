@@ -1,0 +1,84 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "IngestResponse",
+  "description": "Structured response from LLM after ingesting a source document",
+  "type": "object",
+  "required": ["source_summary", "pages_to_create", "pages_to_update", "entities_mentioned", "concepts_mentioned"],
+  "properties": {
+    "source_summary": {
+      "type": "object",
+      "required": ["title", "one_line", "content_markdown"],
+      "properties": {
+        "title": { "type": "string" },
+        "one_line": { "type": "string" },
+        "content_markdown": { "type": "string" }
+      }
+    },
+    "pages_to_create": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["type", "suggested_slug", "title", "content_markdown", "confidence"],
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["entity", "concept", "synthesis", "decision"]
+          },
+          "suggested_slug": { "type": "string" },
+          "title": { "type": "string" },
+          "content_markdown": { "type": "string" },
+          "confidence": {
+            "type": "string",
+            "enum": ["high", "medium", "low"]
+          },
+          "claims": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["statement", "source_location", "confidence"],
+              "properties": {
+                "statement": { "type": "string" },
+                "source_location": { "type": "string" },
+                "confidence": {
+                  "type": "string",
+                  "enum": ["high", "medium", "low"]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "pages_to_update": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["existing_path", "additions_markdown"],
+        "properties": {
+          "existing_path": { "type": "string" },
+          "additions_markdown": { "type": "string" },
+          "contradictions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["existing_claim", "new_claim", "source_location"],
+              "properties": {
+                "existing_claim": { "type": "string" },
+                "new_claim": { "type": "string" },
+                "source_location": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "entities_mentioned": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "concepts_mentioned": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  }
+}

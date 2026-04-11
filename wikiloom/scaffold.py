@@ -1,0 +1,342 @@
+"""Project scaffolding for WikiLoom."""
+
+from __future__ import annotations
+
+import json
+import shutil
+import sqlite3
+from importlib import resources as importlib_resources
+from pathlib import Path
+
+from wikiloom.utils import now_iso
+
+# Wiki subdirectories under wiki/
+WIKI_SUBDIRS = [
+    "entities",
+    "concepts",
+    "sources",
+    "syntheses",
+    "decisions",
+    "archive",
+]
+
+# Raw source subdirectories under raw/
+RAW_SUBDIRS = [
+    "papers",
+    "articles",
+    "images",
+    "code",
+    "audio",
+    "misc",
+]
+
+GITIGNORE_CONTENT = """\
+# WikiLoom
+_registry/wiki.db
+.wikiloom.lock
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+"""
+
+SQLITE_SCHEMA = """\
+CREATE TABLE IF NOT EXISTS pages (
+    page_id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    type TEXT NOT NULL,
+    status TEXT DEFAULT 'active',
+    summary TEXT,
+    created TEXT NOT NULL,
+    modified TEXT NOT NULL,
+    source_count INTEGER DEFAULT 0,
+    inbound_links INTEGER DEFAULT 0,
+    outbound_links INTEGER DEFAULT 0,
+    confidence TEXT DEFAULT 'medium',
+    human_edited BOOLEAN DEFAULT 0,
+    content_hash TEXT
+);
+
+CREATE TABLE IF NOT EXISTS aliases (
+    alias TEXT NOT NULL,
+    page_id TEXT NOT NULL,
+    FOREIGN KEY (page_id) REFERENCES pages(page_id),
+    PRIMARY KEY (alias, page_id)
+);
+
+CREATE TABLE IF NOT EXISTS backlinks (
+    source_page TEXT NOT NULL,
+    target_page TEXT NOT NULL,
+    context TEXT,
+    confidence TEXT DEFAULT 'high',
+    linked_at TEXT NOT NULL,
+    PRIMARY KEY (source_page, target_page)
+);
+
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    description TEXT,
+    pages_created TEXT,
+    pages_updated TEXT,
+    tokens_used INTEGER DEFAULT 0,
+    cost_usd REAL DEFAULT 0.0,
+    git_hash TEXT
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS pages_fts USING fts5(page_id, title, summary);
+"""
+
+
+def _generate_config(name: str, domain: str) -> str:
+    """Generate wikiloom.toml content."""
+    return f"""\
+[project]
+name = "{name}"
+domain = "{domain}"
+created = "{now_iso()}"
+schema_version = 1
+
+[llm]
+provider = "anthropic"
+model = "claude-sonnet-4-20250514"
+max_tokens_per_operation = 8000
+monthly_budget_usd = 50.0
+
+[linking]
+ner_model = "en_core_web_sm"
+auto_create_stubs = true
+high_confidence_threshold = 95
+medium_confidence_threshold = 85
+low_confidence_threshold = 70
+
+[staleness]
+default_window_days = 90
+entity_window_days = 180
+concept_window_days = 120
+synthesis_window_days = 60
+
+[search]
+engine = "grep"
+"""
+
+
+def _sub_index_content(category: str) -> str:
+    """Generate a sub-index template for a wiki category."""
+    title = category.capitalize()
+    return f"""\
+---
+title: "{title} Index"
+type: "index"
+status: "active"
+created: "{now_iso()}"
+modified: "{now_iso()}"
+summary: "Index of all {category} pages."
+aliases: []
+sources: []
+source_count: 0
+confidence: "high"
+staleness_window_days: 365
+human_edited: false
+human_edited_at: null
+superseded_by: null
+contradictions: []
+tags: []
+---
+
+# {title}
+
+*No pages yet.*
+"""
+
+
+def _root_index_content(name: str) -> str:
+    """Generate the root wiki index."""
+    return f"""\
+---
+title: "{name} Wiki"
+type: "index"
+status: "active"
+created: "{now_iso()}"
+modified: "{now_iso()}"
+summary: "Root index for the {name} knowledge base."
+aliases: []
+sources: []
+source_count: 0
+confidence: "high"
+staleness_window_days: 365
+human_edited: false
+human_edited_at: null
+superseded_by: null
+contradictions: []
+tags: []
+---
+
+# {name}
+
+## Sections
+
+- [Entities](entities/index.md)
+- [Concepts](concepts/index.md)
+- [Sources](sources/index.md)
+- [Syntheses](syntheses/index.md)
+- [Decisions](decisions/index.md)
+- [Archive](archive/index.md)
+"""
+
+
+def _copy_templates(dest: Path) -> None:
+    """Copy template files from the package to .wikiloom/ directory."""
+    templates_pkg = importlib_resources.files("wikiloom") / "templates"
+
+    # schema.md
+    schema_src = templates_pkg / "schema.md"
+    (dest / "schema.md").write_text(
+        schema_src.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+
+    # prompts/
+    prompts_dir = dest / "prompts"
+    prompts_dir.mkdir(exist_ok=True)
+    for prompt_name in ("ingest.md", "query.md", "lint.md"):
+        src = templates_pkg / "prompts" / prompt_name
+        (prompts_dir / prompt_name).write_text(
+            src.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+
+    # output_formats/
+    formats_dir = dest / "output_formats"
+    formats_dir.mkdir(exist_ok=True)
+    for fmt_name in ("ingest_response.json", "query_response.json"):
+        src = templates_pkg / "output_formats" / fmt_name
+        (formats_dir / fmt_name).write_text(
+            src.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+
+
+def _init_sqlite(db_path: Path) -> None:
+    """Initialize the SQLite query cache with schema."""
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(SQLITE_SCHEMA)
+    conn.close()
+
+
+def _init_git(project_dir: Path) -> None:
+    """Initialize a git repository if one doesn't exist."""
+    from git import Repo
+    from git.exc import InvalidGitRepositoryError
+
+    try:
+        Repo(project_dir)
+    except InvalidGitRepositoryError:
+        Repo.init(project_dir)
+
+
+def init_project(
+    name: str,
+    path: Path | None = None,
+    domain: str = "",
+) -> Path:
+    """Create a new WikiLoom project with full directory structure.
+
+    Args:
+        name: Project name (used in config and index).
+        path: Parent directory. Defaults to current directory.
+        domain: Optional domain description (e.g. "AI safety research").
+
+    Returns:
+        Path to the created project directory.
+    """
+    if path is None:
+        path = Path.cwd()
+
+    project_dir = path / name
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    # raw/ subdirectories
+    for subdir in RAW_SUBDIRS:
+        (project_dir / "raw" / subdir).mkdir(parents=True, exist_ok=True)
+
+    # wiki/ subdirectories with index files
+    wiki_dir = project_dir / "wiki"
+    wiki_dir.mkdir(exist_ok=True)
+
+    # Root index
+    (wiki_dir / "index.md").write_text(
+        _root_index_content(name), encoding="utf-8"
+    )
+
+    # Event log
+    (wiki_dir / "log.md").write_text(
+        "# WikiLoom Event Log\n\n", encoding="utf-8"
+    )
+
+    # Sub-indexes
+    for subdir in WIKI_SUBDIRS:
+        sub_path = wiki_dir / subdir
+        sub_path.mkdir(exist_ok=True)
+        (sub_path / "index.md").write_text(
+            _sub_index_content(subdir), encoding="utf-8"
+        )
+
+    # _registry/
+    registry_dir = project_dir / "_registry"
+    registry_dir.mkdir(exist_ok=True)
+
+    # Empty manifest
+    manifest = {
+        "version": 1,
+        "updated_at": now_iso(),
+        "pages": {},
+    }
+    (registry_dir / "manifest.json").write_text(
+        json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+    )
+
+    # Empty backlinks
+    (registry_dir / "backlinks.json").write_text(
+        json.dumps({"version": 1, "links": {}}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    # Empty pending
+    (registry_dir / "pending.json").write_text(
+        json.dumps({"version": 1, "pending": []}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    # Schema version
+    schema_version = {
+        "version": 1,
+        "created": now_iso(),
+        "migrations": [],
+    }
+    (registry_dir / "schema_version.json").write_text(
+        json.dumps(schema_version, indent=2) + "\n", encoding="utf-8"
+    )
+
+    # SQLite database
+    _init_sqlite(registry_dir / "wiki.db")
+
+    # .wikiloom/ schema directory
+    wikiloom_dir = project_dir / ".wikiloom"
+    wikiloom_dir.mkdir(exist_ok=True)
+    _copy_templates(wikiloom_dir)
+
+    # wikiloom.toml
+    (project_dir / "wikiloom.toml").write_text(
+        _generate_config(name, domain), encoding="utf-8"
+    )
+
+    # .gitignore
+    (project_dir / ".gitignore").write_text(GITIGNORE_CONTENT, encoding="utf-8")
+
+    # Initialize git
+    _init_git(project_dir)
+
+    return project_dir

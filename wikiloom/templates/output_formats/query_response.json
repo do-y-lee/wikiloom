@@ -1,0 +1,41 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "QueryResponse",
+  "description": "Structured response from LLM after answering a query",
+  "type": "object",
+  "required": ["answer", "sources_consulted", "confidence"],
+  "properties": {
+    "answer": {
+      "type": "string",
+      "description": "The synthesized answer in markdown format"
+    },
+    "sources_consulted": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["page_path", "relevance"],
+        "properties": {
+          "page_path": { "type": "string" },
+          "relevance": {
+            "type": "string",
+            "enum": ["primary", "supporting", "tangential"]
+          }
+        }
+      }
+    },
+    "confidence": {
+      "type": "string",
+      "enum": ["high", "medium", "low"],
+      "description": "Overall confidence in the answer based on available wiki content"
+    },
+    "suggest_synthesis": {
+      "type": "boolean",
+      "description": "Whether this answer should be filed as a synthesis page"
+    },
+    "suggested_followups": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Suggested follow-up queries"
+    }
+  }
+}
