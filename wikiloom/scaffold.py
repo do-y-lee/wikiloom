@@ -26,7 +26,6 @@ RAW_SUBDIRS = [
     "articles",
     "images",
     "code",
-    "audio",
     "misc",
 ]
 
