@@ -1,25 +1,11 @@
-"""Ingest processor — orchestrates extraction, copy-to-raw, budgeting, and chunking.
+"""Ingest processor — single entry point for adding a source to the wiki.
 
-The full pipeline (per spec) is:
-
-    1. Extract text                          [implemented]
-    2. Copy source to raw/                   [implemented]
-    3. Plan context budget                   [implemented — placeholder]
-    4. Chunk if needed                       [implemented]
-    5. LLM synthesize each chunk             [TODO — depends on Component 5 (llm.py)]
-    6. Merge chunk results                   [TODO — depends on llm.py]
-    7. Write pages                           [TODO — depends on Component 5]
-    8. Run linking engine                    [TODO — depends on Component 4 (linker.py)]
-    9. Create source summary                 [TODO]
-    10. Update manifest and indexes          [partial — registry + backlinks sync]
-    10b. Rebuild backlink graph              [implemented]
-    11. Git commit                           [implemented]
-    12. SQLite sync                          [TODO — depends on Component 12 (cache.py)]
-    13. Log event                            [implemented]
-
-This module implements steps 1-4 and 13 today. The remaining steps will
-be wired up as their owning components land. The shape of `ingest()` and
-its return type are stable so downstream code can be added incrementally.
+Runs the full ingest pipeline under ``FileLock`` so concurrent ingests
+serialize cleanly. The ``IngestResult`` return shape is stable across
+pipeline evolution: new stages fill in ``pages_created`` /
+``pages_updated`` without changing the public API, and every stage that
+produces files stages them into a single ingest git commit so history
+stays atomic.
 """
 
 from __future__ import annotations
