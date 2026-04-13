@@ -45,8 +45,9 @@ from wikiloom.utils import now_iso, page_id_from_path, parse_iso
 @dataclass(frozen=True)
 class BrokenLink:
     source: str          # page_id containing the link
-    target: str          # missing page_id the link points at
+    target: str          # missing-or-inactive page_id the link points at
     context: str         # snippet stored in backlinks.json
+    reason: str = "missing"  # "missing" | "deprecated" | "stub" | "archived"
 
 
 @dataclass(frozen=True)
@@ -239,23 +240,41 @@ class WikiLinter:
     # ------------------------------------------------------------------
 
     def check_broken_links(self) -> list[BrokenLink]:
-        """Edges whose target isn't in the manifest.
+        """Edges whose target is missing or retired.
 
         Reads from ``backlinks.json`` (already rebuilt by the ingest
         pipeline) rather than re-parsing bodies — cheaper and keeps the
         wikilink regex as a single source of truth in ``backlinks.py``.
+
+        Classification:
+
+        - **missing**: target absent from the manifest → ``--fix`` strips
+          the wikilink wrapper.
+        - **deprecated** / **archived**: target was explicitly retired →
+          ``--fix`` strips the wrapper (callers may want to redirect to
+          ``superseded_by`` in a future pass).
+        - **stub**: deliberately *not* flagged. Stubs are placeholder
+          pages the linker created for unresolved entities; links to
+          them are expected to stay until the stub gets filled in, and
+          ``check_stubs`` tracks them separately.
         """
         broken: list[BrokenLink] = []
-        known = set(self.registry.pages.keys())
         for edge in self.backlinks._edges:
-            if edge.target not in known:
-                broken.append(
-                    BrokenLink(
-                        source=edge.source,
-                        target=edge.target,
-                        context=edge.context,
-                    )
+            entry = self.registry.get_page(edge.target)
+            if entry is None:
+                reason = "missing"
+            elif entry.status == "active" or entry.status == "stub":
+                continue
+            else:
+                reason = entry.status  # "deprecated" | "archived" | ...
+            broken.append(
+                BrokenLink(
+                    source=edge.source,
+                    target=edge.target,
+                    context=edge.context,
+                    reason=reason,
                 )
+            )
         return broken
 
     def check_orphans(self) -> list[str]:

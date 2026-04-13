@@ -23,6 +23,8 @@ from wikiloom.ingest.extractors.base import ExtractedContent
 from wikiloom.locking import FileLock
 from wikiloom.registry import Registry
 from wikiloom.search import IndexUpdater
+from wikiloom.source_catalog import SourceCatalog, SourceEntry, hash_file
+from wikiloom.utils import now_iso
 
 # Default mapping from content_type → raw/ subdirectory
 RAW_DEST_BY_CONTENT_TYPE: dict[str, str] = {
@@ -84,6 +86,7 @@ def ingest(
     source: Path | str,
     project_root: Path,
     max_tokens_per_operation: int = 8000,
+    force: bool = False,
 ) -> IngestResult:
     """Run the ingest pipeline for a single source.
 
@@ -91,17 +94,44 @@ def ingest(
         source: Local file path or URL.
         project_root: Project root directory containing wiki/, raw/, _registry/.
         max_tokens_per_operation: Token budget for the LLM call (used for chunking).
+        force: Re-run the full pipeline even if the source hash is already
+            in the catalog. Without this flag, a repeat ingest of an
+            identical local file is a cheap no-op that only bumps the
+            catalog's ``ingest_count``.
 
     Returns:
         IngestResult describing what happened. Holds the lock for the
         duration of the operation so concurrent runs are serialized.
+
+    URL sources: URLs are passed through to the WebExtractor and work
+    end-to-end for extraction, but they bypass the raw/ copy (nothing
+    to copy) and the content-hash dedup (we'd have to fetch before we
+    could hash). URL dedup lands alongside Component 20.
     """
     project_root = Path(project_root)
+    is_url = isinstance(source, str) and source.startswith(("http://", "https://"))
+    source_path = Path(source)
 
     with FileLock(project_root):
+        # 0. Dedup check — only for local files. Cheap hash before we
+        # pay the extraction cost (which will matter a lot more when
+        # Component 20 wires LLM synthesis into the pipeline).
+        catalog: SourceCatalog | None = None
+        content_hash: str | None = None
+        registry_dir = project_root / "_registry"
+        if registry_dir.exists() and not is_url and source_path.is_file():
+            catalog = SourceCatalog(registry_dir)
+            content_hash = hash_file(source_path)
+            if catalog.has(content_hash) and not force:
+                catalog.touch(content_hash)
+                catalog.save()
+                existing = catalog.get(content_hash)
+                return _already_ingested_result(
+                    source_path, existing, content_hash
+                )
+
         # 1. Extract
         extractor = router.route(source)
-        source_path = Path(source) if not str(source).startswith(("http://", "https://")) else Path(str(source))
         content = extractor.extract(source_path)
 
         # 2. Copy to raw/
@@ -124,11 +154,8 @@ def ingest(
             budget=budget,
         )
 
-        # 5-10, 12. LLM / write / link / sync — pending later components.
-        result.notes.append(
-            "LLM synthesis, page writing, linking, and SQLite sync "
-            "are pending Components 4-5 and 12."
-        )
+        # LLM synthesis, page writing, linking, and SQLite sync land
+        # with Component 20 + the LLM enablement pass.
 
         # 10b. Rebuild backlink graph and sync inbound/outbound counts
         # back to the manifest. Full rebuild is wasteful at scale but
@@ -189,6 +216,41 @@ def ingest(
             },
         ) or None
 
+        # 12b. Record / update the source catalog so future ingests of
+        # the same content are cheap no-ops. URL sources skip this —
+        # see the docstring note on URL dedup.
+        if catalog is not None and content_hash is not None:
+            existing = catalog.get(content_hash)
+            if existing is None:
+                size = source_path.stat().st_size if source_path.is_file() else 0
+                raw_rel = (
+                    str(raw_path.relative_to(project_root))
+                    if raw_path is not None
+                    else None
+                )
+                catalog.record(
+                    SourceEntry(
+                        content_hash=content_hash,
+                        name=source_path.name,
+                        content_type=content.content_type,
+                        size_bytes=size,
+                        raw_path=raw_rel,
+                        first_ingested_at=now_iso(),
+                        last_ingested_at=now_iso(),
+                        ingest_count=1,
+                        pages_produced=list(
+                            result.pages_created + result.pages_updated
+                        ),
+                    )
+                )
+            else:
+                existing.ingest_count += 1
+                existing.last_ingested_at = now_iso()
+                for page in result.pages_created + result.pages_updated:
+                    if page not in existing.pages_produced:
+                        existing.pages_produced.append(page)
+            catalog.save()
+
         # 13. Log event. Written *after* the commit so the event can
         # carry the commit hash. The resulting log.md change is picked up
         # by the next commit (ingest, lint, etc.) — acceptable staleness.
@@ -204,3 +266,32 @@ def ingest(
             append_event(log_path, event)
 
         return result
+
+
+def _already_ingested_result(
+    source_path: Path,
+    existing: SourceEntry | None,
+    content_hash: str,
+) -> IngestResult:
+    """Build an IngestResult for a dedup hit without running extraction."""
+    placeholder_content = ExtractedContent(
+        text="",
+        metadata={"content_hash": content_hash},
+        source_path=source_path,
+        content_type=existing.content_type if existing else "",
+        extraction_method="dedup-skip",
+        token_estimate=0,
+    )
+    result = IngestResult(
+        source_path=source_path,
+        raw_path=None,
+        content=placeholder_content,
+        chunks=[],
+        budget=plan_budget(placeholder_content, 8000),
+    )
+    result.notes.append(
+        f"Source already in catalog (hash={content_hash[:12]}, "
+        f"ingested {existing.ingest_count if existing else 1}x). "
+        f"Pass force=True to re-run the pipeline."
+    )
+    return result

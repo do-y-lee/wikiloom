@@ -26,6 +26,16 @@ import git
 from git.exc import InvalidGitRepositoryError, NoSuchPathError
 
 
+# Prefixes that identify a wikiloom-generated commit. Any commit whose
+# subject prefix is NOT in this set is treated as human-authored — this
+# catches both explicit ``human-edit:`` commits and plain-message
+# commits made outside the wikiloom CLI (e.g. a quick edit in the user's
+# editor followed by ``git commit -m "fix typo"``).
+AUTO_COMMIT_TYPES: frozenset[str] = frozenset(
+    {"ingest", "query", "lint", "merge", "deprecate", "migration"}
+)
+
+
 @dataclass(frozen=True)
 class CommitInfo:
     """Summary of a single commit affecting a file."""
@@ -190,16 +200,28 @@ class GitOps:
         return history
 
     def is_human_edited(self, file_path: Path) -> bool:
-        """True if the most recent commit touching ``file_path`` is a human edit.
+        """True if the most recent commit touching ``file_path`` is human-authored.
 
         Git is the source of truth: we classify by the subject prefix
         rather than a frontmatter flag or author name, because LLM commits
-        share the local git identity with human commits.
+        share the local git identity with human commits. Any commit whose
+        prefix is not in ``AUTO_COMMIT_TYPES`` — including explicit
+        ``human-edit:`` commits *and* plain-message commits made outside
+        the wikiloom CLI — is treated as human.
+        """
+        info = self.latest_commit_type(file_path)
+        if info is None:
+            return False
+        return info not in AUTO_COMMIT_TYPES
+
+    def latest_commit_type(self, file_path: Path) -> str | None:
+        """Return the parsed commit-type prefix for the most recent commit
+        touching ``file_path``, or ``None`` if the file has no history.
         """
         rel = self._rel(file_path)
         if not self.repo.head.is_valid():
-            return False
+            return None
         for c in self.repo.iter_commits(paths=rel, max_count=1):
             msg = c.message if isinstance(c.message, str) else c.message.decode("utf-8")
-            return _parse_commit_type(msg) == "human-edit"
-        return False
+            return _parse_commit_type(msg)
+        return None

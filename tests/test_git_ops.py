@@ -257,6 +257,31 @@ def test_is_human_edited_false_for_untracked(repo: Path) -> None:
     assert ops.is_human_edited(repo / "never-existed.md") is False
 
 
+def test_is_human_edited_true_for_plain_commit_message(repo: Path) -> None:
+    """Commits with a subject that isn't an AUTO prefix count as human.
+
+    This covers the case where a user edits a file in their editor and
+    runs ``git commit -m "fix typo"`` — no ``human-edit:`` prefix, but
+    it's still a human edit.
+    """
+    page = repo / "wiki" / "concepts" / "x.md"
+    _write(page, "body")
+    r = git.Repo(repo)
+    r.index.add(["wiki/concepts/x.md"])
+    r.index.commit("fix typo")
+
+    ops = GitOps(repo)
+    assert ops.is_human_edited(page) is True
+
+
+def test_latest_commit_type_returns_parsed_prefix(repo: Path) -> None:
+    page = repo / "wiki" / "concepts" / "x.md"
+    _write(page, "body")
+    ops = GitOps(repo)
+    ops.commit_ingest("src.pdf", [page], {"pages_created": 1})
+    assert ops.latest_commit_type(page) == "ingest"
+
+
 # ----------------------------------------------------------------------
 # get_changed_files_since
 # ----------------------------------------------------------------------

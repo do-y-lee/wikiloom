@@ -47,12 +47,18 @@ def _find_project_root(start: Path) -> Path | None:
     default=None,
     help="Project root. Defaults to walking upward from the current directory to find wikiloom.toml.",
 )
-def ingest(source: str, project: Path | None) -> None:
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="Re-run the full pipeline even if the source is already in the catalog.",
+)
+def ingest(source: str, project: Path | None, force: bool) -> None:
     """Ingest a source file or URL into the wiki.
 
-    Runs extraction, copies the source to raw/, plans the token budget,
-    and chunks oversized files. The LLM synthesis / linking / commit
-    steps will be wired up as their components land.
+    Extracts content, copies local files to raw/, rebuilds backlinks and
+    indexes, and commits the result. Re-ingesting an identical local
+    file is a cheap no-op (catalog dedup) unless ``--force`` is passed.
     """
     from wikiloom.ingest.processor import ingest as run_ingest
 
@@ -64,7 +70,7 @@ def ingest(source: str, project: Path | None) -> None:
                 "Run inside a project directory or pass --project."
             )
 
-    result = run_ingest(source, project_root=project)
+    result = run_ingest(source, project_root=project, force=force)
 
     click.echo(f"Extracted: {result.content.content_type} "
                f"({result.content.token_estimate} tokens estimated)")
@@ -149,6 +155,59 @@ def lint(fix: bool, check_only: bool, project: Path | None) -> None:
 
 @main.command()
 @click.option(
+    "--sync",
+    is_flag=True,
+    default=False,
+    help="Apply git truth to manifest + frontmatter for drifted pages.",
+)
+@click.option(
+    "--project",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Project root. Defaults to walking upward from the current directory.",
+)
+def protect(sync: bool, project: Path | None) -> None:
+    """Reconcile human-edit flags with git history.
+
+    Default behavior scans for pages whose manifest flag disagrees
+    with git and prints a report. ``--sync`` applies the fix: updates
+    the manifest + frontmatter and emits a HUMAN_EDIT event.
+    """
+    from wikiloom.locking import FileLock
+    from wikiloom.protection import HumanEditProtection
+
+    if project is None:
+        project = _find_project_root(Path.cwd())
+        if project is None:
+            raise click.ClickException(
+                "Could not find a WikiLoom project (no wikiloom.toml found)."
+            )
+
+    pp = HumanEditProtection(project)
+    if sync:
+        with FileLock(project):
+            drifted = pp.sync()
+    else:
+        drifted = pp.scan()
+
+    if not drifted:
+        click.echo("Human-edit flags are in sync with git.")
+        return
+
+    verb = "Reclassified" if sync else "Drift detected on"
+    click.echo(f"{verb} {len(drifted)} page(s):")
+    for page in drifted:
+        arrow = "→" if page.git_says else "←"
+        click.echo(
+            f"  {page.page_id} {arrow} human_edited={page.git_says} "
+            f"(last commit: {page.last_commit_type})"
+        )
+    if not sync:
+        raise click.exceptions.Exit(code=1)
+
+
+@main.command()
+@click.option(
     "--project",
     type=click.Path(path_type=Path),
     default=None,
@@ -186,7 +245,7 @@ def _print_report(report) -> None:
     if report.broken_links:
         click.echo(f"  Broken links ({len(report.broken_links)}):")
         for b in report.broken_links[:10]:
-            click.echo(f"    {b.source} → {b.target}")
+            click.echo(f"    {b.source} → {b.target} ({b.reason})")
     if report.orphans:
         click.echo(f"  Orphans ({len(report.orphans)}): {', '.join(report.orphans[:10])}")
     if report.stale:

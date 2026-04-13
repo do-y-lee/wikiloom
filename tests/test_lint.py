@@ -119,6 +119,41 @@ def test_check_broken_links_flags_missing_target(project: Path) -> None:
     assert broken[0].source == "concepts/a"
 
 
+def test_check_broken_links_flags_deprecated_target(project: Path) -> None:
+    _write_page(project, "concepts/a.md", body="[[concepts/old]]")
+    _write_page(project, "concepts/old.md", status="deprecated")
+    reg = _register(project, "concepts/a")
+    reg.register_page(
+        "concepts/old",
+        PageEntry(title="Old", type="concept", status="deprecated"),
+    )
+    reg.save()
+    _rebuild_backlinks(project)
+
+    linter = WikiLinter(project)
+    broken = linter.check_broken_links()
+    assert len(broken) == 1
+    assert broken[0].target == "concepts/old"
+    assert broken[0].reason == "deprecated"
+
+
+def test_check_broken_links_ignores_stub_targets(project: Path) -> None:
+    """Stubs are placeholders — links to them should stay until the stub
+    is filled in. check_stubs tracks them separately."""
+    _write_page(project, "concepts/a.md", body="[[concepts/stubby]]")
+    _write_page(project, "concepts/stubby.md", status="stub")
+    reg = _register(project, "concepts/a")
+    reg.register_page(
+        "concepts/stubby",
+        PageEntry(title="Stubby", type="concept", status="stub"),
+    )
+    reg.save()
+    _rebuild_backlinks(project)
+
+    linter = WikiLinter(project)
+    assert linter.check_broken_links() == []
+
+
 def test_check_broken_links_clean_when_all_targets_exist(project: Path) -> None:
     _write_page(project, "concepts/a.md", body="[[concepts/b]]")
     _write_page(project, "concepts/b.md", body="body")
