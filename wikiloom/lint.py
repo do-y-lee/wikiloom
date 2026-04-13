@@ -105,6 +105,7 @@ class FixReport:
     broken_links_fixed: int = 0
     stale_marked: int = 0
     frontmatter_repaired: int = 0
+    indexes_rebuilt: int = 0
     skipped_human_edited: int = 0
 
     @property
@@ -113,6 +114,7 @@ class FixReport:
             self.broken_links_fixed
             + self.stale_marked
             + self.frontmatter_repaired
+            + self.indexes_rebuilt
         )
 
 
@@ -215,6 +217,20 @@ class WikiLinter:
                 continue
             if self._repair_frontmatter(page_path):
                 fixes.frontmatter_repaired += 1
+
+        # Index drift: regenerate the drifted sub-indexes (and the root
+        # index, since counts may have shifted). Indexes are derived
+        # state — human-edit protection doesn't apply here.
+        if report.index_drift:
+            from wikiloom.search import IndexUpdater
+
+            updater = IndexUpdater(self.wiki_dir, registry=self.registry)
+            for name in report.index_drift:
+                subdir = self.wiki_dir / name
+                if subdir.is_dir():
+                    updater.rebuild_sub_index(subdir)
+                    fixes.indexes_rebuilt += 1
+            updater.rebuild_root_index()
 
         return fixes
 

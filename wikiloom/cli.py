@@ -147,6 +147,35 @@ def lint(fix: bool, check_only: bool, project: Path | None) -> None:
         raise click.exceptions.Exit(code=1)
 
 
+@main.command()
+@click.option(
+    "--project",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Project root. Defaults to walking upward from the current directory.",
+)
+def reindex(project: Path | None) -> None:
+    """Regenerate the root index and every non-archive sub-index.
+
+    Reads live state from the manifest + on-disk frontmatter, preserves
+    each index file's existing YAML header, and produces deterministic
+    output so unchanged rebuilds don't create cosmetic git diffs.
+    """
+    from wikiloom.locking import FileLock
+    from wikiloom.search import IndexUpdater
+
+    if project is None:
+        project = _find_project_root(Path.cwd())
+        if project is None:
+            raise click.ClickException(
+                "Could not find a WikiLoom project (no wikiloom.toml found)."
+            )
+
+    with FileLock(project):
+        written = IndexUpdater(project / "wiki").rebuild_all()
+    click.echo(f"Rebuilt {len(written)} index file(s).")
+
+
 def _print_report(report) -> None:
     """Render a ``LintReport`` to stdout."""
     if report.is_healthy:

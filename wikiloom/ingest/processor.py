@@ -22,6 +22,7 @@ from wikiloom.ingest.chunker import BudgetPlan, Chunker, plan_budget
 from wikiloom.ingest.extractors.base import ExtractedContent
 from wikiloom.locking import FileLock
 from wikiloom.registry import Registry
+from wikiloom.search import IndexUpdater
 
 # Default mapping from content_type → raw/ subdirectory
 RAW_DEST_BY_CONTENT_TYPE: dict[str, str] = {
@@ -157,6 +158,15 @@ def ingest(
                 registry.save()
                 manifest_path = registry.manifest_path
 
+            # Regenerate indexes *after* manifest save so sub-indexes
+            # read the fresh inbound/outbound counts. All written index
+            # files are staged into the ingest commit below.
+            index_paths: list[Path] = IndexUpdater(
+                project_root / "wiki", registry=registry
+            ).rebuild_all()
+        else:
+            index_paths = []
+
         # 11. Git commit. Empty staging no-ops to HEAD so this is safe
         # during early pipeline development when no pages are written yet.
         git_ops = GitOps(project_root)
@@ -169,6 +179,7 @@ def ingest(
             staged.append(backlinks_path)
         if manifest_path is not None:
             staged.append(manifest_path)
+        staged.extend(index_paths)
         commit_hash = git_ops.commit_ingest(
             source_name=source_path.name,
             files=staged,
