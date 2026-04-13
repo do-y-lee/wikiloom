@@ -12,7 +12,7 @@ The full pipeline (per spec) is:
     8. Run linking engine                    [TODO — depends on Component 4 (linker.py)]
     9. Create source summary                 [TODO]
     10. Update manifest and indexes          [partial — registry exists]
-    11. Git commit                           [TODO — depends on Component 6 (git_ops.py)]
+    11. Git commit                           [implemented]
     12. SQLite sync                          [TODO — depends on Component 12 (cache.py)]
     13. Log event                            [implemented]
 
@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from wikiloom.events import EventType, append_event, create_event
+from wikiloom.git_ops import GitOps
 from wikiloom.ingest import router
 from wikiloom.ingest.chunker import BudgetPlan, Chunker, plan_budget
 from wikiloom.ingest.extractors.base import ExtractedContent
@@ -133,13 +134,32 @@ def ingest(
             budget=budget,
         )
 
-        # 5-12. LLM / write / link / commit / sync — pending later components.
+        # 5-10, 12. LLM / write / link / sync — pending later components.
         result.notes.append(
-            "LLM synthesis, page writing, linking, git commit, and SQLite sync "
-            "are pending Components 4-6 and 12."
+            "LLM synthesis, page writing, linking, and SQLite sync "
+            "are pending Components 4-5 and 12."
         )
 
-        # 13. Log event (best-effort — we still record what we extracted)
+        # 11. Git commit. Empty staging no-ops to HEAD so this is safe
+        # during early pipeline development when no pages are written yet.
+        git_ops = GitOps(project_root)
+        staged: list[Path] = []
+        if raw_path is not None:
+            staged.append(raw_path)
+        for rel in result.pages_created + result.pages_updated:
+            staged.append(project_root / rel)
+        commit_hash = git_ops.commit_ingest(
+            source_name=source_path.name,
+            files=staged,
+            stats={
+                "pages_created": result.pages_created,
+                "pages_updated": result.pages_updated,
+            },
+        ) or None
+
+        # 13. Log event. Written *after* the commit so the event can
+        # carry the commit hash. The resulting log.md change is picked up
+        # by the next commit (ingest, lint, etc.) — acceptable staleness.
         log_path = project_root / "wiki" / "log.md"
         if log_path.parent.exists():
             event = create_event(
@@ -147,6 +167,7 @@ def ingest(
                 description=source_path.name,
                 pages_created=result.pages_created,
                 pages_updated=result.pages_updated,
+                git_commit_hash=commit_hash,
             )
             append_event(log_path, event)
 
