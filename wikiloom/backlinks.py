@@ -35,7 +35,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from wikiloom.utils import now_iso
+from wikiloom.utils import now_iso, page_id_from_path
 
 
 # Wikilinks: [[target]] or [[target|display]]. Target captures 1 or
@@ -61,15 +61,6 @@ class BacklinkEdge:
     context: str
     confidence: str
     linked_at: str
-
-
-def _path_to_id(wiki_dir: Path, page_path: Path) -> str:
-    """Return the canonical ``category/slug`` page_id for a markdown file.
-
-    Mirrors ``LinkingEngine._path_to_id`` so both components agree on IDs.
-    """
-    rel = page_path.resolve().relative_to(wiki_dir.resolve())
-    return rel.with_suffix("").as_posix()
 
 
 def _strip_code(body: str) -> str:
@@ -267,7 +258,7 @@ class BacklinkRegistry:
                 continue
             if md_path.name == "log.md":
                 continue
-            page_id = _path_to_id(target_dir, md_path)
+            page_id = page_id_from_path(target_dir, md_path)
             body = md_path.read_text(encoding="utf-8")
             for edge in self._extract_edges_from_page(body, page_id, now):
                 key = (edge.source, edge.target)

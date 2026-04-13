@@ -34,7 +34,7 @@ from wikiloom.frontmatter import (
 )
 from wikiloom.git_ops import GitOps
 from wikiloom.registry import Registry
-from wikiloom.utils import now_iso, parse_iso
+from wikiloom.utils import now_iso, page_id_from_path, parse_iso
 
 
 # ----------------------------------------------------------------------
@@ -347,7 +347,7 @@ class WikiLinter:
         """Pages missing required frontmatter fields or with no frontmatter."""
         issues: list[str] = []
         for md_path in self._iter_content_pages():
-            page_id = self._path_to_page_id(md_path)
+            page_id = page_id_from_path(self.wiki_dir, md_path)
             fm, _ = parse_frontmatter(md_path.read_text(encoding="utf-8"))
             if fm is None:
                 issues.append(page_id)
@@ -401,7 +401,7 @@ class WikiLinter:
             fm, _ = parse_frontmatter(md_path.read_text(encoding="utf-8"))
             if fm is None or not fm.contradictions:
                 continue
-            page_id = self._path_to_page_id(md_path)
+            page_id = page_id_from_path(self.wiki_dir, md_path)
             for item in fm.contradictions:
                 found.append(
                     Contradiction(
@@ -510,10 +510,6 @@ class WikiLinter:
             if md_path.name in ("index.md", "log.md"):
                 continue
             yield md_path
-
-    def _path_to_page_id(self, md_path: Path) -> str:
-        rel = md_path.resolve().relative_to(self.wiki_dir.resolve())
-        return rel.with_suffix("").as_posix()
 
     def _page_path(self, page_id: str) -> Path | None:
         candidate = self.wiki_dir / f"{page_id}.md"

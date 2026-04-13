@@ -30,7 +30,7 @@ from rapidfuzz import fuzz, process
 from wikiloom.config import LinkingConfig
 from wikiloom.frontmatter import Frontmatter, parse_frontmatter, render_frontmatter
 from wikiloom.registry import PageEntry, Registry
-from wikiloom.utils import now_iso, slugify
+from wikiloom.utils import now_iso, page_id_from_path, slugify
 
 if TYPE_CHECKING:
     import spacy.language
@@ -168,7 +168,10 @@ class LinkingEngine:
         text = page_path.read_text(encoding="utf-8")
         fm, body = parse_frontmatter(text)
 
-        result = self._link_text(body, source_page_id=self._path_to_id(page_path))
+        result = self._link_text(
+            body,
+            source_page_id=page_id_from_path(self.registry.wiki_dir, page_path),
+        )
 
         if fm is not None:
             # Preserve frontmatter when writing back
@@ -459,16 +462,6 @@ class LinkingEngine:
                 # Prefer non-CONCEPT (i.e. a real NER hit) over a chunk overlap
                 seen[key] = (text, label, start, end)
         return sorted(seen.values(), key=lambda c: c[2])
-
-    @staticmethod
-    def _path_to_id(page_path: Path) -> str:
-        """Compute a page_id from a wiki/<category>/<slug>.md path."""
-        parts = page_path.with_suffix("").parts
-        try:
-            wiki_idx = parts.index("wiki")
-            return "/".join(parts[wiki_idx + 1 :])
-        except ValueError:
-            return page_path.stem
 
     # ------------------------------------------------------------------
     # Pending link persistence

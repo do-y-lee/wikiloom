@@ -19,3 +19,6 @@ htmlcov/
 
 # OS
 .DS_Store
+
+# Local-only notes (audit logs, scratchpads)
+*.local.md

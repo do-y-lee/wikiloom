@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
+from pathlib import Path
 
 
 def estimate_tokens(text: str) -> int:
@@ -35,11 +36,14 @@ def parse_iso(timestamp: str) -> datetime:
     return datetime.fromisoformat(timestamp)
 
 
-def page_id_from_path(path: str) -> str:
-    """Convert a relative wiki path to a page ID.
+def page_id_from_path(wiki_dir: Path, md_path: Path) -> str:
+    """Canonical ``category/slug`` page_id for a markdown file.
 
-    e.g. 'entities/google-brain.md' -> 'entities/google-brain'
+    The one-true conversion used by linker, backlinks, lint, and the
+    IndexUpdater. Keeping it here stops each component from re-inventing
+    the same relative-path dance.
+
+    Example: ``/proj/wiki/concepts/attention.md`` → ``concepts/attention``.
     """
-    if path.endswith(".md"):
-        path = path[:-3]
-    return path
+    rel = Path(md_path).resolve().relative_to(Path(wiki_dir).resolve())
+    return rel.with_suffix("").as_posix()

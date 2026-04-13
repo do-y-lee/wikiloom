@@ -385,8 +385,12 @@ def test_create_stubs_writes_files_and_registers(registry: Registry, project: Pa
 
 
 def test_path_to_id_extracts_relative_id(tmp_path: Path) -> None:
+    from wikiloom.utils import page_id_from_path
+
+    (tmp_path / "wiki" / "concepts").mkdir(parents=True)
     p = tmp_path / "wiki" / "concepts" / "attention.md"
-    assert LinkingEngine._path_to_id(p) == "concepts/attention"
+    p.write_text("body")
+    assert page_id_from_path(tmp_path / "wiki", p) == "concepts/attention"
 
 
 # ----------------------------------------------------------------------
