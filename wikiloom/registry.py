@@ -242,12 +242,16 @@ class Registry:
         page_id: str,
         superseded_by: str | None = None,
         move_to_archive: bool = True,
+        emit_event: bool = True,
     ) -> Path | None:
         """Mark a page as deprecated.
 
         Sets ``status="deprecated"``, records ``superseded_by`` if given,
         and (by default) moves the underlying ``.md`` file to
         ``wiki/archive/`` with a slug derived from the original page_id.
+        Emits a DEPRECATE event to ``wiki/log.md`` unless ``emit_event``
+        is False (set to False inside batch operations that emit their
+        own aggregate events).
 
         Returns the new archive path if the file was moved, else None.
         """
@@ -259,20 +263,42 @@ class Registry:
         entry.superseded_by = superseded_by
         entry.modified = now_iso()
 
-        if not move_to_archive:
-            return None
+        archive_path: Path | None = None
+        if move_to_archive:
+            source_path = self.wiki_dir / f"{page_id}.md"
+            if source_path.exists():
+                archive_dir = self.wiki_dir / "archive"
+                archive_dir.mkdir(parents=True, exist_ok=True)
+                # Preserve the original category in the archived filename so
+                # different categories with the same slug don't collide.
+                archive_name = page_id.replace("/", "__") + ".md"
+                archive_path = archive_dir / archive_name
+                shutil.move(str(source_path), str(archive_path))
 
-        source_path = self.wiki_dir / f"{page_id}.md"
-        if not source_path.exists():
-            return None
+        if emit_event:
+            self._emit_deprecate_event(page_id, superseded_by)
 
-        archive_dir = self.wiki_dir / "archive"
-        archive_dir.mkdir(parents=True, exist_ok=True)
-
-        # Preserve the original category in the archived filename so
-        # different categories with the same slug don't collide.
-        archive_name = page_id.replace("/", "__") + ".md"
-        archive_path = archive_dir / archive_name
-
-        shutil.move(str(source_path), str(archive_path))
         return archive_path
+
+    def _emit_deprecate_event(
+        self, page_id: str, superseded_by: str | None
+    ) -> None:
+        """Append a DEPRECATE entry to wiki/log.md.
+
+        Imported lazily to avoid a circular dependency with events.py.
+        """
+        from wikiloom.events import EventType, append_event, create_event
+
+        log_path = self.wiki_dir / "log.md"
+        if not log_path.parent.exists():
+            return  # no wiki/ directory — nothing to log to
+
+        description = (
+            f"{page_id} → {superseded_by}" if superseded_by else page_id
+        )
+        event = create_event(
+            EventType.DEPRECATE,
+            description=description,
+            pages_deprecated=[page_id],
+        )
+        append_event(log_path, event)

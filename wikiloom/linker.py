@@ -515,12 +515,17 @@ class LinkingEngine:
     # ------------------------------------------------------------------
 
     def _create_stubs(self, unresolved: list[UnresolvedEntity]) -> int:
-        """Create minimal stub pages for unresolved entities."""
+        """Create minimal stub pages for unresolved entities.
+
+        Emits a single STUB_CREATED event listing every stub created in
+        this batch (one event per call, not per stub).
+        """
         wiki_dir = self.registry.wiki_dir
         if not wiki_dir.exists():
             return 0
 
         created = 0
+        created_page_ids: list[str] = []
         seen_slugs: set[str] = set()
         for entity in unresolved:
             slug = slugify(entity.text)
@@ -566,6 +571,29 @@ class LinkingEngine:
                 confidence="low",
             )
             self.registry.register_page(page_id, entry)
+            created_page_ids.append(page_id)
             created += 1
 
+        if created_page_ids:
+            self._emit_stub_created_event(created_page_ids)
+
         return created
+
+    def _emit_stub_created_event(self, page_ids: list[str]) -> None:
+        """Append a STUB_CREATED entry to wiki/log.md.
+
+        Imported lazily to avoid pulling events.py into the linker's
+        public import surface.
+        """
+        from wikiloom.events import EventType, append_event, create_event
+
+        log_path = self.registry.wiki_dir / "log.md"
+        if not log_path.parent.exists():
+            return
+
+        event = create_event(
+            EventType.STUB_CREATED,
+            description=f"{len(page_ids)} stub(s)",
+            pages_created=page_ids,
+        )
+        append_event(log_path, event)

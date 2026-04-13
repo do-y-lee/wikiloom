@@ -60,12 +60,29 @@ class WikiEvent:
 
 
 def append_event(log_path: Path, event: WikiEvent) -> None:
-    """Append an event entry to the wiki log file."""
+    """Append an event entry to the wiki log file.
+
+    Locking convention
+    ------------------
+    This function does NOT acquire ``FileLock`` itself. Callers are
+    responsible for holding the project lock if there's any chance of
+    concurrent writers. In practice:
+
+    - During ``wikiloom ingest``, the ingest processor holds ``FileLock``
+      for the whole pipeline, so any events emitted by inner steps
+      (linker stub creation, registry mutations) are already protected.
+    - For standalone callers (e.g. a future ``wikiloom deprecate``
+      command), the caller MUST acquire ``FileLock`` before calling this
+      function or risk corrupting ``wiki/log.md``.
+
+    The file is created with a header on first write if it doesn't exist.
+    """
     entry = event.to_log_entry()
     if log_path.exists():
         existing = log_path.read_text(encoding="utf-8")
         log_path.write_text(existing + "\n" + entry, encoding="utf-8")
     else:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
         header = "# WikiLoom Event Log\n\n"
         log_path.write_text(header + entry, encoding="utf-8")
 
