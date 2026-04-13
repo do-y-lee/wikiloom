@@ -575,6 +575,11 @@ class LinkingEngine:
             created += 1
 
         if created_page_ids:
+            # Persist the manifest so lint + subsequent runs see the new
+            # stubs on disk. The linker is the only mutator between ingest
+            # and lint, so saving here keeps the invariant without
+            # requiring every caller to remember.
+            self.registry.save()
             self._emit_stub_created_event(created_page_ids)
 
         return created
