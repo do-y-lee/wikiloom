@@ -11,7 +11,8 @@ The full pipeline (per spec) is:
     7. Write pages                           [TODO — depends on Component 5]
     8. Run linking engine                    [TODO — depends on Component 4 (linker.py)]
     9. Create source summary                 [TODO]
-    10. Update manifest and indexes          [partial — registry exists]
+    10. Update manifest and indexes          [partial — registry + backlinks sync]
+    10b. Rebuild backlink graph              [implemented]
     11. Git commit                           [implemented]
     12. SQLite sync                          [TODO — depends on Component 12 (cache.py)]
     13. Log event                            [implemented]
@@ -27,12 +28,14 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from wikiloom.backlinks import BacklinkRegistry
 from wikiloom.events import EventType, append_event, create_event
 from wikiloom.git_ops import GitOps
 from wikiloom.ingest import router
 from wikiloom.ingest.chunker import BudgetPlan, Chunker, plan_budget
 from wikiloom.ingest.extractors.base import ExtractedContent
 from wikiloom.locking import FileLock
+from wikiloom.registry import Registry
 
 # Default mapping from content_type → raw/ subdirectory
 RAW_DEST_BY_CONTENT_TYPE: dict[str, str] = {
@@ -140,6 +143,34 @@ def ingest(
             "are pending Components 4-5 and 12."
         )
 
+        # 10b. Rebuild backlink graph and sync inbound/outbound counts
+        # back to the manifest. Full rebuild is wasteful at scale but
+        # correct at every size; incremental comes in a later pass.
+        backlinks_path: Path | None = None
+        manifest_path: Path | None = None
+        registry_dir = project_root / "_registry"
+        if registry_dir.exists():
+            backlinks = BacklinkRegistry(registry_dir, project_root / "wiki")
+            backlinks.rebuild()
+            backlinks.save()
+            backlinks_path = backlinks.backlinks_path
+
+            registry = Registry(registry_dir)
+            counts = backlinks.link_counts()
+            manifest_dirty = False
+            for page_id, entry in registry.pages.items():
+                inbound, outbound = counts.get(page_id, (0, 0))
+                if (
+                    entry.inbound_link_count != inbound
+                    or entry.outbound_link_count != outbound
+                ):
+                    entry.inbound_link_count = inbound
+                    entry.outbound_link_count = outbound
+                    manifest_dirty = True
+            if manifest_dirty:
+                registry.save()
+                manifest_path = registry.manifest_path
+
         # 11. Git commit. Empty staging no-ops to HEAD so this is safe
         # during early pipeline development when no pages are written yet.
         git_ops = GitOps(project_root)
@@ -148,6 +179,10 @@ def ingest(
             staged.append(raw_path)
         for rel in result.pages_created + result.pages_updated:
             staged.append(project_root / rel)
+        if backlinks_path is not None:
+            staged.append(backlinks_path)
+        if manifest_path is not None:
+            staged.append(manifest_path)
         commit_hash = git_ops.commit_ingest(
             source_name=source_path.name,
             files=staged,
