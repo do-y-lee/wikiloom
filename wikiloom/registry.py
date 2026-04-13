@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from wikiloom.utils import now_iso, parse_iso
 
@@ -16,6 +17,7 @@ class PageEntry:
 
     title: str
     type: str  # entity, concept, source, synthesis, decision
+    page_id: str = ""  # populated by Registry; not persisted in to_dict
     status: str = "active"
     aliases: list[str] = field(default_factory=list)
     created: str = ""
@@ -27,6 +29,7 @@ class PageEntry:
     confidence: str = "medium"
     staleness_window_days: int = 90
     human_edited: bool = False
+    superseded_by: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -43,6 +46,7 @@ class PageEntry:
             "confidence": self.confidence,
             "staleness_window_days": self.staleness_window_days,
             "human_edited": self.human_edited,
+            "superseded_by": self.superseded_by,
         }
 
     @classmethod
@@ -61,6 +65,7 @@ class PageEntry:
             confidence=data.get("confidence", "medium"),
             staleness_window_days=data.get("staleness_window_days", 90),
             human_edited=data.get("human_edited", False),
+            superseded_by=data.get("superseded_by"),
         )
 
 
@@ -81,13 +86,19 @@ class Registry:
     Loaded once per operation, modified in memory, saved once at end.
     """
 
-    def __init__(self, registry_dir: Path):
-        self.registry_dir = registry_dir
-        self.manifest_path = registry_dir / "manifest.json"
+    def __init__(self, registry_dir: Path, wiki_dir: Path | None = None):
+        self.registry_dir = Path(registry_dir)
+        self.manifest_path = self.registry_dir / "manifest.json"
+        # Convention: wiki/ sits next to _registry/. Caller can override.
+        self.wiki_dir = Path(wiki_dir) if wiki_dir else self.registry_dir.parent / "wiki"
         self._version: int = 1
         self._updated_at: str = now_iso()
         self._pages: dict[str, PageEntry] = {}
         self._load()
+
+    # ------------------------------------------------------------------
+    # Persistence
+    # ------------------------------------------------------------------
 
     def _load(self) -> None:
         """Load manifest from disk."""
@@ -97,7 +108,35 @@ class Registry:
         self._version = data.get("version", 1)
         self._updated_at = data.get("updated_at", now_iso())
         for page_id, page_data in data.get("pages", {}).items():
-            self._pages[page_id] = PageEntry.from_dict(page_data)
+            entry = PageEntry.from_dict(page_data)
+            entry.page_id = page_id
+            self._pages[page_id] = entry
+
+    def save(self) -> None:
+        """Save the manifest to disk."""
+        self._updated_at = now_iso()
+        data = {
+            "version": self._version,
+            "updated_at": self._updated_at,
+            "pages": {
+                page_id: entry.to_dict()
+                for page_id, entry in self._pages.items()
+            },
+        }
+        self.registry_dir.mkdir(parents=True, exist_ok=True)
+        self.manifest_path.write_text(
+            json.dumps(data, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+
+    # ------------------------------------------------------------------
+    # Read API
+    # ------------------------------------------------------------------
+
+    @property
+    def pages(self) -> dict[str, PageEntry]:
+        """Read-only view of all pages by ID. Used by the linking engine."""
+        return self._pages
 
     def get_page(self, page_id: str) -> PageEntry | None:
         """Get a page entry by its ID."""
@@ -118,28 +157,20 @@ class Registry:
         return items
 
     def find_by_alias(self, alias: str) -> PageEntry | None:
-        """Find a page by one of its aliases (case-insensitive)."""
+        """Find a page by one of its aliases or title (case-insensitive)."""
         alias_lower = alias.lower()
         for entry in self._pages.values():
-            if alias_lower in (a.lower() for a in entry.aliases):
-                return entry
             if entry.title.lower() == alias_lower:
+                return entry
+            if alias_lower in (a.lower() for a in entry.aliases):
                 return entry
         return None
 
-    def register_page(self, page_id: str, entry: PageEntry) -> None:
-        """Register a new page or update an existing one."""
-        self._pages[page_id] = entry
-
-    def deprecate_page(self, page_id: str, superseded_by: str | None = None) -> None:
-        """Mark a page as deprecated."""
-        entry = self._pages.get(page_id)
-        if entry:
-            entry.status = "deprecated"
-            entry.modified = now_iso()
-
     def get_all_aliases(self) -> dict[str, str]:
-        """Return a mapping of alias -> page_id for all active pages."""
+        """Return a mapping of alias -> page_id for all active pages.
+
+        Includes each page's title and every alias, all lowercased.
+        """
         aliases: dict[str, str] = {}
         for page_id, entry in self._pages.items():
             if entry.status != "active":
@@ -149,32 +180,99 @@ class Registry:
                 aliases[alias.lower()] = page_id
         return aliases
 
-    def get_stale_pages(self) -> list[tuple[str, PageEntry]]:
-        """Return pages that exceed their staleness window."""
-        stale = []
+    def get_stale_pages(self) -> list[PageEntry]:
+        """Return active pages that exceed their staleness window."""
+        stale: list[PageEntry] = []
         now = parse_iso(now_iso())
-        for page_id, entry in self._pages.items():
+        for entry in self._pages.values():
             if entry.status != "active" or not entry.modified:
                 continue
-            modified = parse_iso(entry.modified)
+            try:
+                modified = parse_iso(entry.modified)
+            except ValueError:
+                continue
             age_days = (now - modified).days
             if age_days > entry.staleness_window_days:
-                stale.append((page_id, entry))
+                stale.append(entry)
         return stale
 
-    def save(self) -> None:
-        """Save the manifest to disk."""
-        self._updated_at = now_iso()
-        data = {
-            "version": self._version,
-            "updated_at": self._updated_at,
-            "pages": {
-                page_id: entry.to_dict()
-                for page_id, entry in self._pages.items()
-            },
-        }
-        self.registry_dir.mkdir(parents=True, exist_ok=True)
-        self.manifest_path.write_text(
-            json.dumps(data, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
+    # ------------------------------------------------------------------
+    # Write API
+    # ------------------------------------------------------------------
+
+    def register_page(self, page_id: str, entry: PageEntry) -> None:
+        """Register a new page or update an existing one."""
+        entry.page_id = page_id
+        if not entry.created:
+            entry.created = now_iso()
+        entry.modified = now_iso()
+        self._pages[page_id] = entry
+
+    def update(self, entries: Iterable[tuple[str, PageEntry] | PageEntry]) -> None:
+        """Bulk-register or refresh a collection of pages.
+
+        Accepts either ``(page_id, PageEntry)`` tuples or ``PageEntry``
+        objects whose ``page_id`` field is already populated. This is the
+        method the ingest processor calls after writing pages to disk.
+        """
+        for item in entries:
+            if isinstance(item, tuple):
+                page_id, entry = item
+            else:
+                entry = item
+                page_id = entry.page_id
+                if not page_id:
+                    raise ValueError(
+                        "PageEntry passed to update() must have page_id set"
+                    )
+            self.register_page(page_id, entry)
+
+    def add_alias(self, page_id: str, alias: str) -> None:
+        """Add a new alias to an existing page (used by the review workflow)."""
+        entry = self._pages.get(page_id)
+        if entry is None:
+            raise KeyError(f"Unknown page_id: {page_id}")
+        normalized = alias.lower().strip()
+        if normalized and normalized not in (a.lower() for a in entry.aliases):
+            entry.aliases.append(normalized)
+            entry.modified = now_iso()
+
+    def deprecate_page(
+        self,
+        page_id: str,
+        superseded_by: str | None = None,
+        move_to_archive: bool = True,
+    ) -> Path | None:
+        """Mark a page as deprecated.
+
+        Sets ``status="deprecated"``, records ``superseded_by`` if given,
+        and (by default) moves the underlying ``.md`` file to
+        ``wiki/archive/`` with a slug derived from the original page_id.
+
+        Returns the new archive path if the file was moved, else None.
+        """
+        entry = self._pages.get(page_id)
+        if entry is None:
+            return None
+
+        entry.status = "deprecated"
+        entry.superseded_by = superseded_by
+        entry.modified = now_iso()
+
+        if not move_to_archive:
+            return None
+
+        source_path = self.wiki_dir / f"{page_id}.md"
+        if not source_path.exists():
+            return None
+
+        archive_dir = self.wiki_dir / "archive"
+        archive_dir.mkdir(parents=True, exist_ok=True)
+
+        # Preserve the original category in the archived filename so
+        # different categories with the same slug don't collide.
+        archive_name = page_id.replace("/", "__") + ".md"
+        archive_path = archive_dir / archive_name
+
+        shutil.move(str(source_path), str(archive_path))
+        return archive_path
