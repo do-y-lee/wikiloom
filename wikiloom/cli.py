@@ -60,6 +60,7 @@ def ingest(source: str, project: Path | None, force: bool) -> None:
     indexes, and commits the result. Re-ingesting an identical local
     file is a cheap no-op (catalog dedup) unless ``--force`` is passed.
     """
+    from wikiloom.ingest.errors import IngestError
     from wikiloom.ingest.processor import ingest as run_ingest
 
     if project is None:
@@ -70,7 +71,10 @@ def ingest(source: str, project: Path | None, force: bool) -> None:
                 "Run inside a project directory or pass --project."
             )
 
-    result = run_ingest(source, project_root=project, force=force)
+    try:
+        result = run_ingest(source, project_root=project, force=force)
+    except IngestError as exc:
+        raise click.ClickException(str(exc)) from exc
 
     click.echo(f"Extracted: {result.content.content_type} "
                f"({result.content.token_estimate} tokens estimated)")

@@ -15,11 +15,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from wikiloom.backlinks import BacklinkRegistry
+from wikiloom.config import Config, IngestConfig
 from wikiloom.events import EventType, append_event, create_event
 from wikiloom.git_ops import GitOps
 from wikiloom.ingest import router
 from wikiloom.ingest.chunker import BudgetPlan, Chunker, plan_budget
+from wikiloom.ingest.errors import EmptyExtractionError, FileTooLargeError
 from wikiloom.ingest.extractors.base import ExtractedContent
+from wikiloom.ingest.state import ChunkState, IngestState
 from wikiloom.locking import FileLock
 from wikiloom.registry import Registry
 from wikiloom.search import IndexUpdater
@@ -82,6 +85,56 @@ def copy_to_raw(source_path: Path, content: ExtractedContent, project_root: Path
 # ----------------------------------------------------------------------
 
 
+def _guard_file_size(source_path: Path, ingest_cfg: IngestConfig) -> None:
+    """Fail fast when a local source exceeds the configured size cap."""
+    if ingest_cfg.max_file_size_mb <= 0:
+        return
+    if not source_path.exists() or not source_path.is_file():
+        return
+    size_bytes = source_path.stat().st_size
+    size_mb = size_bytes / (1024 * 1024)
+    if size_mb > ingest_cfg.max_file_size_mb:
+        raise FileTooLargeError(
+            path=str(source_path),
+            size_mb=size_mb,
+            limit_mb=ingest_cfg.max_file_size_mb,
+        )
+
+
+def _guard_empty_extraction(
+    content: ExtractedContent, ingest_cfg: IngestConfig
+) -> None:
+    """Fail fast when extraction returned too little text to be useful.
+
+    Skips extractors that always emit a placeholder string (image,
+    code) since their byte count reflects the wrapper, not real
+    content. A scanned PDF or blank document gets caught here before
+    the LLM loop wastes tokens on empty input.
+    """
+    if content.content_type in {"image", "code"}:
+        return
+    chars = len(content.text.strip())
+    if chars < ingest_cfg.min_extracted_chars:
+        raise EmptyExtractionError(
+            path=str(content.source_path) if content.source_path else "<unknown>",
+            content_type=content.content_type,
+            extracted_chars=chars,
+        )
+
+
+def _load_ingest_config(project_root: Path) -> IngestConfig:
+    """Read ``[ingest]`` from wikiloom.toml, falling back to defaults.
+
+    A missing config file is fine — the defaults are safe. A malformed
+    config surfaces as a ``tomllib.TOMLDecodeError`` to the caller;
+    the CLI layer converts that to a friendly ``ClickException``.
+    """
+    try:
+        return Config.load(project_root).ingest
+    except FileNotFoundError:
+        return IngestConfig()
+
+
 def ingest(
     source: Path | str,
     project_root: Path,
@@ -112,6 +165,14 @@ def ingest(
     is_url = isinstance(source, str) and source.startswith(("http://", "https://"))
     source_path = Path(source)
 
+    # Read ingest config before acquiring the lock; it's pure file I/O
+    # and lets the boundary guards consult user settings.
+    ingest_cfg = _load_ingest_config(project_root)
+
+    # Guard 1: file-size cap. URLs skip this — nothing on disk to stat.
+    if not is_url:
+        _guard_file_size(source_path, ingest_cfg)
+
     with FileLock(project_root):
         # 0. Dedup check — only for local files. Cheap hash before we
         # pay the extraction cost (which will matter a lot more when
@@ -134,6 +195,10 @@ def ingest(
         extractor = router.route(source)
         content = extractor.extract(source_path)
 
+        # Guard 2: empty-extraction. Raised *after* we've routed to an
+        # extractor so the error message can cite the content_type.
+        _guard_empty_extraction(content, ingest_cfg)
+
         # 2. Copy to raw/
         raw_path = copy_to_raw(source_path, content, project_root)
 
@@ -145,6 +210,28 @@ def ingest(
             chunks = Chunker().split(content, budget)
         else:
             chunks = [content]
+
+        # 4b. Write the resume checkpoint. Records the chunk plan so a
+        # crash mid-synthesis (once Component 20 lands) can pick up
+        # where it left off. Cleared on successful completion below.
+        ingest_state: IngestState | None = None
+        if registry_dir.exists():
+            source_key = content_hash or (source if is_url else str(source_path))
+            chunk_states = [
+                ChunkState(
+                    index=int(chunk.metadata.get("chunk_index", i)),
+                    total=int(chunk.metadata.get("chunk_total", len(chunks))),
+                    token_estimate=chunk.token_estimate,
+                )
+                for i, chunk in enumerate(chunks)
+            ]
+            ingest_state = IngestState.begin(
+                registry_dir=registry_dir,
+                source_key=source_key,
+                source_name=source_path.name if not is_url else str(source),
+                content_type=content.content_type,
+                chunks=chunk_states,
+            )
 
         result = IngestResult(
             source_path=source_path,
@@ -274,6 +361,13 @@ def ingest(
             SQLiteCache(registry_dir / "wiki.db").sync_from_files(
                 project_root, staged
             )
+
+        # 15. Clear the resume checkpoint. Reaching this line means the
+        # pipeline succeeded end-to-end, so the leftover state file is
+        # no longer useful. Any crash before this point leaves the file
+        # behind for the next run to inspect.
+        if ingest_state is not None:
+            ingest_state.clear()
 
         return result
 

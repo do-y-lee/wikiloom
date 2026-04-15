@@ -57,12 +57,31 @@ class SearchConfig:
 
 
 @dataclass
+class IngestConfig:
+    """Safeguards applied at the ingest boundary.
+
+    ``max_file_size_mb`` fails fast on oversized inputs before the
+    extractor or (eventually) the LLM loop touch them. ``0`` disables
+    the check.
+
+    ``min_extracted_chars`` is the minimum post-extraction text length
+    for a source to be considered useful. Empty / near-empty extraction
+    (typically a scanned PDF with no text layer) raises instead of
+    silently producing a useless ingest.
+    """
+
+    max_file_size_mb: int = 50
+    min_extracted_chars: int = 16
+
+
+@dataclass
 class Config:
     project: ProjectConfig = field(default_factory=ProjectConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     linking: LinkingConfig = field(default_factory=LinkingConfig)
     staleness: StalenessConfig = field(default_factory=StalenessConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
+    ingest: IngestConfig = field(default_factory=IngestConfig)
     project_root: Path = field(default_factory=Path.cwd)
 
     @classmethod
@@ -87,6 +106,8 @@ class Config:
             cfg.staleness = StalenessConfig(**_filter(StalenessConfig, data["staleness"]))
         if "search" in data:
             cfg.search = SearchConfig(**_filter(SearchConfig, data["search"]))
+        if "ingest" in data:
+            cfg.ingest = IngestConfig(**_filter(IngestConfig, data["ingest"]))
         return cfg
 
 
