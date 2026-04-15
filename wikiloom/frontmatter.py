@@ -29,6 +29,7 @@ class Frontmatter:
     superseded_by: str | None = None
     contradictions: list[dict[str, str]] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
+    chunk_ids: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to a dict suitable for YAML serialization."""
@@ -49,6 +50,7 @@ class Frontmatter:
             "superseded_by": self.superseded_by,
             "contradictions": self.contradictions,
             "tags": self.tags,
+            "chunk_ids": self.chunk_ids,
         }
 
     @classmethod
@@ -71,6 +73,7 @@ class Frontmatter:
             superseded_by=data.get("superseded_by"),
             contradictions=data.get("contradictions", []),
             tags=data.get("tags", []),
+            chunk_ids=data.get("chunk_ids", []),
         )
 
 

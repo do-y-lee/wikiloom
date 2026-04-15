@@ -239,6 +239,59 @@ def reindex(project: Path | None) -> None:
     click.echo(f"Rebuilt {len(written)} index file(s).")
 
 
+@main.command("source")
+@click.argument("chunk_id")
+@click.option(
+    "--project",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Project root. Defaults to walking upward from the current directory.",
+)
+def source(chunk_id: str, project: Path | None) -> None:
+    """Show the raw source text for a chunk referenced by a wiki page.
+
+    Pages synthesized via ``wikiloom ingest`` carry ``chunk_ids`` in
+    their frontmatter. Pass one of those ids here to see the exact
+    text the LLM saw when it produced that page — structural
+    provenance click-through without trusting the LLM's self-
+    attribution.
+    """
+    from wikiloom.chunk_store import ChunkStore
+    from wikiloom.source_catalog import SourceCatalog
+
+    if project is None:
+        project = _find_project_root(Path.cwd())
+        if project is None:
+            raise click.ClickException(
+                "Could not find a WikiLoom project (no wikiloom.toml found)."
+            )
+
+    chunk_store = ChunkStore(project / "_registry" / "wiki.db")
+    chunk = chunk_store.get_chunk(chunk_id)
+    if chunk is None:
+        raise click.ClickException(
+            f"No chunk found with id {chunk_id!r}. It may have been "
+            f"removed by a re-ingest with different content."
+        )
+
+    catalog = SourceCatalog(project / "_registry")
+    source_entry = catalog.get(chunk.source_hash)
+    source_name = source_entry.name if source_entry else "<unknown source>"
+    raw_path = (
+        source_entry.raw_path if source_entry and source_entry.raw_path else "—"
+    )
+
+    click.echo(f"chunk_id:     {chunk.chunk_id}")
+    click.echo(f"source:       {source_name}")
+    click.echo(f"raw_path:     {raw_path}")
+    click.echo(f"chunk:        {chunk.chunk_index + 1} of {chunk.chunk_total}")
+    click.echo(f"content_type: {chunk.content_type}")
+    click.echo(f"tokens:       {chunk.token_estimate}")
+    click.echo(f"created_at:   {chunk.created_at}")
+    click.echo("---")
+    click.echo(chunk.text)
+
+
 @main.command("rebuild-cache")
 @click.option(
     "--project",

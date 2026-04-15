@@ -12,9 +12,15 @@ from pathlib import Path
 import git
 import pytest
 
-from wikiloom.ingest.errors import EmptyExtractionError, FileTooLargeError
+import wikiloom.ingest.processor as processor_module
+from wikiloom.ingest.errors import (
+    BudgetExceededError,
+    EmptyExtractionError,
+    FileTooLargeError,
+)
 from wikiloom.ingest.processor import ingest
 from wikiloom.ingest.state import STATE_FILENAME, IngestState
+from wikiloom.llm import LLMCallMetrics, SynthesizeResult
 from wikiloom.scaffold import init_project
 
 
@@ -52,6 +58,32 @@ def _write_toml_ingest_section(project: Path, body: str) -> None:
     )
 
 
+def _patch_empty_llm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Mock LLMClient.synthesize with an empty-but-valid response."""
+
+    def fake_synthesize(self, system_prompt: str, user_prompt: str):
+        return SynthesizeResult(
+            result={
+                "source_summary": {
+                    "title": "T",
+                    "one_line": "o",
+                    "content_markdown": "m",
+                },
+                "pages_to_create": [],
+                "pages_to_update": [],
+                "entities_mentioned": [],
+                "concepts_mentioned": [],
+            },
+            metrics=LLMCallMetrics(
+                tokens_in=10, tokens_out=5, cost_usd=0.0, model="mock"
+            ),
+        )
+
+    monkeypatch.setattr(
+        processor_module.LLMClient, "synthesize", fake_synthesize
+    )
+
+
 # ----------------------------------------------------------------------
 # File-size guard (item D)
 # ----------------------------------------------------------------------
@@ -71,8 +103,9 @@ def test_file_size_guard_rejects_oversized_input(
 
 
 def test_file_size_guard_allows_under_limit(
-    project: Path, tmp_path: Path
+    project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _patch_empty_llm(monkeypatch)
     _write_toml_ingest_section(project, "max_file_size_mb = 5")
     small = tmp_path / "small.md"
     small.write_text("# Small\n\nA few words only.\n")
@@ -82,8 +115,9 @@ def test_file_size_guard_allows_under_limit(
 
 
 def test_file_size_guard_disabled_when_zero(
-    project: Path, tmp_path: Path
+    project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _patch_empty_llm(monkeypatch)
     _write_toml_ingest_section(project, "max_file_size_mb = 0")
     big = tmp_path / "big.md"
     big.write_bytes(b"# header\n" + b"x" * (2 * 1024 * 1024))
@@ -120,8 +154,9 @@ def test_empty_extraction_guard_rejects_whitespace_only(
 
 
 def test_empty_extraction_guard_respects_min_chars_override(
-    project: Path, tmp_path: Path
+    project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _patch_empty_llm(monkeypatch)
     # Lower the minimum so a very short doc is acceptable.
     _write_toml_ingest_section(project, "min_extracted_chars = 1")
     tiny = tmp_path / "tiny.md"
@@ -137,8 +172,9 @@ def test_empty_extraction_guard_respects_min_chars_override(
 
 
 def test_ingest_clears_checkpoint_on_success(
-    project: Path, tmp_path: Path
+    project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _patch_empty_llm(monkeypatch)
     sample = tmp_path / "doc.md"
     sample.write_text("# Doc\n\nA short document worth ingesting.\n")
 
@@ -153,11 +189,12 @@ def test_ingest_leaves_checkpoint_when_commit_fails(
 ) -> None:
     """If the commit stage blows up, the checkpoint file should remain.
 
-    Simulates a mid-pipeline crash (what C20 synthesis failures will
-    look like). The resume file has to survive so the next run can
-    detect it.
+    Simulates a mid-pipeline crash. The resume file has to survive so
+    the next run can detect it.
     """
     from wikiloom.ingest import processor
+
+    _patch_empty_llm(monkeypatch)
 
     sample = tmp_path / "doc.md"
     sample.write_text("# Doc\n\nA short document worth ingesting.\n")
@@ -180,11 +217,12 @@ def test_ingest_leaves_checkpoint_when_commit_fails(
     assert state_path.exists()
 
     # The leftover state should be loadable and carry the plan.
+    # Chunks can be marked done by synthesis (mocked to succeed here),
+    # but the state file itself must survive the crash.
     state = IngestState.load(project / "_registry")
     assert state is not None
     assert state.source_name == "doc.md"
     assert len(state.chunks) >= 1
-    assert state.pending_indices()  # nothing marked done yet
 
 
 def test_checkpoint_from_failed_run_is_overwritten_by_next_ingest(
@@ -192,6 +230,8 @@ def test_checkpoint_from_failed_run_is_overwritten_by_next_ingest(
 ) -> None:
     """A prior crashed run's state file is replaced cleanly by the next begin."""
     from wikiloom.ingest import processor
+
+    _patch_empty_llm(monkeypatch)
 
     doomed = tmp_path / "doomed.md"
     doomed.write_text("# Doomed\n\nThis ingest will fail at commit time.\n")
@@ -218,3 +258,54 @@ def test_checkpoint_from_failed_run_is_overwritten_by_next_ingest(
     ingest(ok, project_root=project)
 
     assert not (project / "_registry" / STATE_FILENAME).exists()
+
+
+# ----------------------------------------------------------------------
+# Pre-flight budget check
+# ----------------------------------------------------------------------
+
+
+def test_preflight_budget_check_refuses_over_budget(
+    project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An ingest that would exceed the monthly budget should fail fast."""
+    _patch_empty_llm(monkeypatch)
+
+    # Rewrite the project's config with a vanishingly small budget.
+    toml = project / "wikiloom.toml"
+    toml.write_text(
+        toml.read_text().replace(
+            'monthly_budget_usd = 50.0', 'monthly_budget_usd = 0.00000001'
+        ),
+        encoding="utf-8",
+    )
+
+    sample = tmp_path / "doc.md"
+    sample.write_text("# Doc\n\nA document that will exceed the tiny budget.\n")
+
+    with pytest.raises(BudgetExceededError) as exc_info:
+        ingest(sample, project_root=project)
+    assert exc_info.value.budget_usd == 0.00000001
+    assert exc_info.value.estimated_usd > 0
+
+
+def test_preflight_budget_check_disabled_by_config(
+    project: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Setting enable_budget_check = false bypasses the pre-flight."""
+    _patch_empty_llm(monkeypatch)
+
+    toml = project / "wikiloom.toml"
+    toml.write_text(
+        toml.read_text().replace(
+            'monthly_budget_usd = 50.0', 'monthly_budget_usd = 0.00000001'
+        )
+        + "\n[ingest]\nenable_budget_check = false\n",
+        encoding="utf-8",
+    )
+
+    sample = tmp_path / "doc.md"
+    sample.write_text("# Doc\n\nNormal content.\n")
+
+    # Should not raise even though the budget is effectively zero.
+    ingest(sample, project_root=project)

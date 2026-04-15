@@ -68,10 +68,15 @@ class IngestConfig:
     for a source to be considered useful. Empty / near-empty extraction
     (typically a scanned PDF with no text layer) raises instead of
     silently producing a useless ingest.
+
+    ``enable_budget_check`` gates the pre-flight monthly-budget check
+    in the synthesis loop. Defaults to True in production; set to
+    False in tests or when running a deliberately uncapped batch.
     """
 
     max_file_size_mb: int = 50
     min_extracted_chars: int = 16
+    enable_budget_check: bool = True
 
 
 @dataclass

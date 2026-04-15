@@ -84,6 +84,19 @@ CREATE TABLE IF NOT EXISTS events (
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS pages_fts USING fts5(page_id, title, summary);
+
+CREATE TABLE IF NOT EXISTS chunks (
+    chunk_id TEXT PRIMARY KEY,
+    source_hash TEXT NOT NULL,
+    chunk_index INTEGER NOT NULL,
+    chunk_total INTEGER NOT NULL,
+    content_type TEXT,
+    text TEXT NOT NULL,
+    token_estimate INTEGER,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(source_hash);
 """
 
 

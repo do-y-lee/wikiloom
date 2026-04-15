@@ -48,3 +48,24 @@ class EmptyExtractionError(IngestError):
         self.path = path
         self.content_type = content_type
         self.extracted_chars = extracted_chars
+
+
+class BudgetExceededError(IngestError):
+    """Pre-flight estimate exceeded the configured monthly budget.
+
+    Raised by the ingest pre-flight budget check when the estimated
+    token cost of the run would push the project past
+    ``config.llm.monthly_budget_usd``. Disable the check by setting
+    ``[ingest] enable_budget_check = false`` or raise the budget.
+    """
+
+    def __init__(self, estimated_usd: float, budget_usd: float) -> None:
+        super().__init__(
+            f"Pre-flight cost estimate of ${estimated_usd:.4f} exceeds "
+            f"the monthly budget of ${budget_usd:.2f}. Raise "
+            f"[llm] monthly_budget_usd in wikiloom.toml, disable the "
+            f"check via [ingest] enable_budget_check = false, or "
+            f"reduce the input size."
+        )
+        self.estimated_usd = estimated_usd
+        self.budget_usd = budget_usd

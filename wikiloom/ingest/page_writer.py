@@ -1,0 +1,537 @@
+"""Turn synthesis output into wiki pages on disk.
+
+The page writer is the single responsible party for translating
+``SynthesisResult`` into ``wiki/<category>/<slug>.md`` files. It
+handles three kinds of writes:
+
+1. **Fresh create** — target path doesn't exist. Write a new page
+   with the auto marker prepended so future re-ingests know the
+   whole body is LLM-generated.
+2. **Create collision** — target path exists because a prior ingest
+   already created this page. Default: skip. With ``force=True``:
+   replace the auto region via ``HumanEditProtection.preserve_human``
+   so hand-edits above the marker survive.
+3. **Update (append)** — the LLM's ``pages_to_update`` entry signals
+   that a new source contributes additional content to an existing
+   page. Append ``additions_markdown`` to the existing auto region,
+   preserve the human region, union the chunk_ids into frontmatter.
+
+Source page handling
+--------------------
+Every ingest also produces a ``wiki/sources/<slug>.md`` page that
+summarizes the ingested document. Slug is derived from the source
+filename. On collision with a page from a different source (same
+filename slug, different source hash), a counter suffix is appended.
+
+Design notes
+------------
+- **Human region is load-bearing.** The ``<!-- wikiloom:auto -->``
+  marker semantics are the only thing standing between a user's
+  hand-edit and the LLM clobbering it. Every write path in this
+  module preserves it. The explicit test in
+  ``tests/test_page_writer.py::test_reingest_preserves_human_region``
+  is the invariant check that matters most.
+- **Chunk_ids are union, not overwrite.** When a page is updated,
+  its frontmatter carries chunk_ids from every prior source plus the
+  new one, so provenance click-through can see every chunk that
+  contributed to the page across the whole history.
+- **Registration is the page writer's job.** After writing a file,
+  the writer calls ``Registry.register_page`` so the manifest stays
+  consistent with disk. The processor saves the registry once at the
+  end of the whole ingest.
+- **No commits here.** The writer produces files and mutates the
+  in-memory registry. The processor bundles everything into a single
+  git commit, exactly like the pre-C20 pipeline.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from wikiloom.frontmatter import Frontmatter, read_page, write_page
+from wikiloom.protection import AUTO_MARKER, HumanEditProtection
+from wikiloom.registry import PageEntry, Registry
+from wikiloom.source_catalog import SourceEntry
+from wikiloom.synthesis import PageProposal, SourceSummary, SynthesisResult
+from wikiloom.utils import now_iso, slugify
+
+# wiki/ subdirectories are plural forms of the type enum
+_TYPE_TO_DIR = {
+    "entity": "entities",
+    "concept": "concepts",
+    "synthesis": "syntheses",
+    "decision": "decisions",
+}
+_SOURCE_DIR = "sources"
+
+
+@dataclass
+class PageWriteResult:
+    """Summary of what the writer put on disk.
+
+    The processor uses this to build the git commit's file list and
+    populate ``pages_created`` / ``pages_updated`` on the ingest
+    result.
+    """
+
+    created_paths: list[Path] = field(default_factory=list)
+    updated_paths: list[Path] = field(default_factory=list)
+    skipped_collisions: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+
+    @property
+    def created_page_ids(self) -> list[str]:
+        return [_path_to_page_id(p, _wiki_root_of(p)) for p in self.created_paths]
+
+    @property
+    def updated_page_ids(self) -> list[str]:
+        return [_path_to_page_id(p, _wiki_root_of(p)) for p in self.updated_paths]
+
+
+def _wiki_root_of(page_path: Path) -> Path:
+    """Walk upward to find the ``wiki/`` directory that contains a page path."""
+    for parent in page_path.parents:
+        if parent.name == "wiki":
+            return parent
+    return page_path.parent
+
+
+def _path_to_page_id(path: Path, wiki_root: Path) -> str:
+    rel = path.resolve().relative_to(wiki_root.resolve())
+    return rel.with_suffix("").as_posix()
+
+
+class PageWriter:
+    """Writes synthesized pages to disk and registers them in the manifest."""
+
+    def __init__(
+        self,
+        project_root: Path,
+        registry: Registry,
+        *,
+        force: bool = False,
+    ) -> None:
+        self.project_root = Path(project_root)
+        self.wiki_dir = self.project_root / "wiki"
+        self.registry = registry
+        self.force = force
+        self.protection = HumanEditProtection(
+            self.project_root, registry=registry
+        )
+
+    # ------------------------------------------------------------------
+    # Public entry point
+    # ------------------------------------------------------------------
+
+    def write(
+        self,
+        synthesis: SynthesisResult,
+        source_entry: SourceEntry | None,
+    ) -> PageWriteResult:
+        """Write every page proposal in a ``SynthesisResult`` to disk.
+
+        The order is:
+        1. source page (if source_summary is present)
+        2. pages_to_create (fresh or --force collision handling)
+        3. pages_to_update (append-to-auto-region handling)
+
+        Returns a ``PageWriteResult`` the processor can consume for
+        commit staging and event logging.
+        """
+        result = PageWriteResult()
+
+        # 1. Source page
+        if synthesis.source_summary is not None and source_entry is not None:
+            src_path = self._write_source_page(
+                synthesis.source_summary, source_entry
+            )
+            if src_path is not None:
+                # Source pages are always fresh-or-updated, not "created"
+                # in the spec sense. Treat as created on first write,
+                # updated otherwise — the registry tells us which.
+                page_id = _path_to_page_id(src_path, self.wiki_dir)
+                if self.registry.get_page(page_id) is None:
+                    result.created_paths.append(src_path)
+                else:
+                    result.updated_paths.append(src_path)
+                self._register(
+                    src_path,
+                    title=synthesis.source_summary.title,
+                    type_="source",
+                    summary=synthesis.source_summary.one_line,
+                    source_hash=source_entry.content_hash,
+                    chunk_ids=_all_chunk_ids_from_synthesis(synthesis),
+                )
+
+        # 2. pages_to_create
+        for proposal in synthesis.pages_to_create:
+            outcome = self._write_create(proposal)
+            if outcome.kind == "created":
+                result.created_paths.append(outcome.path)
+            elif outcome.kind == "updated":
+                result.updated_paths.append(outcome.path)
+            elif outcome.kind == "skipped":
+                result.skipped_collisions.append(outcome.page_id)
+                result.notes.append(
+                    f"skipped {outcome.page_id} (page exists; use --force to replace)"
+                )
+
+        # 3. pages_to_update
+        for proposal in synthesis.pages_to_update:
+            outcome = self._write_update(proposal)
+            if outcome.kind == "updated":
+                result.updated_paths.append(outcome.path)
+            elif outcome.kind == "skipped":
+                result.notes.append(
+                    f"update target not found: {outcome.page_id} "
+                    f"(LLM proposed update for nonexistent page)"
+                )
+
+        return result
+
+    # ------------------------------------------------------------------
+    # Source page
+    # ------------------------------------------------------------------
+
+    def _write_source_page(
+        self,
+        summary: SourceSummary,
+        source_entry: SourceEntry,
+    ) -> Path | None:
+        """Write the summary page for a just-ingested source."""
+        target = self._resolve_source_path(source_entry)
+        existing_fm, _ = (None, "") if not target.exists() else read_page(target)
+
+        body = _ensure_auto_marker(summary.content_markdown)
+        if target.exists():
+            body = self.protection.preserve_human(target, summary.content_markdown)
+            body = _ensure_auto_marker(body)
+
+        fm = Frontmatter(
+            title=summary.title or source_entry.name,
+            type="source",
+            status="active",
+            created=(existing_fm.created if existing_fm else now_iso()),
+            modified=now_iso(),
+            summary=summary.one_line,
+            sources=[
+                {
+                    "hash": source_entry.content_hash,
+                    "name": source_entry.name,
+                    "raw_path": source_entry.raw_path or "",
+                }
+            ],
+            source_count=1,
+            confidence="high",
+        )
+        write_page(target, fm, body)
+        return target
+
+    def _resolve_source_path(self, source_entry: SourceEntry) -> Path:
+        """Pick a target path for a source page, handling slug collisions.
+
+        Strategy: ``slugify(filename without extension)``. On collision,
+        check the existing page's frontmatter — if it already references
+        the same content_hash, overwrite. Otherwise, append a counter
+        suffix so two different sources with the same filename stem
+        don't stomp each other.
+        """
+        base = source_entry.name.rsplit(".", 1)[0] if "." in source_entry.name else source_entry.name
+        base_slug = slugify(base) or "source"
+        sources_dir = self.wiki_dir / _SOURCE_DIR
+        sources_dir.mkdir(parents=True, exist_ok=True)
+
+        candidate = sources_dir / f"{base_slug}.md"
+        if not candidate.exists():
+            return candidate
+
+        existing_fm, _ = read_page(candidate)
+        if existing_fm is not None:
+            for src in existing_fm.sources or []:
+                if isinstance(src, dict) and src.get("hash") == source_entry.content_hash:
+                    return candidate  # same source, overwrite
+
+        counter = 2
+        while True:
+            next_candidate = sources_dir / f"{base_slug}-{counter}.md"
+            if not next_candidate.exists():
+                return next_candidate
+            existing_fm, _ = read_page(next_candidate)
+            if existing_fm is not None:
+                for src in existing_fm.sources or []:
+                    if isinstance(src, dict) and src.get("hash") == source_entry.content_hash:
+                        return next_candidate  # same source, overwrite
+            counter += 1
+
+    # ------------------------------------------------------------------
+    # pages_to_create
+    # ------------------------------------------------------------------
+
+    def _write_create(self, proposal: PageProposal) -> "_WriteOutcome":
+        target = self._resolve_create_path(proposal)
+        page_id = _path_to_page_id(target, self.wiki_dir)
+
+        if target.exists():
+            if not self.force:
+                return _WriteOutcome(kind="skipped", path=target, page_id=page_id)
+            # --force collision: preserve human region, replace auto
+            body = self.protection.preserve_human(target, proposal.content_markdown)
+            body = _ensure_auto_marker(body)
+            existing_fm, _ = read_page(target)
+            chunk_ids = _union_chunk_ids(
+                existing=(existing_fm.chunk_ids if existing_fm else []),
+                new=[proposal.chunk_id],
+            )
+            fm = self._make_create_frontmatter(
+                proposal=proposal,
+                existing_fm=existing_fm,
+                chunk_ids=chunk_ids,
+            )
+            write_page(target, fm, body)
+            self._register(
+                target,
+                title=proposal.title,
+                type_=proposal.type,
+                summary=_derive_summary(proposal.content_markdown),
+                confidence=proposal.confidence,
+                chunk_ids=chunk_ids,
+            )
+            return _WriteOutcome(kind="updated", path=target, page_id=page_id)
+
+        # Fresh create
+        body = _ensure_auto_marker(proposal.content_markdown)
+        fm = self._make_create_frontmatter(
+            proposal=proposal,
+            existing_fm=None,
+            chunk_ids=[proposal.chunk_id],
+        )
+        write_page(target, fm, body)
+        self._register(
+            target,
+            title=proposal.title,
+            type_=proposal.type,
+            summary=_derive_summary(proposal.content_markdown),
+            confidence=proposal.confidence,
+            chunk_ids=[proposal.chunk_id],
+        )
+        return _WriteOutcome(kind="created", path=target, page_id=page_id)
+
+    def _resolve_create_path(self, proposal: PageProposal) -> Path:
+        subdir = _TYPE_TO_DIR.get(proposal.type)
+        if subdir is None:
+            raise ValueError(
+                f"unknown page type {proposal.type!r} in create proposal"
+            )
+        slug = slugify(proposal.suggested_slug) or slugify(proposal.title) or "untitled"
+        return self.wiki_dir / subdir / f"{slug}.md"
+
+    def _make_create_frontmatter(
+        self,
+        proposal: PageProposal,
+        existing_fm: Frontmatter | None,
+        chunk_ids: list[str],
+    ) -> Frontmatter:
+        return Frontmatter(
+            title=proposal.title,
+            type=proposal.type,
+            status="active",
+            created=(existing_fm.created if existing_fm else now_iso()),
+            modified=now_iso(),
+            summary=_derive_summary(proposal.content_markdown),
+            aliases=(existing_fm.aliases if existing_fm else []),
+            sources=(existing_fm.sources if existing_fm else []),
+            source_count=(existing_fm.source_count if existing_fm else 1),
+            confidence=proposal.confidence or "medium",
+            human_edited=False,
+            contradictions=(existing_fm.contradictions if existing_fm else []),
+            tags=(existing_fm.tags if existing_fm else []),
+            chunk_ids=chunk_ids,
+        )
+
+    # ------------------------------------------------------------------
+    # pages_to_update
+    # ------------------------------------------------------------------
+
+    def _write_update(self, proposal: PageProposal) -> "_WriteOutcome":
+        page_id = _normalize_existing_path(proposal.existing_path or "")
+        if not page_id:
+            return _WriteOutcome(kind="skipped", path=Path(), page_id="<empty>")
+
+        target = self.wiki_dir / f"{page_id}.md"
+        if not target.exists():
+            return _WriteOutcome(kind="skipped", path=target, page_id=page_id)
+
+        existing_fm, existing_body = read_page(target)
+        if existing_fm is None:
+            return _WriteOutcome(kind="skipped", path=target, page_id=page_id)
+
+        human, auto = HumanEditProtection.split(existing_body)
+        if auto:
+            merged_auto = auto.rstrip() + "\n\n" + proposal.additions_markdown.lstrip()
+        else:
+            merged_auto = proposal.additions_markdown
+        new_body = HumanEditProtection.merge(human, merged_auto)
+
+        chunk_ids = _union_chunk_ids(
+            existing=existing_fm.chunk_ids,
+            new=[proposal.chunk_id],
+        )
+        merged_contradictions = list(existing_fm.contradictions or [])
+        for c in proposal.contradictions or []:
+            if c not in merged_contradictions:
+                merged_contradictions.append(c)
+
+        fm = Frontmatter(
+            title=existing_fm.title,
+            type=existing_fm.type,
+            status=existing_fm.status,
+            created=existing_fm.created or now_iso(),
+            modified=now_iso(),
+            summary=existing_fm.summary,
+            aliases=existing_fm.aliases,
+            sources=existing_fm.sources,
+            source_count=existing_fm.source_count + 1,
+            confidence=existing_fm.confidence,
+            staleness_window_days=existing_fm.staleness_window_days,
+            human_edited=existing_fm.human_edited,
+            human_edited_at=existing_fm.human_edited_at,
+            superseded_by=existing_fm.superseded_by,
+            contradictions=merged_contradictions,
+            tags=existing_fm.tags,
+            chunk_ids=chunk_ids,
+        )
+        write_page(target, fm, new_body)
+        self._register(
+            target,
+            title=existing_fm.title,
+            type_=existing_fm.type,
+            summary=existing_fm.summary,
+            confidence=existing_fm.confidence,
+            source_hash=None,
+            chunk_ids=chunk_ids,
+        )
+        return _WriteOutcome(kind="updated", path=target, page_id=page_id)
+
+    # ------------------------------------------------------------------
+    # Registry
+    # ------------------------------------------------------------------
+
+    def _register(
+        self,
+        path: Path,
+        *,
+        title: str,
+        type_: str,
+        summary: str = "",
+        confidence: str = "medium",
+        source_hash: str | None = None,
+        chunk_ids: list[str] | None = None,
+    ) -> None:
+        page_id = _path_to_page_id(path, self.wiki_dir)
+        existing = self.registry.get_page(page_id)
+        entry = PageEntry(
+            title=title,
+            type=type_,
+            status="active",
+            aliases=(existing.aliases if existing else []),
+            created=(existing.created if existing else ""),
+            modified="",  # register_page sets this
+            summary=summary,
+            source_count=((existing.source_count if existing else 0) + (1 if source_hash else 0)),
+            confidence=confidence or "medium",
+        )
+        self.registry.register_page(page_id, entry)
+
+
+# ----------------------------------------------------------------------
+# Helpers
+# ----------------------------------------------------------------------
+
+
+@dataclass
+class _WriteOutcome:
+    kind: str  # "created" | "updated" | "skipped"
+    path: Path
+    page_id: str
+
+
+def _ensure_auto_marker(body: str) -> str:
+    """Prepend the auto marker if it isn't already in the body.
+
+    The ``HumanEditProtection.preserve_human`` helper returns an
+    unmarked body for brand-new pages (case 1 in its docstring).
+    That's fine for its internal semantics but wrong for our
+    on-disk format — a fresh page needs the marker so future
+    re-ingests treat the whole body as auto. This helper is the
+    single place that enforces the invariant.
+    """
+    if AUTO_MARKER in body:
+        return body
+    return f"{AUTO_MARKER}\n\n{body.lstrip()}"
+
+
+def _union_chunk_ids(existing: list[str], new: list[str]) -> list[str]:
+    """Union two chunk_id lists while preserving insertion order.
+
+    Existing chunks stay in their original order; new chunks are
+    appended in the order they appear. Deterministic output is
+    important for git-diff stability on re-ingest.
+    """
+    seen: set[str] = set()
+    merged: list[str] = []
+    for cid in list(existing) + list(new):
+        if cid and cid not in seen:
+            seen.add(cid)
+            merged.append(cid)
+    return merged
+
+
+def _normalize_existing_path(raw: str) -> str:
+    """Turn a variety of LLM-produced path formats into a page_id.
+
+    Accepts ``concepts/foo``, ``concepts/foo.md``, ``wiki/concepts/foo``,
+    ``wiki/concepts/foo.md``, with or without leading slashes. Returns
+    the canonical ``category/slug`` form used elsewhere.
+    """
+    path = raw.strip().lstrip("/")
+    if path.startswith("wiki/"):
+        path = path[len("wiki/"):]
+    if path.endswith(".md"):
+        path = path[: -len(".md")]
+    return path
+
+
+def _derive_summary(body: str, max_chars: int = 160) -> str:
+    """Extract a summary from the body if none was provided by the LLM.
+
+    Takes the first non-heading paragraph, collapses whitespace,
+    truncates to ``max_chars``. Used for manifest + search snippets;
+    better than nothing until the prompt explicitly asks for a
+    summary field per page.
+    """
+    for line in body.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or stripped.startswith("<!--"):
+            continue
+        if len(stripped) > max_chars:
+            return stripped[: max_chars - 3].rstrip() + "..."
+        return stripped
+    return ""
+
+
+def _all_chunk_ids_from_synthesis(synthesis: SynthesisResult) -> list[str]:
+    """Every chunk_id that contributed to an ingest, deduped in order.
+
+    Used for the source page's frontmatter so a reader can see every
+    chunk that was synthesized from the underlying document, not just
+    the chunks that happened to produce a create or update proposal.
+    """
+    seen: set[str] = set()
+    merged: list[str] = []
+    for proposal in list(synthesis.pages_to_create) + list(synthesis.pages_to_update):
+        cid = proposal.chunk_id
+        if cid and cid not in seen:
+            seen.add(cid)
+            merged.append(cid)
+    return merged

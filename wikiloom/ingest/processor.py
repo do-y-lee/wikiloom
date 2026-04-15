@@ -14,19 +14,29 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import click
+
 from wikiloom.backlinks import BacklinkRegistry
+from wikiloom.chunk_store import ChunkStore
 from wikiloom.config import Config, IngestConfig
 from wikiloom.events import EventType, append_event, create_event
 from wikiloom.git_ops import GitOps
 from wikiloom.ingest import router
 from wikiloom.ingest.chunker import BudgetPlan, Chunker, plan_budget
-from wikiloom.ingest.errors import EmptyExtractionError, FileTooLargeError
+from wikiloom.ingest.errors import (
+    BudgetExceededError,
+    EmptyExtractionError,
+    FileTooLargeError,
+)
 from wikiloom.ingest.extractors.base import ExtractedContent
+from wikiloom.ingest.page_writer import PageWriter
 from wikiloom.ingest.state import ChunkState, IngestState
+from wikiloom.llm import LLMClient, estimate_cost
 from wikiloom.locking import FileLock
 from wikiloom.registry import Registry
 from wikiloom.search import IndexUpdater
 from wikiloom.source_catalog import SourceCatalog, SourceEntry, hash_file
+from wikiloom.synthesis import SynthesisResult, run_synthesis
 from wikiloom.utils import now_iso
 
 # Default mapping from content_type → raw/ subdirectory
@@ -52,6 +62,10 @@ class IngestResult:
     pages_created: list[str] = field(default_factory=list)
     pages_updated: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    # Synthesis metrics, populated after the LLM loop runs
+    total_tokens_in: int = 0
+    total_tokens_out: int = 0
+    total_cost_usd: float = 0.0
 
 
 # ----------------------------------------------------------------------
@@ -133,6 +147,40 @@ def _load_ingest_config(project_root: Path) -> IngestConfig:
         return Config.load(project_root).ingest
     except FileNotFoundError:
         return IngestConfig()
+
+
+def _load_full_config(project_root: Path) -> Config:
+    """Load the full Config, falling back to defaults when no file exists."""
+    try:
+        return Config.load(project_root)
+    except FileNotFoundError:
+        return Config(project_root=project_root)
+
+
+def _preflight_budget_check(
+    chunks: list[ExtractedContent],
+    cfg: Config,
+) -> None:
+    """Estimate the synthesis run's cost and refuse if it exceeds the monthly budget.
+
+    Rough-and-conservative: sums per-chunk token_estimates as input
+    tokens, assumes output tokens ~= half of input, then asks
+    ``llm.estimate_cost`` for a USD figure. We intentionally over-
+    estimate rather than under-estimate: a false positive is a user
+    raising the budget knob; a false negative is money actually spent.
+    """
+    if not cfg.ingest.enable_budget_check:
+        return
+    if cfg.llm.monthly_budget_usd <= 0:
+        return
+    tokens_in = sum(max(1, c.token_estimate) for c in chunks)
+    tokens_out = max(1, tokens_in // 2)
+    estimated = estimate_cost(tokens_in, tokens_out, cfg.llm.model)
+    if estimated > cfg.llm.monthly_budget_usd:
+        raise BudgetExceededError(
+            estimated_usd=estimated,
+            budget_usd=cfg.llm.monthly_budget_usd,
+        )
 
 
 def ingest(
@@ -241,36 +289,117 @@ def ingest(
             budget=budget,
         )
 
-        # LLM synthesis, page writing, linking, and SQLite sync land
-        # with Component 20 + the LLM enablement pass.
+        # 5. LLM synthesis + page writing. File sources only for now;
+        # URL sources bypass the chunk store until NOTES.local.md
+        # item F lands. An empty synthesis run (all chunks failed)
+        # still produces a commit for backlinks/manifest/indexes but
+        # yields zero new pages.
+        registry: Registry | None = None
+        synthesis_written: list[Path] = []
+        if (
+            registry_dir.exists()
+            and not is_url
+            and content_hash is not None
+            and source_path.is_file()
+        ):
+            full_cfg = _load_full_config(project_root)
+
+            # 5a. Pre-flight budget check — refuse before the LLM loop
+            # if the estimated cost would breach the monthly budget.
+            _preflight_budget_check(chunks, full_cfg)
+
+            # 5b. Persist chunks so their text is queryable via
+            # `wikiloom source <chunk_id>` after the ingest commits.
+            chunk_store = ChunkStore(registry_dir / "wiki.db")
+            stored_chunks = chunk_store.persist_chunks(content_hash, chunks)
+            chunk_ids = [s.chunk_id for s in stored_chunks]
+
+            # 5c. Synthesis loop. The registry is loaded once here and
+            # reused in step 10b for manifest sync — the page writer
+            # mutates it in-place as pages are registered.
+            registry = Registry(registry_dir)
+            llm_client = LLMClient(full_cfg)
+
+            def _on_chunk_done(n: int, total: int, tokens: int, cost: float) -> None:
+                click.echo(
+                    f"  chunk {n}/{total}: {tokens} tokens, ${cost:.4f}"
+                )
+
+            synthesis = run_synthesis(
+                chunks=chunks,
+                chunk_ids=chunk_ids,
+                registry=registry,
+                llm_client=llm_client,
+                project_root=project_root,
+                state=ingest_state,
+                progress_callback=_on_chunk_done,
+            )
+
+            result.total_tokens_in = synthesis.total_tokens_in
+            result.total_tokens_out = synthesis.total_tokens_out
+            result.total_cost_usd = synthesis.total_cost_usd
+            result.notes.extend(synthesis.notes)
+
+            # 5d. Write pages. Builds a source_entry on the fly so the
+            # writer can emit the source summary page even on the very
+            # first ingest of a file (before the catalog has recorded it).
+            catalog_entry: SourceEntry | None = (
+                catalog.get(content_hash) if catalog is not None else None
+            )
+            if catalog_entry is None and content_hash is not None:
+                size_bytes = (
+                    source_path.stat().st_size if source_path.is_file() else 0
+                )
+                raw_rel = (
+                    str(raw_path.relative_to(project_root))
+                    if raw_path is not None
+                    else None
+                )
+                catalog_entry = SourceEntry(
+                    content_hash=content_hash,
+                    name=source_path.name,
+                    content_type=content.content_type,
+                    size_bytes=size_bytes,
+                    raw_path=raw_rel,
+                    first_ingested_at=now_iso(),
+                    last_ingested_at=now_iso(),
+                )
+
+            writer = PageWriter(project_root, registry, force=force)
+            write_result = writer.write(synthesis, source_entry=catalog_entry)
+
+            result.pages_created.extend(write_result.created_page_ids)
+            result.pages_updated.extend(write_result.updated_page_ids)
+            result.notes.extend(write_result.notes)
+            synthesis_written = (
+                list(write_result.created_paths) + list(write_result.updated_paths)
+            )
 
         # 10b. Rebuild backlink graph and sync inbound/outbound counts
         # back to the manifest. Full rebuild is wasteful at scale but
         # correct at every size; incremental comes in a later pass.
         backlinks_path: Path | None = None
         manifest_path: Path | None = None
-        registry_dir = project_root / "_registry"
         if registry_dir.exists():
             backlinks = BacklinkRegistry(registry_dir, project_root / "wiki")
             backlinks.rebuild()
             backlinks.save()
             backlinks_path = backlinks.backlinks_path
 
-            registry = Registry(registry_dir)
+            # Reuse the registry loaded in step 5c if the synthesis
+            # block ran; otherwise load fresh. Either way, mutate in
+            # place so the backlink counts + synthesized page entries
+            # end up in a single save below.
+            if registry is None:
+                registry = Registry(registry_dir)
             counts = backlinks.link_counts()
-            manifest_dirty = False
             for page_id, entry in registry.pages.items():
                 inbound, outbound = counts.get(page_id, (0, 0))
-                if (
-                    entry.inbound_link_count != inbound
-                    or entry.outbound_link_count != outbound
-                ):
-                    entry.inbound_link_count = inbound
-                    entry.outbound_link_count = outbound
-                    manifest_dirty = True
-            if manifest_dirty:
-                registry.save()
-                manifest_path = registry.manifest_path
+                entry.inbound_link_count = inbound
+                entry.outbound_link_count = outbound
+
+            registry.save()
+            manifest_path = registry.manifest_path
 
             # Regenerate indexes *after* manifest save so sub-indexes
             # read the fresh inbound/outbound counts. All written index
@@ -282,13 +411,17 @@ def ingest(
             index_paths = []
 
         # 11. Git commit. Empty staging no-ops to HEAD so this is safe
-        # during early pipeline development when no pages are written yet.
+        # when synthesis produced no pages (e.g., every chunk failed).
         git_ops = GitOps(project_root)
         staged: list[Path] = []
         if raw_path is not None:
             staged.append(raw_path)
-        for rel in result.pages_created + result.pages_updated:
-            staged.append(project_root / rel)
+        # Stage every page written by the synthesis block (includes
+        # source page + created + updated). Deduped against
+        # pages_created / pages_updated which hold page_ids, not paths.
+        for page_path in synthesis_written:
+            if page_path not in staged:
+                staged.append(page_path)
         if backlinks_path is not None:
             staged.append(backlinks_path)
         if manifest_path is not None:
@@ -341,6 +474,8 @@ def ingest(
         # 13. Log event. Written *after* the commit so the event can
         # carry the commit hash. The resulting log.md change is picked up
         # by the next commit (ingest, lint, etc.) — acceptable staleness.
+        # Token + cost fields finally carry real numbers now that C20's
+        # LLMClient populates LLMCallMetrics on every synthesize call.
         log_path = project_root / "wiki" / "log.md"
         if log_path.parent.exists():
             event = create_event(
@@ -349,6 +484,8 @@ def ingest(
                 pages_created=result.pages_created,
                 pages_updated=result.pages_updated,
                 git_commit_hash=commit_hash,
+                tokens_used=result.total_tokens_in + result.total_tokens_out,
+                cost_usd=result.total_cost_usd,
             )
             append_event(log_path, event)
 
