@@ -32,3 +32,12 @@ wikiloom = "wikiloom.cli:main"
 [build-system]
 requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+# `live` marks tests that hit a real LLM provider. Skipped by default
+# so `pytest` stays free and deterministic. Run them manually with:
+#     ANTHROPIC_API_KEY=... pytest -m live
+markers = [
+    "live: tests that hit a real LLM provider (skipped by default)",
+]
+addopts = "-m 'not live'"
