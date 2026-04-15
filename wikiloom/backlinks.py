@@ -295,6 +295,15 @@ class BacklinkRegistry:
         return _extract_edges_from_body(body, page_id, timestamp)
 
     # ------------------------------------------------------------------
+    # Edge access
+    # ------------------------------------------------------------------
+
+    @property
+    def edges(self) -> list[BacklinkEdge]:
+        """Read-only snapshot of all edges. Used by the SQLite cache sync."""
+        return list(self._edges)
+
+    # ------------------------------------------------------------------
     # Graph (lazy)
     # ------------------------------------------------------------------
 

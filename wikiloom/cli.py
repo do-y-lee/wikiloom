@@ -235,6 +235,40 @@ def reindex(project: Path | None) -> None:
     click.echo(f"Rebuilt {len(written)} index file(s).")
 
 
+@main.command("rebuild-cache")
+@click.option(
+    "--project",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Project root. Defaults to walking upward from the current directory.",
+)
+def rebuild_cache(project: Path | None) -> None:
+    """Regenerate the SQLite query cache from manifest + backlinks.
+
+    The cache at ``_registry/wiki.db`` is a git-ignored derived index.
+    Run this if it's missing, corrupt, or suspected to be out of sync.
+    """
+    from wikiloom.cache import SQLiteCache
+    from wikiloom.locking import FileLock
+
+    if project is None:
+        project = _find_project_root(Path.cwd())
+        if project is None:
+            raise click.ClickException(
+                "Could not find a WikiLoom project (no wikiloom.toml found)."
+            )
+
+    with FileLock(project):
+        cache = SQLiteCache(project / "_registry" / "wiki.db")
+        count = cache.full_rebuild(project)
+    stats = cache.get_stats()
+    click.echo(
+        f"Cache rebuilt: {count} page(s), "
+        f"{stats['aliases']} alias(es), "
+        f"{stats['backlinks']} backlink(s)."
+    )
+
+
 def _print_report(report) -> None:
     """Render a ``LintReport`` to stdout."""
     if report.is_healthy:

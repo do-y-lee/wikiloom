@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import json
 import shutil
-import sqlite3
 from importlib import resources as importlib_resources
 from pathlib import Path
 
+from wikiloom.cache import init_cache
 from wikiloom.utils import now_iso
 
 # Wiki subdirectories under wiki/
@@ -42,55 +42,6 @@ dist/
 build/
 .venv/
 """
-
-SQLITE_SCHEMA = """\
-CREATE TABLE IF NOT EXISTS pages (
-    page_id TEXT PRIMARY KEY,
-    title TEXT NOT NULL,
-    type TEXT NOT NULL,
-    status TEXT DEFAULT 'active',
-    summary TEXT,
-    created TEXT NOT NULL,
-    modified TEXT NOT NULL,
-    source_count INTEGER DEFAULT 0,
-    inbound_links INTEGER DEFAULT 0,
-    outbound_links INTEGER DEFAULT 0,
-    confidence TEXT DEFAULT 'medium',
-    human_edited BOOLEAN DEFAULT 0,
-    content_hash TEXT
-);
-
-CREATE TABLE IF NOT EXISTS aliases (
-    alias TEXT NOT NULL,
-    page_id TEXT NOT NULL,
-    FOREIGN KEY (page_id) REFERENCES pages(page_id),
-    PRIMARY KEY (alias, page_id)
-);
-
-CREATE TABLE IF NOT EXISTS backlinks (
-    source_page TEXT NOT NULL,
-    target_page TEXT NOT NULL,
-    context TEXT,
-    confidence TEXT DEFAULT 'high',
-    linked_at TEXT NOT NULL,
-    PRIMARY KEY (source_page, target_page)
-);
-
-CREATE TABLE IF NOT EXISTS events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    timestamp TEXT NOT NULL,
-    event_type TEXT NOT NULL,
-    description TEXT,
-    pages_created TEXT,
-    pages_updated TEXT,
-    tokens_used INTEGER DEFAULT 0,
-    cost_usd REAL DEFAULT 0.0,
-    git_hash TEXT
-);
-
-CREATE VIRTUAL TABLE IF NOT EXISTS pages_fts USING fts5(page_id, title, summary);
-"""
-
 
 def _generate_config(name: str, domain: str) -> str:
     """Generate wikiloom.toml content."""
@@ -218,13 +169,6 @@ def _copy_templates(dest: Path) -> None:
         )
 
 
-def _init_sqlite(db_path: Path) -> None:
-    """Initialize the SQLite query cache with schema."""
-    conn = sqlite3.connect(str(db_path))
-    conn.executescript(SQLITE_SCHEMA)
-    conn.close()
-
-
 def _init_git(project_dir: Path) -> None:
     """Initialize a git repository if one doesn't exist."""
     from git import Repo
@@ -319,8 +263,9 @@ def init_project(
         json.dumps(schema_version, indent=2) + "\n", encoding="utf-8"
     )
 
-    # SQLite database
-    _init_sqlite(registry_dir / "wiki.db")
+    # SQLite query cache (schema only; populated on first write via
+    # SQLiteCache.sync_from_files or `wikiloom rebuild-cache`).
+    init_cache(registry_dir / "wiki.db")
 
     # .wikiloom/ schema directory
     wikiloom_dir = project_dir / ".wikiloom"

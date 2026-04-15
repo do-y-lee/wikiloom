@@ -265,6 +265,16 @@ def ingest(
             )
             append_event(log_path, event)
 
+        # 14. Sync the SQLite query cache (derived, git-ignored).
+        # Runs after the commit so `wiki.db` mirrors the just-committed
+        # state. `wikiloom rebuild-cache` is the manual recovery path.
+        if registry_dir.exists():
+            from wikiloom.cache import SQLiteCache
+
+            SQLiteCache(registry_dir / "wiki.db").sync_from_files(
+                project_root, staged
+            )
+
         return result
 
 
