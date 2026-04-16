@@ -37,7 +37,7 @@ class LLMConfig:
 @dataclass
 class LinkingConfig:
     ner_model: str = "en_core_web_sm"
-    auto_create_stubs: bool = True
+    auto_create_stubs: bool = False
     high_confidence_threshold: int = 95
     medium_confidence_threshold: int = 85
     low_confidence_threshold: int = 70

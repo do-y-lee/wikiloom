@@ -60,7 +60,7 @@ monthly_budget_usd = 50.0
 
 [linking]
 ner_model = "en_core_web_sm"
-auto_create_stubs = true
+auto_create_stubs = false
 high_confidence_threshold = 95
 medium_confidence_threshold = 85
 low_confidence_threshold = 70
