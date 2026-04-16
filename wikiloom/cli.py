@@ -240,7 +240,19 @@ def reindex(project: Path | None) -> None:
 
 
 @main.command("query")
-@click.argument("question")
+@click.argument("question", required=False, default=None)
+@click.option(
+    "--detail",
+    is_flag=True,
+    default=False,
+    help="Show sources, confidence, cost, and follow-ups alongside the answer.",
+)
+@click.option(
+    "--last",
+    is_flag=True,
+    default=False,
+    help="Show detail from the most recent query without making an LLM call.",
+)
 @click.option(
     "--save",
     is_flag=True,
@@ -259,16 +271,24 @@ def reindex(project: Path | None) -> None:
     default=None,
     help="Project root. Defaults to walking upward from the current directory.",
 )
-def query(question: str, save: bool, max_pages: int, project: Path | None) -> None:
+def query(
+    question: str | None,
+    detail: bool,
+    last: bool,
+    save: bool,
+    max_pages: int,
+    project: Path | None,
+) -> None:
     """Ask a question and get an answer grounded in the wiki's content.
 
-    Retrieves relevant pages via full-text search, injects them as LLM
-    context, and returns a structured answer with source citations.
-    Pass ``--save`` to file the answer as a synthesis page.
+    Default output shows just the answer. Use ``--detail`` to include
+    sources, confidence, cost, and suggested follow-ups. Use ``--last``
+    to view detail from the most recent query without another LLM call.
     """
+    import json as json_mod
+
     from wikiloom.config import Config
-    from wikiloom.frontmatter import Frontmatter, write_page
-    from wikiloom.ingest.errors import IngestError
+    from wikiloom.frontmatter import Frontmatter, read_page, write_page
     from wikiloom.llm import LLMClient
     from wikiloom.query import run_query
     from wikiloom.registry import PageEntry, Registry
@@ -280,6 +300,21 @@ def query(question: str, save: bool, max_pages: int, project: Path | None) -> No
             raise click.ClickException(
                 "Could not find a WikiLoom project (no wikiloom.toml found)."
             )
+
+    last_query_path = project / "_registry" / "last_query.json"
+
+    # --last: show detail from the cached result, no LLM call
+    if last:
+        if not last_query_path.exists():
+            raise click.ClickException("No previous query result found.")
+        data = json_mod.loads(last_query_path.read_text(encoding="utf-8"))
+        click.echo(data.get("answer", ""))
+        click.echo("")
+        _print_query_detail(data, project)
+        return
+
+    if not question:
+        raise click.UsageError("Missing argument 'QUESTION'. Use --last to view the previous result.")
 
     try:
         cfg = Config.load(project)
@@ -300,32 +335,44 @@ def query(question: str, save: bool, max_pages: int, project: Path | None) -> No
     except Exception as exc:
         raise click.ClickException(str(exc)) from exc
 
-    # Print the answer
-    click.echo(answer.answer)
-    click.echo("")
-
-    # Sources
-    if answer.sources_consulted:
-        click.echo("Sources:")
-        for src in answer.sources_consulted:
-            click.echo(f"  [{src.relevance}] {src.page_path}")
-
-    click.echo(f"\nConfidence: {answer.confidence}")
-    click.echo(
-        f"Tokens: {answer.metrics.tokens_in + answer.metrics.tokens_out} "
-        f"(${answer.metrics.cost_usd:.4f})"
+    # Save result for --last
+    result_data = {
+        "question": question,
+        "answer": answer.answer,
+        "sources_consulted": [
+            {"page_path": s.page_path, "relevance": s.relevance}
+            for s in answer.sources_consulted
+        ],
+        "confidence": answer.confidence,
+        "suggest_synthesis": answer.suggest_synthesis,
+        "suggested_followups": answer.suggested_followups,
+        "tokens_in": answer.metrics.tokens_in,
+        "tokens_out": answer.metrics.tokens_out,
+        "cost_usd": answer.metrics.cost_usd,
+        "timestamp": now_iso(),
+    }
+    last_query_path.parent.mkdir(parents=True, exist_ok=True)
+    last_query_path.write_text(
+        json_mod.dumps(result_data, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
     )
 
-    if answer.suggested_followups:
-        click.echo("\nSuggested follow-ups:")
-        for followup in answer.suggested_followups:
-            click.echo(f"  - {followup}")
+    # Print the answer
+    click.echo(answer.answer)
 
-    if answer.suggest_synthesis and not save:
+    # --detail: show metadata inline
+    if detail:
+        click.echo("")
+        _print_query_detail(result_data, project)
+
+    if not detail and answer.suggest_synthesis and not save:
         click.echo(
             "\nThis answer could be a good synthesis page. "
             "Re-run with --save to file it."
         )
+
+    if not detail and not save:
+        click.echo("\nRun with --detail for sources and metadata, or --last to review later.")
 
     # --save: write as a synthesis page
     if save:
@@ -361,6 +408,54 @@ def query(question: str, save: bool, max_pages: int, project: Path | None) -> No
         registry.save()
 
         click.echo(f"\nSaved to {page_path.relative_to(project)}")
+
+
+def _print_query_detail(data: dict, project: Path) -> None:
+    """Print the detail view for a query result."""
+    from wikiloom.frontmatter import read_page
+    from wikiloom.registry import Registry
+
+    sources = data.get("sources_consulted", [])
+    if sources:
+        registry = Registry(project / "_registry")
+        click.echo("Sources:")
+        for src in sources:
+            page_path = src.get("page_path", "")
+            relevance = src.get("relevance", "")
+
+            # Resolve friendly name: page title + original source file
+            title = page_path
+            source_file = ""
+            entry = registry.get_page(page_path) if page_path else None
+            if entry:
+                title = entry.title
+            page_file = project / "wiki" / f"{page_path}.md"
+            if page_file.exists():
+                fm, _ = read_page(page_file)
+                if fm and fm.sources:
+                    for s in fm.sources:
+                        if isinstance(s, dict) and s.get("name"):
+                            source_file = s["name"]
+                            break
+
+            line = f"  [{relevance}] {title}"
+            if source_file:
+                line += f" (from {source_file})"
+            click.echo(line)
+            click.echo(f"            → {page_path}.md")
+
+    confidence = data.get("confidence", "")
+    tokens_in = data.get("tokens_in", 0)
+    tokens_out = data.get("tokens_out", 0)
+    cost = data.get("cost_usd", 0.0)
+    click.echo(f"\nConfidence: {confidence}")
+    click.echo(f"Tokens: {tokens_in + tokens_out} (${cost:.4f})")
+
+    followups = data.get("suggested_followups", [])
+    if followups:
+        click.echo("\nSuggested follow-ups:")
+        for f in followups:
+            click.echo(f"  - {f}")
 
 
 @main.command("status")
