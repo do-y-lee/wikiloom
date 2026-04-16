@@ -1,4 +1,4 @@
-"""Component 10: Human Edit Protection.
+"""Human Edit Protection.
 
 Git is the source of truth for "is this page human-authored?" — a page
 is protected if its most recent commit has a subject prefix outside

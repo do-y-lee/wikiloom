@@ -1,4 +1,4 @@
-"""Component 12: SQLite query cache.
+"""SQLite query cache.
 
 The cache is a derived read-side index over the wiki: it mirrors
 ``manifest.json`` (pages, aliases), ``backlinks.json`` (graph edges),
@@ -83,7 +83,7 @@ CREATE TABLE IF NOT EXISTS events (
     git_hash TEXT
 );
 
-CREATE VIRTUAL TABLE IF NOT EXISTS pages_fts USING fts5(page_id, title, summary);
+CREATE VIRTUAL TABLE IF NOT EXISTS pages_fts USING fts5(page_id, title, summary, body, tokenize='porter ascii');
 
 CREATE TABLE IF NOT EXISTS chunks (
     chunk_id TEXT PRIMARY KEY,
@@ -100,20 +100,37 @@ CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(source_hash);
 """
 
 
+_FTS_STOP_WORDS = frozenset({
+    "a", "an", "and", "are", "as", "at", "be", "been", "but", "by",
+    "can", "could", "did", "do", "does", "for", "from", "had", "has",
+    "have", "he", "her", "his", "how", "i", "if", "in", "into", "is",
+    "it", "its", "may", "me", "might", "my", "no", "not", "of", "on",
+    "or", "our", "shall", "she", "should", "so", "some", "such", "than",
+    "that", "the", "their", "them", "then", "there", "these", "they",
+    "this", "to", "us", "was", "we", "were", "what", "when", "where",
+    "which", "who", "will", "with", "would", "you", "your",
+})
+
+
 def _build_fts_match(query: str) -> str:
     """Turn a free-text query into an FTS5 MATCH expression.
 
-    Each whitespace-separated term becomes a quoted phrase so FTS5
-    operator characters (``/``, ``-``, ``:``, ``*``, ``(``, ``)``,
-    ``"``) survive as literals. Empty strings after stripping return
-    an empty expression.
+    Strips stop words and punctuation so a natural-language question
+    like "What is overdraft protection?" becomes ``"overdraft"
+    "protection"`` instead of ``"What" "is" "overdraft"
+    "protection?"`` (which would fail because no page title contains
+    "What"). Each remaining term is quoted so FTS5 operator
+    characters survive as literals.
     """
-    terms = [t for t in query.split() if t]
-    quoted = []
-    for term in terms:
-        escaped = term.replace('"', '""')
-        quoted.append(f'"{escaped}"')
-    return " ".join(quoted)
+    import re
+
+    terms: list[str] = []
+    for raw in query.split():
+        cleaned = re.sub(r"[^\w-]", "", raw).lower()
+        if cleaned and cleaned not in _FTS_STOP_WORDS:
+            escaped = cleaned.replace('"', '""')
+            terms.append(f'"{escaped}"')
+    return " OR ".join(terms)
 
 
 def init_cache(db_path: Path) -> None:
@@ -173,14 +190,32 @@ class SQLiteCache:
 
         with self._connect() as conn:
             # Wipe and repopulate. FTS5 doesn't support TRUNCATE but
-            # DELETE works on both regular and virtual tables.
+            # DELETE works on both regular and virtual tables. The FTS
+            # table is dropped and recreated so schema changes (e.g.
+            # adding the Porter stemmer tokenizer) take effect on
+            # rebuild without requiring a manual db delete.
             conn.execute("DELETE FROM pages")
             conn.execute("DELETE FROM aliases")
             conn.execute("DELETE FROM backlinks")
-            conn.execute("DELETE FROM pages_fts")
+            conn.execute("DROP TABLE IF EXISTS pages_fts")
+            conn.execute(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS pages_fts "
+                "USING fts5(page_id, title, summary, body, tokenize='porter ascii')"
+            )
 
             page_count = 0
             for page_id, entry in registry.pages.items():
+                # Read the page body from disk so FTS can index the
+                # full content, not just the title + summary. This is
+                # what makes "overdrawn" match the overdraft-protection
+                # page — the word appears in the body even when the
+                # title and summary use "overdraft".
+                body_text = ""
+                page_path = wiki_dir / f"{page_id}.md"
+                if page_path.exists():
+                    from wikiloom.frontmatter import read_page
+                    _, body_text = read_page(page_path)
+
                 conn.execute(
                     """
                     INSERT INTO pages (
@@ -207,8 +242,8 @@ class SQLiteCache:
                     ),
                 )
                 conn.execute(
-                    "INSERT INTO pages_fts (page_id, title, summary) VALUES (?, ?, ?)",
-                    (page_id, entry.title, entry.summary or ""),
+                    "INSERT INTO pages_fts (page_id, title, summary, body) VALUES (?, ?, ?, ?)",
+                    (page_id, entry.title, entry.summary or "", body_text),
                 )
                 for alias in entry.aliases:
                     conn.execute(

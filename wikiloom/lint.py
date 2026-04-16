@@ -1,4 +1,4 @@
-"""Component 8: Lint & Health System.
+"""Lint & Health System.
 
 Batch health checks over a WikiLoom project. ``WikiLinter`` is a pure
 reader over existing state — manifest, ``backlinks.json``, page

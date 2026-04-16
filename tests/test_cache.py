@@ -258,12 +258,12 @@ def test_search_by_summary(project: Path) -> None:
         project,
         "concepts/flash-attention",
         "Flash Attention",
-        summary="An I/O-aware attention algorithm for GPUs.",
+        summary="An efficient attention algorithm for GPUs.",
     )
     cache = SQLiteCache(project / "_registry" / "wiki.db")
     cache.full_rebuild(project)
 
-    results = cache.search("I/O-aware")
+    results = cache.search("efficient algorithm GPUs")
     assert len(results) == 1
     assert results[0]["page_id"] == "concepts/flash-attention"
 

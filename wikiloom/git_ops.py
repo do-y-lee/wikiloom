@@ -1,4 +1,4 @@
-"""Component 6: Git integration.
+"""Git integration.
 
 Thin wrapper over GitPython that enforces WikiLoom's commit-message
 convention so downstream tools (linter, ``get_file_history``,

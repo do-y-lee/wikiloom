@@ -1,4 +1,4 @@
-"""Component 7: Backlink Registry & Graph.
+"""Backlink Registry & Graph.
 
 Turns ``[[target|display]]`` wikilinks embedded in wiki page bodies into
 a queryable bidirectional graph. Persists to

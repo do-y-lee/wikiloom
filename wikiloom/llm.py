@@ -1,4 +1,4 @@
-"""Component 20: LLM provider abstraction.
+"""LLM provider abstraction.
 
 Thin wrapper around ``litellm.completion`` that exposes three call
 shapes used by the rest of WikiLoom:

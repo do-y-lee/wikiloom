@@ -1,4 +1,4 @@
-"""Component 9: Tiered Navigation — IndexUpdater.
+"""Tiered Navigation — IndexUpdater.
 
 Regenerates ``wiki/index.md`` and ``wiki/<category>/index.md`` from the
 current manifest + on-disk frontmatter. Index files are the LLM's
