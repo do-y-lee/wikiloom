@@ -357,6 +357,8 @@ def run_synthesis(
     failed = 0
     notes: list[str] = []
     seen_slugs: set[tuple[str, str]] = set()
+    consecutive_provider_failures = 0
+    max_consecutive_failures = 3
 
     for i, (chunk, chunk_id) in enumerate(zip(chunks, chunk_ids)):
         chunk_index = int(chunk.metadata.get("chunk_index", i))
@@ -372,13 +374,31 @@ def run_synthesis(
 
         try:
             llm_result = llm_client.synthesize(system_prompt, user_prompt)
-        except (LLMProviderError, LLMResponseFormatError) as exc:
+        except LLMProviderError as exc:
+            failed += 1
+            consecutive_provider_failures += 1
+            msg = f"chunk {chunk_index + 1}/{chunk_total}: {exc}"
+            notes.append(msg)
+            if state is not None:
+                state.mark_chunk_failed(chunk_index, str(exc))
+            if consecutive_provider_failures >= max_consecutive_failures:
+                remaining = chunk_total - chunk_index - 1
+                notes.append(
+                    f"aborting: {consecutive_provider_failures} consecutive "
+                    f"provider errors — skipping {remaining} remaining chunk(s). "
+                    f"Fix the issue and re-run with --force."
+                )
+                break
+            continue
+        except LLMResponseFormatError as exc:
             failed += 1
             msg = f"chunk {chunk_index + 1}/{chunk_total}: {exc}"
             notes.append(msg)
             if state is not None:
                 state.mark_chunk_failed(chunk_index, str(exc))
             continue
+
+        consecutive_provider_failures = 0
 
         total_in += llm_result.metrics.tokens_in
         total_out += llm_result.metrics.tokens_out

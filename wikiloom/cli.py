@@ -410,6 +410,22 @@ def status(project: Path | None) -> None:
         source_count = len(catalog._entries)  # noqa: SLF001
         click.echo(f"  Sources ingested: {source_count}")
 
+    from wikiloom.ingest.state import IngestState
+
+    incomplete = IngestState.load(registry_dir)
+    if incomplete is not None:
+        pending = incomplete.pending_indices()
+        total_chunks = len(incomplete.chunks)
+        done = total_chunks - len(pending)
+        click.echo("")
+        click.echo(
+            f"  WARNING: incomplete ingest for {incomplete.source_name}"
+        )
+        click.echo(
+            f"           ({done}/{total_chunks} chunks synthesized "
+            f"— re-run with --force)"
+        )
+
     events = parse_log(project / "wiki" / "log.md")
     if events:
         last = events[0]

@@ -50,6 +50,8 @@ from typing import Any
 
 import litellm
 
+litellm.suppress_debug_info = True
+
 from wikiloom.config import Config, LLMConfig
 from wikiloom.llm_errors import (
     LLMError,
