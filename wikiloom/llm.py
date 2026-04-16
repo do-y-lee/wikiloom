@@ -146,7 +146,7 @@ class LLMClient:
         self.max_tokens: int = llm_cfg.max_tokens_per_operation
 
     # ------------------------------------------------------------------
-    # synthesize — JSON-mode structured output
+    # synthesize — structured JSON output
     # ------------------------------------------------------------------
 
     def synthesize(
@@ -154,7 +154,14 @@ class LLMClient:
         system_prompt: str,
         user_prompt: str,
     ) -> SynthesizeResult:
-        """Run a structured-output completion and return parsed JSON.
+        """Run a completion that returns JSON and parse the result.
+
+        Does NOT use ``response_format={"type": "json_object"}``
+        because litellm's translation of that flag to Anthropic's
+        tool-use mechanism can produce empty ``message.content``.
+        Instead, the system prompt instructs the model to return
+        raw JSON, and we strip any markdown code fences before
+        parsing.
 
         Raises:
             LLMProviderError: litellm / provider error (rate limit,
@@ -164,8 +171,13 @@ class LLMClient:
                 valid JSON. The raw response is available on the
                 exception for debugging.
         """
+        json_instruction = (
+            "\n\nIMPORTANT: Return your response as raw JSON only. "
+            "No markdown code fences, no explanation, no commentary. "
+            "Just the JSON object."
+        )
         messages = [
-            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": system_prompt + json_instruction},
             {"role": "user", "content": user_prompt},
         ]
         try:
@@ -173,7 +185,6 @@ class LLMClient:
                 model=self.model,
                 messages=messages,
                 max_tokens=self.max_tokens,
-                response_format={"type": "json_object"},
             )
         except Exception as exc:
             raise LLMProviderError(
@@ -183,8 +194,9 @@ class LLMClient:
             ) from exc
 
         raw_text, metrics = _extract_text_and_metrics(response, self.model)
+        cleaned = _strip_code_fences(raw_text)
         try:
-            parsed = json.loads(raw_text)
+            parsed = json.loads(cleaned)
         except json.JSONDecodeError as exc:
             raise LLMResponseFormatError(
                 model=self.model,
@@ -274,9 +286,29 @@ class LLMClient:
         return QueryResult(text=text, metrics=metrics)
 
 
+import re
+
 # ----------------------------------------------------------------------
 # Response parsing helpers
 # ----------------------------------------------------------------------
+
+_CODE_FENCE_RE = re.compile(
+    r"^```(?:json)?\s*\n(.*?)\n```\s*$", re.DOTALL
+)
+
+
+def _strip_code_fences(text: str) -> str:
+    """Remove markdown code fences wrapping a JSON response.
+
+    LLMs often return ``json\\n{...}\\n``` `` even when told not to.
+    This strips the outermost fence if present so ``json.loads``
+    sees clean JSON.
+    """
+    stripped = text.strip()
+    match = _CODE_FENCE_RE.match(stripped)
+    if match:
+        return match.group(1).strip()
+    return stripped
 
 
 def _extract_text_and_metrics(

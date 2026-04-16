@@ -392,10 +392,19 @@ def run_synthesis(
             continue
         except LLMResponseFormatError as exc:
             failed += 1
+            consecutive_provider_failures += 1
             msg = f"chunk {chunk_index + 1}/{chunk_total}: {exc}"
             notes.append(msg)
             if state is not None:
                 state.mark_chunk_failed(chunk_index, str(exc))
+            if consecutive_provider_failures >= max_consecutive_failures:
+                remaining = chunk_total - chunk_index - 1
+                notes.append(
+                    f"aborting: {consecutive_provider_failures} consecutive "
+                    f"failures — skipping {remaining} remaining chunk(s). "
+                    f"Fix the issue and re-run with --force."
+                )
+                break
             continue
 
         consecutive_provider_failures = 0

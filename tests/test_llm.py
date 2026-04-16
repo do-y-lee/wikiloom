@@ -190,11 +190,12 @@ def test_synthesize_sends_system_and_user_messages(
     client.synthesize("SYS", "USER")
     assert len(calls) == 1
     _, kwargs = calls[0]
-    assert kwargs["messages"] == [
-        {"role": "system", "content": "SYS"},
-        {"role": "user", "content": "USER"},
-    ]
-    assert kwargs["response_format"] == {"type": "json_object"}
+    msgs = kwargs["messages"]
+    assert msgs[0]["role"] == "system"
+    assert msgs[0]["content"].startswith("SYS")
+    assert "JSON" in msgs[0]["content"]
+    assert msgs[1] == {"role": "user", "content": "USER"}
+    assert "response_format" not in kwargs
     assert kwargs["model"] == "claude-sonnet-4-20250514"
     assert kwargs["max_tokens"] == 4000
 
@@ -257,13 +258,14 @@ def test_query_returns_plain_text(client: LLMClient, mock_completion) -> None:
     assert result.metrics.tokens_out == 10
 
 
-def test_query_does_not_request_json_mode(
+def test_query_does_not_append_json_instruction(
     client: LLMClient, mock_completion
 ) -> None:
     calls, install = mock_completion
     install(_make_response("hi"))
-    client.query("s", "u")
+    client.query("SYS", "u")
     _, kwargs = calls[0]
+    assert kwargs["messages"][0]["content"] == "SYS"
     assert "response_format" not in kwargs
 
 
