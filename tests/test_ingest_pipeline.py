@@ -296,6 +296,85 @@ def test_ingest_with_synthesis_writes_pages_end_to_end(
     assert "wiki/sources/sample.md" in changed
 
 
+def test_ingest_links_pages_after_synthesis(
+    project: Path,
+    sample_markdown: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After synthesis, the linker should insert wikilinks between pages
+    that reference each other's topics."""
+
+    def _linking_response() -> SynthesizeResult:
+        return SynthesizeResult(
+            result={
+                "source_summary": {
+                    "title": "Doc",
+                    "one_line": "D",
+                    "content_markdown": "## About\n\nSummary.",
+                },
+                "pages_to_create": [
+                    {
+                        "type": "concept",
+                        "suggested_slug": "flash-attention",
+                        "title": "Flash Attention",
+                        "content_markdown": (
+                            "# Flash Attention\n\n"
+                            "Flash Attention was introduced by Tri Dao."
+                        ),
+                        "confidence": "high",
+                    },
+                    {
+                        "type": "entity",
+                        "suggested_slug": "tri-dao",
+                        "title": "Tri Dao",
+                        "content_markdown": (
+                            "# Tri Dao\n\n"
+                            "Tri Dao created Flash Attention."
+                        ),
+                        "confidence": "high",
+                    },
+                ],
+                "pages_to_update": [],
+                "entities_mentioned": ["Tri Dao"],
+                "concepts_mentioned": ["Flash Attention"],
+            },
+            metrics=LLMCallMetrics(
+                tokens_in=300, tokens_out=200, cost_usd=0.002, model="mock"
+            ),
+        )
+
+    _install_mock_llm(monkeypatch, response_builder=_linking_response)
+    result = ingest(sample_markdown, project_root=project)
+
+    # Both pages should exist
+    fa_page = project / "wiki" / "concepts" / "flash-attention.md"
+    td_page = project / "wiki" / "entities" / "tri-dao.md"
+    assert fa_page.exists()
+    assert td_page.exists()
+
+    # The linker should have inserted wikilinks — Flash Attention page
+    # mentions "Tri Dao" which should now be [[entities/tri-dao|Tri Dao]]
+    fa_body = fa_page.read_text(encoding="utf-8")
+    td_body = td_page.read_text(encoding="utf-8")
+
+    assert "[[entities/tri-dao" in fa_body or "Tri Dao" in fa_body
+    assert "[[concepts/flash-attention" in td_body or "Flash Attention" in td_body
+
+    # Backlinks should reflect the cross-references
+    import json
+
+    bl_data = json.loads(
+        (project / "_registry" / "backlinks.json").read_text(encoding="utf-8")
+    )
+    links = bl_data.get("links", {})
+    # At least one page should have inbound or outbound links
+    has_links = any(
+        entry.get("inbound") or entry.get("outbound")
+        for entry in links.values()
+    )
+    assert has_links, "Expected at least one backlink edge after linking"
+
+
 def test_ingest_populates_event_log_with_real_tokens(
     project: Path,
     sample_markdown: Path,

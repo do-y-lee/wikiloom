@@ -239,6 +239,122 @@ def reindex(project: Path | None) -> None:
     click.echo(f"Rebuilt {len(written)} index file(s).")
 
 
+@main.command("review")
+@click.option(
+    "--accept-all",
+    is_flag=True,
+    default=False,
+    help="Accept every pending link without prompting.",
+)
+@click.option(
+    "--clear",
+    is_flag=True,
+    default=False,
+    help="Discard all pending links without inserting any.",
+)
+@click.option(
+    "--project",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Project root. Defaults to walking upward from the current directory.",
+)
+def review(accept_all: bool, clear: bool, project: Path | None) -> None:
+    """Review and action low-confidence link candidates.
+
+    The linking engine defers links below the medium-confidence
+    threshold to ``_registry/pending.json`` instead of auto-inserting
+    them. This command lets you batch-accept or batch-clear those
+    candidates. ``--accept-all`` inserts every pending link into its
+    source page; ``--clear`` discards them. Without flags, prints the
+    list for manual inspection.
+    """
+    import json
+
+    from wikiloom.frontmatter import parse_frontmatter, render_frontmatter
+    from wikiloom.locking import FileLock
+
+    if accept_all and clear:
+        raise click.UsageError("--accept-all and --clear are mutually exclusive.")
+
+    if project is None:
+        project = _find_project_root(Path.cwd())
+        if project is None:
+            raise click.ClickException(
+                "Could not find a WikiLoom project (no wikiloom.toml found)."
+            )
+
+    pending_path = project / "_registry" / "pending.json"
+    if not pending_path.exists():
+        click.echo("No pending links.")
+        return
+
+    data = json.loads(pending_path.read_text(encoding="utf-8"))
+    items = data.get("pending", []) if isinstance(data, dict) else data
+    if not items:
+        click.echo("No pending links.")
+        return
+
+    if clear:
+        with FileLock(project):
+            data["pending"] = []
+            pending_path.write_text(
+                json.dumps(data, indent=2) + "\n", encoding="utf-8"
+            )
+        click.echo(f"Cleared {len(items)} pending link(s).")
+        return
+
+    if not accept_all:
+        click.echo(f"Pending links ({len(items)}):")
+        for item in items:
+            click.echo(
+                f"  {item.get('source_page', '?')} → "
+                f"[[{item.get('candidate_page_id', '?')}]] "
+                f"(matched: {item.get('matched_text', '?')!r}, "
+                f"score: {item.get('score', '?')})"
+            )
+        click.echo("")
+        click.echo(
+            "Run with --accept-all to insert all, or --clear to discard."
+        )
+        return
+
+    # --accept-all: insert each pending link into its source page.
+    wiki_dir = project / "wiki"
+    inserted = 0
+    with FileLock(project):
+        for item in items:
+            source_page = item.get("source_page", "")
+            target = item.get("candidate_page_id", "")
+            matched_text = item.get("matched_text", "")
+            if not source_page or not target or not matched_text:
+                continue
+
+            page_path = wiki_dir / f"{source_page}.md"
+            if not page_path.exists():
+                continue
+
+            text = page_path.read_text(encoding="utf-8")
+            fm, body = parse_frontmatter(text)
+            wikilink = f"[[{target}|{matched_text}]]"
+            new_body = body.replace(matched_text, wikilink, 1)
+            if new_body != body:
+                if fm is not None:
+                    page_path.write_text(
+                        render_frontmatter(fm) + "\n" + new_body,
+                        encoding="utf-8",
+                    )
+                else:
+                    page_path.write_text(new_body, encoding="utf-8")
+                inserted += 1
+
+        data["pending"] = []
+        pending_path.write_text(
+            json.dumps(data, indent=2) + "\n", encoding="utf-8"
+        )
+
+    click.echo(f"Inserted {inserted} link(s), cleared pending list.")
+
+
 @main.command("source")
 @click.argument("chunk_id")
 @click.option(

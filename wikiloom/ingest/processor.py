@@ -36,7 +36,7 @@ from wikiloom.locking import FileLock
 from wikiloom.registry import Registry
 from wikiloom.search import IndexUpdater
 from wikiloom.source_catalog import SourceCatalog, SourceEntry, hash_file
-from wikiloom.synthesis import SynthesisResult, run_synthesis
+from wikiloom.synthesis import run_synthesis
 from wikiloom.utils import now_iso
 
 # Default mapping from content_type → raw/ subdirectory
@@ -374,6 +374,38 @@ def ingest(
             synthesis_written = (
                 list(write_result.created_paths) + list(write_result.updated_paths)
             )
+
+            # 6. Deterministic linking. Runs spaCy NER + rapidfuzz on
+            # every just-written page, inserts [[wikilinks]], writes
+            # stubs for unresolved entities, defers low-confidence
+            # candidates to pending.json. Uses the same registry
+            # instance so stubs are visible to step 10b's backlinks
+            # rebuild. The linker modifies page files in-place — the
+            # paths in synthesis_written are updated on disk.
+            if synthesis_written:
+                from wikiloom.linker import LinkingEngine
+
+                linker = LinkingEngine(registry, config=full_cfg.linking)
+                linked_pages = linker.link_all(synthesis_written)
+                if linked_pages:
+                    click.echo(
+                        f"  linked {len(linked_pages)} page(s)"
+                    )
+
+                # Stubs created by the linker are new files that need
+                # to be staged in the commit. Scan the wiki dir for
+                # stub-status pages the linker just registered.
+                for page_id, entry in registry.pages.items():
+                    if entry.status == "stub":
+                        stub_path = project_root / "wiki" / f"{page_id}.md"
+                        if stub_path.exists() and stub_path not in synthesis_written:
+                            synthesis_written.append(stub_path)
+                            result.pages_created.append(page_id)
+
+                # pending.json gets staged too so the commit is atomic.
+                pending_path = registry_dir / "pending.json"
+                if pending_path.exists() and pending_path not in synthesis_written:
+                    synthesis_written.append(pending_path)
 
         # 10b. Rebuild backlink graph and sync inbound/outbound counts
         # back to the manifest. Full rebuild is wasteful at scale but
