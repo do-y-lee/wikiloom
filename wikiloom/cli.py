@@ -239,6 +239,130 @@ def reindex(project: Path | None) -> None:
     click.echo(f"Rebuilt {len(written)} index file(s).")
 
 
+@main.command("query")
+@click.argument("question")
+@click.option(
+    "--save",
+    is_flag=True,
+    default=False,
+    help="File the answer as a synthesis page in wiki/syntheses/.",
+)
+@click.option(
+    "--max-pages",
+    type=int,
+    default=5,
+    help="Maximum number of wiki pages to inject as LLM context.",
+)
+@click.option(
+    "--project",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Project root. Defaults to walking upward from the current directory.",
+)
+def query(question: str, save: bool, max_pages: int, project: Path | None) -> None:
+    """Ask a question and get an answer grounded in the wiki's content.
+
+    Retrieves relevant pages via full-text search, injects them as LLM
+    context, and returns a structured answer with source citations.
+    Pass ``--save`` to file the answer as a synthesis page.
+    """
+    from wikiloom.config import Config
+    from wikiloom.frontmatter import Frontmatter, write_page
+    from wikiloom.ingest.errors import IngestError
+    from wikiloom.llm import LLMClient
+    from wikiloom.query import run_query
+    from wikiloom.registry import PageEntry, Registry
+    from wikiloom.utils import now_iso, slugify
+
+    if project is None:
+        project = _find_project_root(Path.cwd())
+        if project is None:
+            raise click.ClickException(
+                "Could not find a WikiLoom project (no wikiloom.toml found)."
+            )
+
+    try:
+        cfg = Config.load(project)
+    except FileNotFoundError:
+        raise click.ClickException(
+            "Could not load wikiloom.toml. Run inside a project directory."
+        )
+
+    llm_client = LLMClient(cfg)
+
+    try:
+        answer = run_query(
+            question=question,
+            project_root=project,
+            llm_client=llm_client,
+            max_context_pages=max_pages,
+        )
+    except Exception as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    # Print the answer
+    click.echo(answer.answer)
+    click.echo("")
+
+    # Sources
+    if answer.sources_consulted:
+        click.echo("Sources:")
+        for src in answer.sources_consulted:
+            click.echo(f"  [{src.relevance}] {src.page_path}")
+
+    click.echo(f"\nConfidence: {answer.confidence}")
+    click.echo(
+        f"Tokens: {answer.metrics.tokens_in + answer.metrics.tokens_out} "
+        f"(${answer.metrics.cost_usd:.4f})"
+    )
+
+    if answer.suggested_followups:
+        click.echo("\nSuggested follow-ups:")
+        for followup in answer.suggested_followups:
+            click.echo(f"  - {followup}")
+
+    if answer.suggest_synthesis and not save:
+        click.echo(
+            "\nThis answer could be a good synthesis page. "
+            "Re-run with --save to file it."
+        )
+
+    # --save: write as a synthesis page
+    if save:
+        slug = slugify(question)[:60] or "query-answer"
+        page_id = f"syntheses/{slug}"
+        page_path = project / "wiki" / "syntheses" / f"{slug}.md"
+
+        sources_list = [
+            {"page_path": s.page_path, "relevance": s.relevance}
+            for s in answer.sources_consulted
+        ]
+        fm = Frontmatter(
+            title=question,
+            type="synthesis",
+            status="active",
+            created=now_iso(),
+            modified=now_iso(),
+            summary=answer.answer[:160].replace("\n", " "),
+            sources=sources_list,
+            source_count=len(sources_list),
+            confidence=answer.confidence,
+        )
+        write_page(page_path, fm, answer.answer)
+
+        registry = Registry(project / "_registry")
+        entry = PageEntry(
+            title=question,
+            type="synthesis",
+            summary=answer.answer[:160].replace("\n", " "),
+            confidence=answer.confidence,
+        )
+        registry.register_page(page_id, entry)
+        registry.save()
+
+        click.echo(f"\nSaved to {page_path.relative_to(project)}")
+
+
 @main.command("review")
 @click.option(
     "--accept-all",
