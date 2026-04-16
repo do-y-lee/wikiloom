@@ -363,6 +363,176 @@ def query(question: str, save: bool, max_pages: int, project: Path | None) -> No
         click.echo(f"\nSaved to {page_path.relative_to(project)}")
 
 
+@main.command("status")
+@click.option(
+    "--project",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Project root.",
+)
+def status(project: Path | None) -> None:
+    """Show a project summary: page counts, last ingest, monthly cost."""
+    from wikiloom.cache import SQLiteCache
+    from wikiloom.chunk_store import ChunkStore
+    from wikiloom.events import parse_log
+    from wikiloom.source_catalog import SourceCatalog
+
+    if project is None:
+        project = _find_project_root(Path.cwd())
+        if project is None:
+            raise click.ClickException(
+                "Could not find a WikiLoom project (no wikiloom.toml found)."
+            )
+
+    registry_dir = project / "_registry"
+    cache = SQLiteCache(registry_dir / "wiki.db")
+    cache.full_rebuild(project)
+    stats = cache.get_stats()
+
+    click.echo(f"WikiLoom project: {project.name}")
+    click.echo(f"  Pages: {stats['total_pages']}")
+    if stats["by_type"]:
+        for t, count in sorted(stats["by_type"].items()):
+            click.echo(f"    {t}: {count}")
+    if stats["by_status"]:
+        for s, count in sorted(stats["by_status"].items()):
+            if s != "active":
+                click.echo(f"    ({s}): {count}")
+    click.echo(f"  Human-edited: {stats['human_edited']}")
+    click.echo(f"  Backlinks: {stats['backlinks']}")
+    click.echo(f"  Aliases: {stats['aliases']}")
+
+    chunk_store = ChunkStore(registry_dir / "wiki.db")
+    click.echo(f"  Chunks stored: {chunk_store.count()}")
+
+    if registry_dir.exists():
+        catalog = SourceCatalog(registry_dir)
+        source_count = len(catalog._entries)  # noqa: SLF001
+        click.echo(f"  Sources ingested: {source_count}")
+
+    events = parse_log(project / "wiki" / "log.md")
+    if events:
+        last = events[0]
+        click.echo(
+            f"  Last event: {last['event_type']} | "
+            f"{last['description']} ({last['timestamp']})"
+        )
+        total_tokens = sum(int(e.get("tokens_used", 0)) for e in events)
+        total_cost = sum(float(e.get("cost_usd", 0.0)) for e in events)
+        click.echo(f"  Total tokens: {total_tokens:,}")
+        click.echo(f"  Total cost: ${total_cost:.2f}")
+
+
+@main.command("log")
+@click.option("--limit", "-n", type=int, default=10, help="Number of recent events to show.")
+@click.option(
+    "--project",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Project root.",
+)
+def log_cmd(limit: int, project: Path | None) -> None:
+    """Show recent events from the wiki event log."""
+    from wikiloom.events import parse_log
+
+    if project is None:
+        project = _find_project_root(Path.cwd())
+        if project is None:
+            raise click.ClickException(
+                "Could not find a WikiLoom project (no wikiloom.toml found)."
+            )
+
+    events = parse_log(project / "wiki" / "log.md")
+    if not events:
+        click.echo("No events recorded yet.")
+        return
+
+    shown = events[:limit]
+    for event in shown:
+        ts = event.get("timestamp", "?")
+        etype = event.get("event_type", "?")
+        desc = event.get("description", "")
+        tokens = event.get("tokens_used", 0)
+        cost = event.get("cost_usd", 0.0)
+        commit = event.get("commit", "")
+
+        line = f"[{ts}] {etype} | {desc}"
+        extras = []
+        if tokens:
+            extras.append(f"{int(tokens):,}t")
+        if cost:
+            extras.append(f"${float(cost):.2f}")
+        if commit:
+            extras.append(str(commit)[:8])
+        if extras:
+            line += f"  ({', '.join(extras)})"
+        click.echo(line)
+
+    if len(events) > limit:
+        click.echo(f"\n... {len(events) - limit} more event(s). Use -n to see more.")
+
+
+@main.command("cost")
+@click.option(
+    "--project",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Project root.",
+)
+def cost(project: Path | None) -> None:
+    """Show token usage and spend breakdown."""
+    from wikiloom.events import parse_log
+
+    if project is None:
+        project = _find_project_root(Path.cwd())
+        if project is None:
+            raise click.ClickException(
+                "Could not find a WikiLoom project (no wikiloom.toml found)."
+            )
+
+    events = parse_log(project / "wiki" / "log.md")
+    if not events:
+        click.echo("No events with cost data yet.")
+        return
+
+    by_type: dict[str, dict[str, float]] = {}
+    for event in events:
+        etype = str(event.get("event_type", "other"))
+        tokens = int(event.get("tokens_used", 0))
+        cost_usd = float(event.get("cost_usd", 0.0))
+        bucket = by_type.setdefault(etype, {"tokens": 0, "cost": 0.0, "count": 0})
+        bucket["tokens"] += tokens
+        bucket["cost"] += cost_usd
+        bucket["count"] += 1
+
+    total_tokens = 0
+    total_cost = 0.0
+    total_events = 0
+
+    click.echo("Event type       Count    Tokens       Cost")
+    click.echo("---------------- -------- ------------ --------")
+    for etype in sorted(by_type):
+        b = by_type[etype]
+        t = int(b["tokens"])
+        c = b["cost"]
+        n = int(b["count"])
+        total_tokens += t
+        total_cost += c
+        total_events += n
+        click.echo(f"{etype:<16} {n:>8} {t:>12,} ${c:>7.2f}")
+    click.echo("---------------- -------- ------------ --------")
+    click.echo(f"{'Total':<16} {total_events:>8} {total_tokens:>12,} ${total_cost:>7.2f}")
+
+    try:
+        from wikiloom.config import Config
+        cfg = Config.load(project)
+        budget = cfg.llm.monthly_budget_usd
+        pct = (total_cost / budget * 100) if budget > 0 else 0
+        click.echo(f"\nMonthly budget: ${budget:.2f} ({pct:.1f}% used)")
+    except FileNotFoundError:
+        pass
+
+
 @main.command("review")
 @click.option(
     "--accept-all",

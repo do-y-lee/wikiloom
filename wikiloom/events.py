@@ -99,3 +99,65 @@ def create_event(
         description=description,
         **kwargs,  # type: ignore[arg-type]
     )
+
+
+# ----------------------------------------------------------------------
+# Log parsing
+# ----------------------------------------------------------------------
+
+import re
+
+_LOG_HEADER_RE = re.compile(
+    r"^## \[([^\]]+)\] (\S+) \| (.+)$"
+)
+_LOG_FIELD_RE = re.compile(
+    r"^- \*\*([^*]+)\*\*: (.+)$"
+)
+
+
+def parse_log(log_path: Path) -> list[dict[str, str | int | float]]:
+    """Parse ``wiki/log.md`` back into a list of event dicts.
+
+    Returns newest-first. Each dict has at minimum ``timestamp``,
+    ``event_type``, ``description``. Optional keys match the
+    ``to_log_entry`` output: ``created``, ``updated``, ``tokens_used``,
+    ``cost_usd``, ``commit``, etc.
+    """
+    if not log_path.exists():
+        return []
+
+    text = log_path.read_text(encoding="utf-8")
+    entries: list[dict[str, str | int | float]] = []
+    current: dict[str, str | int | float] | None = None
+
+    for line in text.splitlines():
+        header = _LOG_HEADER_RE.match(line)
+        if header:
+            if current is not None:
+                entries.append(current)
+            current = {
+                "timestamp": header.group(1),
+                "event_type": header.group(2),
+                "description": header.group(3).strip(),
+            }
+            continue
+
+        if current is None:
+            continue
+
+        field_match = _LOG_FIELD_RE.match(line)
+        if field_match:
+            key = field_match.group(1).strip().lower().replace(" ", "_")
+            value: str | int | float = field_match.group(2).strip()
+            if key == "tokens_used":
+                value = int(str(value).replace(",", ""))
+            elif key == "cost":
+                value = float(str(value).lstrip("$").replace(",", ""))
+                key = "cost_usd"
+            current[key] = value
+
+    if current is not None:
+        entries.append(current)
+
+    entries.reverse()  # newest first
+    return entries
