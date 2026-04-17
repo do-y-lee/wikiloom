@@ -27,7 +27,7 @@ class ProjectConfig:
 @dataclass
 class LLMConfig:
     provider: str = "anthropic"
-    model: str = "claude-sonnet-4-20250514"
+    model: str = "claude-sonnet-4-6"
     max_tokens_per_operation: int = 8000
     monthly_budget_usd: float = 50.0
 

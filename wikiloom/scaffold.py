@@ -54,7 +54,7 @@ schema_version = 1
 
 [llm]
 provider = "anthropic"
-model = "claude-sonnet-4-20250514"
+model = "claude-sonnet-4-6"
 max_tokens_per_operation = 8000
 monthly_budget_usd = 50.0
 
