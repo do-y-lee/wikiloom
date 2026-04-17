@@ -96,9 +96,35 @@ def retrieve_context(
     wiki_dir: Path,
     max_pages: int = MAX_CONTEXT_PAGES,
     max_body_chars: int = MAX_BODY_CHARS,
+    embedder: Any | None = None,
 ) -> list[PageContext]:
-    """FTS5 search → read page bodies → return context blocks."""
+    """Retrieve relevant pages: FTS5 first, semantic top-up if needed.
+
+    FTS5 keyword search runs first. If it returns fewer than
+    ``max_pages`` results and an ``embedder`` is provided, semantic
+    similarity fills the remaining slots — so the LLM always gets
+    the richest context available without duplicates.
+    """
+    # Primary: FTS5 keyword search
     hits = cache.search(question, limit=max_pages)
+
+    # Top-up: if FTS5 didn't fill the quota, use embeddings
+    if len(hits) < max_pages and embedder is not None:
+        try:
+            query_vectors = embedder.embed_texts([question])
+            if query_vectors:
+                fts_ids = {h["page_id"] for h in hits}
+                remaining = max_pages - len(hits)
+                semantic_hits = cache.semantic_search(
+                    query_vectors[0], limit=remaining + len(fts_ids)
+                )
+                for sh in semantic_hits:
+                    if sh["page_id"] not in fts_ids and len(hits) < max_pages:
+                        hits.append(sh)
+                        fts_ids.add(sh["page_id"])
+        except Exception:
+            pass  # embedding failure is non-fatal
+
     contexts: list[PageContext] = []
     for hit in hits:
         page_id = hit["page_id"]
@@ -181,8 +207,12 @@ def run_query(
     llm_client: LLMClient,
     cache: SQLiteCache | None = None,
     max_context_pages: int = MAX_CONTEXT_PAGES,
+    embedder: Any | None = None,
 ) -> QueryAnswer:
     """Full query pipeline: retrieve → assemble → LLM → validate → return.
+
+    If ``embedder`` is provided, semantic similarity search is used as
+    a fallback when FTS5 finds no keyword matches.
 
     Raises ``LLMProviderError`` on provider failures,
     ``LLMResponseFormatError`` on unparseable responses, and
@@ -196,7 +226,11 @@ def run_query(
         cache = SQLiteCache(registry_dir / "wiki.db")
 
     system_prompt = load_query_prompt(project_root)
-    contexts = retrieve_context(question, cache, wiki_dir, max_pages=max_context_pages)
+    contexts = retrieve_context(
+        question, cache, wiki_dir,
+        max_pages=max_context_pages,
+        embedder=embedder,
+    )
     user_prompt = _render_user_prompt(question, contexts)
 
     result = llm_client.synthesize(system_prompt, user_prompt)

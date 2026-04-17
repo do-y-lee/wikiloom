@@ -325,12 +325,22 @@ def query(
 
     llm_client = LLMClient(cfg)
 
+    # Load embedder for semantic fallback if enabled
+    embedder = None
+    if cfg.embeddings.enabled:
+        try:
+            from wikiloom.embeddings import get_embedder
+            embedder = get_embedder(cfg.embeddings)
+        except (ImportError, ValueError):
+            pass  # embedding provider not installed; FTS5-only
+
     try:
         answer = run_query(
             question=question,
             project_root=project,
             llm_client=llm_client,
             max_context_pages=max_pages,
+            embedder=embedder,
         )
     except Exception as exc:
         raise click.ClickException(str(exc)) from exc
@@ -836,9 +846,21 @@ def rebuild_cache(project: Path | None) -> None:
                 "Could not find a WikiLoom project (no wikiloom.toml found)."
             )
 
+    embedder = None
+    try:
+        from wikiloom.config import Config
+        from wikiloom.embeddings import get_embedder
+
+        cfg = Config.load(project)
+        if cfg.embeddings.enabled:
+            embedder = get_embedder(cfg.embeddings)
+            click.echo("Computing embeddings...")
+    except (FileNotFoundError, ImportError, ValueError):
+        pass
+
     with FileLock(project):
         cache = SQLiteCache(project / "_registry" / "wiki.db")
-        count = cache.full_rebuild(project)
+        count = cache.full_rebuild(project, embedder=embedder)
     stats = cache.get_stats()
     click.echo(
         f"Cache rebuilt: {count} page(s), "

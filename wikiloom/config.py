@@ -80,6 +80,21 @@ class IngestConfig:
 
 
 @dataclass
+class EmbeddingsConfig:
+    """Which embedding backend to use for semantic search.
+
+    ``provider`` selects the backend: ``fastembed`` (default, local),
+    ``openai`` (API), or ``sentence-transformers`` (local, heavy).
+    ``model`` overrides the default model for the chosen provider.
+    ``enabled`` can disable embedding entirely (FTS5-only search).
+    """
+
+    provider: str = "fastembed"
+    model: str = ""
+    enabled: bool = True
+
+
+@dataclass
 class Config:
     project: ProjectConfig = field(default_factory=ProjectConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
@@ -87,6 +102,7 @@ class Config:
     staleness: StalenessConfig = field(default_factory=StalenessConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
     ingest: IngestConfig = field(default_factory=IngestConfig)
+    embeddings: EmbeddingsConfig = field(default_factory=EmbeddingsConfig)
     project_root: Path = field(default_factory=Path.cwd)
 
     @classmethod
@@ -113,6 +129,8 @@ class Config:
             cfg.search = SearchConfig(**_filter(SearchConfig, data["search"]))
         if "ingest" in data:
             cfg.ingest = IngestConfig(**_filter(IngestConfig, data["ingest"]))
+        if "embeddings" in data:
+            cfg.embeddings = EmbeddingsConfig(**_filter(EmbeddingsConfig, data["embeddings"]))
         return cfg
 
 

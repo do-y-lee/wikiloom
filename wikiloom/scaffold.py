@@ -73,6 +73,13 @@ synthesis_window_days = 60
 
 [search]
 engine = "grep"
+
+[embeddings]
+provider = "fastembed"
+# provider = "openai"                  # needs OPENAI_API_KEY
+# provider = "sentence-transformers"   # heavier install, no API key
+# model = ""                           # empty = provider default
+enabled = true
 """
 
 

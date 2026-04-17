@@ -52,7 +52,8 @@ CREATE TABLE IF NOT EXISTS pages (
     outbound_links INTEGER DEFAULT 0,
     confidence TEXT DEFAULT 'medium',
     human_edited BOOLEAN DEFAULT 0,
-    content_hash TEXT
+    content_hash TEXT,
+    embedding BLOB
 );
 
 CREATE TABLE IF NOT EXISTS aliases (
@@ -174,12 +175,18 @@ class SQLiteCache:
     # Writes
     # ------------------------------------------------------------------
 
-    def full_rebuild(self, project_root: Path) -> int:
+    def full_rebuild(
+        self,
+        project_root: Path,
+        embedder: Any | None = None,
+    ) -> int:
         """Wipe and repopulate every table from on-disk state.
 
         Reads the manifest for page rows + aliases, and the backlinks
-        file for the edge table. Returns the number of pages loaded.
-        Callers should hold the project FileLock.
+        file for the edge table. If ``embedder`` is provided, computes
+        and stores embeddings for each page (title + summary + body).
+        Returns the number of pages loaded. Callers should hold the
+        project FileLock.
         """
         project_root = Path(project_root)
         registry_dir = project_root / "_registry"
@@ -204,6 +211,7 @@ class SQLiteCache:
             )
 
             page_count = 0
+            page_entries: list[tuple] = []
             for page_id, entry in registry.pages.items():
                 # Read the page body from disk so FTS can index the
                 # full content, not just the title + summary. This is
@@ -216,14 +224,34 @@ class SQLiteCache:
                     from wikiloom.frontmatter import read_page
                     _, body_text = read_page(page_path)
 
+                # Collect text for batch embedding after the loop
+                embed_text = f"{entry.title}\n{entry.summary or ''}\n{body_text}"
+                page_entries.append((page_id, entry, body_text, embed_text))
+                page_count += 1
+
+            # Batch-compute embeddings if an embedder was provided
+            embedding_blobs: list[bytes | None] = [None] * len(page_entries)
+            if embedder is not None and page_entries:
+                from wikiloom.embeddings import serialize_embedding
+                try:
+                    texts = [e[3] for e in page_entries]
+                    vectors = embedder.embed_texts(texts)
+                    embedding_blobs = [
+                        serialize_embedding(v) for v in vectors
+                    ]
+                except Exception:
+                    pass  # embedding failure is non-fatal; pages still get indexed
+
+            for i, (page_id, entry, body_text, _) in enumerate(page_entries):
                 conn.execute(
                     """
                     INSERT INTO pages (
                         page_id, title, type, status, summary,
                         created, modified, source_count,
                         inbound_links, outbound_links,
-                        confidence, human_edited, content_hash
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        confidence, human_edited, content_hash,
+                        embedding
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         page_id,
@@ -239,6 +267,7 @@ class SQLiteCache:
                         entry.confidence,
                         1 if entry.human_edited else 0,
                         None,
+                        embedding_blobs[i],
                     ),
                 )
                 conn.execute(
@@ -250,7 +279,6 @@ class SQLiteCache:
                         "INSERT OR IGNORE INTO aliases (alias, page_id) VALUES (?, ?)",
                         (alias.lower(), page_id),
                     )
-                page_count += 1
 
             for edge in backlinks.edges:
                 conn.execute(
@@ -316,6 +344,39 @@ class SQLiteCache:
                 (match_expr, limit),
             ).fetchall()
             return [dict(row) for row in rows]
+
+    def semantic_search(
+        self, query_vector: list[float], limit: int = 5
+    ) -> list[dict[str, Any]]:
+        """Cosine similarity search against page embeddings.
+
+        Returns the top ``limit`` pages by similarity, excluding pages
+        with no embedding. Falls back gracefully: if no embeddings
+        exist, returns an empty list.
+        """
+        from wikiloom.embeddings import cosine_similarity, deserialize_embedding
+
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM pages WHERE embedding IS NOT NULL"
+            ).fetchall()
+
+        if not rows:
+            return []
+
+        scored: list[tuple[float, dict[str, Any]]] = []
+        for row in rows:
+            row_dict = dict(row)
+            blob = row_dict.pop("embedding", None)
+            if blob is None:
+                continue
+            page_vec = deserialize_embedding(blob)
+            score = cosine_similarity(query_vector, page_vec)
+            row_dict["similarity"] = score
+            scored.append((score, row_dict))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [row for _, row in scored[:limit]]
 
     def get_stale(self, window_days: int = 90) -> list[dict[str, Any]]:
         """Active pages whose ``modified`` is older than ``window_days``.
