@@ -178,10 +178,36 @@ class SQLiteCache:
             # table is dropped and recreated so schema changes (e.g.
             # adding the Porter stemmer tokenizer) take effect on
             # rebuild without requiring a manual db delete.
-            conn.execute("DELETE FROM pages")
-            conn.execute("DELETE FROM aliases")
+            conn.execute("DROP TABLE IF EXISTS pages")
+            conn.execute("DROP TABLE IF EXISTS aliases")
             conn.execute("DELETE FROM backlinks")
             conn.execute("DROP TABLE IF EXISTS pages_fts")
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS pages (
+                    page_id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    type TEXT NOT NULL,
+                    status TEXT DEFAULT 'active',
+                    summary TEXT,
+                    created TEXT NOT NULL,
+                    modified TEXT NOT NULL,
+                    source_count INTEGER DEFAULT 0,
+                    inbound_links INTEGER DEFAULT 0,
+                    outbound_links INTEGER DEFAULT 0,
+                    confidence TEXT DEFAULT 'medium',
+                    human_edited BOOLEAN DEFAULT 0,
+                    content_hash TEXT,
+                    embedding BLOB
+                );
+                CREATE TABLE IF NOT EXISTS aliases (
+                    alias TEXT NOT NULL,
+                    page_id TEXT NOT NULL,
+                    FOREIGN KEY (page_id) REFERENCES pages(page_id),
+                    PRIMARY KEY (alias, page_id)
+                );
+                """
+            )
             conn.execute(
                 "CREATE VIRTUAL TABLE IF NOT EXISTS pages_fts "
                 "USING fts5(page_id, title, summary, body, tokenize='porter ascii')"

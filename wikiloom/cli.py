@@ -382,7 +382,10 @@ def query(
         )
 
     if not detail and not save:
-        click.echo("\nRun with --detail for sources and metadata, or --last to review later.")
+        click.echo(
+            "\nRun with --detail for sources and metadata, "
+            "or `wikiloom query --last` to see the most recent query with metadata and sources."
+        )
 
     # --save: write as a synthesis page
     if save:
