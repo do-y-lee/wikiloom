@@ -317,6 +317,24 @@ def query(
             )
         data = json_mod.loads(last_query_path.read_text(encoding="utf-8"))
         _save_query_as_page(data, project)
+
+        # Rebuild cache so the new synthesis page is immediately
+        # searchable by future queries via FTS5 + embeddings.
+        from wikiloom.cache import SQLiteCache
+
+        cache = SQLiteCache(project / "_registry" / "wiki.db")
+        embedder = None
+        try:
+            from wikiloom.config import Config
+            from wikiloom.embeddings import get_embedder
+
+            cfg = Config.load(project)
+            if cfg.embeddings.enabled:
+                embedder = get_embedder(cfg.embeddings)
+        except (FileNotFoundError, ImportError, ValueError):
+            pass
+        cache.full_rebuild(project, embedder=embedder)
+        click.echo("Cache updated.")
         return
 
     # --last-detail: show detail from the cached result, no LLM call
@@ -360,11 +378,11 @@ def query(
         i = 0
         while not stop_spinner.is_set():
             msg = frames[min(i, len(frames) - 1)]
-            sys.stderr.write(f"\r{msg}")
+            sys.stderr.write(f"\r{msg:<30}")
             sys.stderr.flush()
             i += 1
             stop_spinner.wait(timeout=2.0)
-        sys.stderr.write("\r" + " " * 40 + "\r")
+        sys.stderr.write(f"\r{'':<30}\r")
         sys.stderr.flush()
 
     spinner_thread = threading.Thread(target=_spinner, daemon=True)
@@ -698,6 +716,182 @@ def cost(project: Path | None) -> None:
         click.echo(f"\nMonthly budget: ${budget:.2f} ({pct:.1f}% used)")
     except FileNotFoundError:
         pass
+
+
+@main.command("links")
+@click.argument("page_id")
+@click.option(
+    "--project",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Project root.",
+)
+def links(page_id: str, project: Path | None) -> None:
+    """Show all pages linked to and from a given page."""
+    from wikiloom.backlinks import BacklinkRegistry
+    from wikiloom.registry import Registry
+
+    if project is None:
+        project = _find_project_root(Path.cwd())
+        if project is None:
+            raise click.ClickException(
+                "Could not find a WikiLoom project (no wikiloom.toml found)."
+            )
+
+    page_id = page_id.replace(".md", "").strip("/")
+    if page_id.startswith("wiki/"):
+        page_id = page_id[len("wiki/"):]
+
+    registry = Registry(project / "_registry")
+    page = registry.get_page(page_id)
+    if page is None:
+        raise click.ClickException(f"Page not found: {page_id}")
+
+    bl = BacklinkRegistry(project / "_registry")
+
+    outbound = []
+    inbound = []
+    for edge in bl.edges:
+        if edge.source == page_id:
+            outbound.append(edge)
+        if edge.target == page_id:
+            inbound.append(edge)
+
+    click.echo(f"Links for: {page.title} ({page_id})\n")
+
+    if outbound:
+        click.echo(f"Outbound ({len(outbound)}):")
+        for edge in outbound:
+            target = registry.get_page(edge.target)
+            title = target.title if target else edge.target
+            click.echo(f"  → {title}")
+            click.echo(f"    {edge.target}.md")
+    else:
+        click.echo("Outbound: none")
+
+    click.echo("")
+
+    if inbound:
+        click.echo(f"Inbound ({len(inbound)}):")
+        for edge in inbound:
+            source = registry.get_page(edge.source)
+            title = source.title if source else edge.source
+            click.echo(f"  ← {title}")
+            click.echo(f"    {edge.source}.md")
+    else:
+        click.echo("Inbound: none")
+
+    total = len(outbound) + len(inbound)
+    click.echo(f"\nTotal: {total} link(s)")
+
+
+@main.command("related")
+@click.argument("page_id")
+@click.option("-n", "--limit", type=int, default=5, help="Number of related pages (max 10).")
+@click.option("--save", is_flag=True, default=False, help="Write related pages into the page's frontmatter.")
+@click.option(
+    "--project",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Project root.",
+)
+def related(page_id: str, limit: int, save: bool, project: Path | None) -> None:
+    """Find pages semantically similar to a given page.
+
+    Uses embedding cosine similarity to find related pages that may
+    not have explicit wikilinks between them.
+    """
+    from wikiloom.cache import SQLiteCache
+    from wikiloom.embeddings import deserialize_embedding
+    from wikiloom.frontmatter import read_page, write_page
+
+    if project is None:
+        project = _find_project_root(Path.cwd())
+        if project is None:
+            raise click.ClickException(
+                "Could not find a WikiLoom project (no wikiloom.toml found)."
+            )
+
+    limit = min(limit, 10)
+
+    # Strip .md suffix if user included it
+    page_id = page_id.replace(".md", "").strip("/")
+    if page_id.startswith("wiki/"):
+        page_id = page_id[len("wiki/"):]
+
+    cache = SQLiteCache(project / "_registry" / "wiki.db")
+    page = cache.get_page(page_id)
+    if page is None:
+        raise click.ClickException(f"Page not found: {page_id}")
+
+    # Get this page's embedding
+    import sqlite3
+    conn = sqlite3.connect(str(project / "_registry" / "wiki.db"))
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT embedding FROM pages WHERE page_id = ?", (page_id,)
+    ).fetchone()
+    conn.close()
+
+    if row is None or row["embedding"] is None:
+        raise click.ClickException(
+            f"No embedding for {page_id}. Run: wikiloom rebuild-cache"
+        )
+
+    page_vec = deserialize_embedding(row["embedding"])
+
+    # Exclude pages already linked to/from the target
+    from wikiloom.backlinks import BacklinkRegistry
+
+    bl = BacklinkRegistry(project / "_registry")
+    linked_ids: set[str] = set()
+    for edge in bl.edges:
+        if edge.source == page_id:
+            linked_ids.add(edge.target)
+        if edge.target == page_id:
+            linked_ids.add(edge.source)
+
+    results = cache.semantic_search(page_vec, limit=limit + len(linked_ids) + 1)
+
+    # Filter out the page itself, already-linked pages, and apply threshold
+    threshold = 0.60
+    related_pages = []
+    for r in results:
+        if r["page_id"] == page_id:
+            continue
+        if r["page_id"] in linked_ids:
+            continue
+        sim = r.get("similarity", 0.0)
+        if sim < threshold:
+            continue
+        related_pages.append((r["page_id"], r["title"], sim))
+        if len(related_pages) >= limit:
+            break
+
+    if not related_pages:
+        click.echo(f"No related pages found for {page_id}.")
+        return
+
+    click.echo(f"Related to: {page['title']} ({page_id})\n")
+    for pid, title, sim in related_pages:
+        click.echo(f"  {sim:.0%}  {title}")
+        click.echo(f"       → {pid}.md")
+
+    if save:
+        page_path = project / "wiki" / f"{page_id}.md"
+        if not page_path.exists():
+            raise click.ClickException(f"Page file not found: {page_path}")
+
+        fm, body = read_page(page_path)
+        if fm is None:
+            raise click.ClickException(f"No frontmatter in {page_id}")
+
+        fm.related_pages = [pid for pid, _, _ in related_pages]
+        write_page(page_path, fm, body)
+        click.echo(f"\nSaved {len(related_pages)} related page(s) to {page_id} frontmatter.")
+
+    if not save and related_pages:
+        click.echo(f"\nRun with --save to write these into the page's frontmatter.")
 
 
 @main.command("review")

@@ -30,6 +30,7 @@ class Frontmatter:
     contradictions: list[dict[str, str]] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
     chunk_ids: list[str] = field(default_factory=list)
+    related_pages: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to a dict suitable for YAML serialization."""
@@ -51,6 +52,7 @@ class Frontmatter:
             "contradictions": self.contradictions,
             "tags": self.tags,
             "chunk_ids": self.chunk_ids,
+            "related_pages": self.related_pages,
         }
 
     @classmethod
@@ -74,6 +76,7 @@ class Frontmatter:
             contradictions=data.get("contradictions", []),
             tags=data.get("tags", []),
             chunk_ids=data.get("chunk_ids", []),
+            related_pages=data.get("related_pages", []),
         )
 
 
