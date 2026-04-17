@@ -244,6 +244,71 @@ def reindex(project: Path | None) -> None:
     click.echo(f"Rebuilt {len(written)} index file(s).")
 
 
+@main.command("relink")
+@click.option(
+    "--project",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Project root.",
+)
+def relink(project: Path | None) -> None:
+    """Re-run the linker across all wiki pages.
+
+    Pages created early in an ingest may have missed links to pages
+    that didn't exist yet. This command re-links every page against
+    the full current manifest, catching connections the first pass
+    missed.
+    """
+    from wikiloom.backlinks import BacklinkRegistry
+    from wikiloom.config import Config
+    from wikiloom.linker import LinkingEngine
+    from wikiloom.locking import FileLock
+    from wikiloom.registry import Registry
+    from wikiloom.search import IndexUpdater
+
+    if project is None:
+        project = _find_project_root(Path.cwd())
+        if project is None:
+            raise click.ClickException(
+                "Could not find a WikiLoom project (no wikiloom.toml found)."
+            )
+
+    try:
+        cfg = Config.load(project)
+        linking_cfg = cfg.linking
+    except FileNotFoundError:
+        linking_cfg = None
+
+    wiki_dir = project / "wiki"
+    all_pages = sorted(
+        p for p in wiki_dir.rglob("*.md")
+        if p.name != "index.md" and p.name != "log.md"
+        and "archive" not in p.parts
+    )
+
+    if not all_pages:
+        click.echo("No pages to link.")
+        return
+
+    click.echo(f"Re-linking {len(all_pages)} page(s)...")
+
+    with FileLock(project):
+        registry = Registry(project / "_registry")
+        linker = LinkingEngine(registry, config=linking_cfg)
+        linked = linker.link_all(all_pages)
+
+        # Rebuild backlinks after re-linking
+        backlinks = BacklinkRegistry(project / "_registry")
+        backlinks.rebuild()
+        backlinks.save()
+
+        # Rebuild indexes
+        IndexUpdater(wiki_dir, registry=registry).rebuild_all()
+
+    click.echo(f"Linked {len(linked)} page(s) with new wikilinks.")
+    click.echo(f"Backlinks rebuilt.")
+
+
 @main.command("query")
 @click.argument("question", required=False, default=None)
 @click.option(
@@ -294,11 +359,9 @@ def query(
     import json as json_mod
 
     from wikiloom.config import Config
-    from wikiloom.frontmatter import Frontmatter, write_page
     from wikiloom.llm import LLMClient
     from wikiloom.query import run_query
-    from wikiloom.registry import PageEntry, Registry
-    from wikiloom.utils import now_iso, slugify
+    from wikiloom.utils import now_iso
 
     if project is None:
         project = _find_project_root(Path.cwd())
@@ -571,6 +634,22 @@ def status(project: Path | None) -> None:
     click.echo(f"  Backlinks: {stats['backlinks']}")
     click.echo(f"  Aliases: {stats['aliases']}")
 
+    # Orphan count
+    from wikiloom.backlinks import BacklinkRegistry
+    from wikiloom.registry import Registry
+
+    registry_obj = Registry(registry_dir)
+    bl = BacklinkRegistry(registry_dir)
+    linked_pages: set[str] = set()
+    for edge in bl.edges:
+        linked_pages.add(edge.source)
+        linked_pages.add(edge.target)
+    orphan_count = sum(
+        1 for pid, entry in registry_obj.pages.items()
+        if entry.status == "active" and entry.type != "index" and pid not in linked_pages
+    )
+    click.echo(f"  Orphans: {orphan_count}")
+
     chunk_store = ChunkStore(registry_dir / "wiki.db")
     click.echo(f"  Chunks stored: {chunk_store.count()}")
 
@@ -789,13 +868,14 @@ def links(page_id: str, project: Path | None) -> None:
 @click.argument("page_id")
 @click.option("-n", "--limit", type=int, default=5, help="Number of related pages (max 10).")
 @click.option("--save", is_flag=True, default=False, help="Write related pages into the page's frontmatter.")
+@click.option("--link", is_flag=True, default=False, help="Also append wikilinks in a Related Pages section in the page body.")
 @click.option(
     "--project",
     type=click.Path(path_type=Path),
     default=None,
     help="Project root.",
 )
-def related(page_id: str, limit: int, save: bool, project: Path | None) -> None:
+def related(page_id: str, limit: int, save: bool, link: bool, project: Path | None) -> None:
     """Find pages semantically similar to a given page.
 
     Uses embedding cosine similarity to find related pages that may
@@ -877,7 +957,7 @@ def related(page_id: str, limit: int, save: bool, project: Path | None) -> None:
         click.echo(f"  {sim:.0%}  {title}")
         click.echo(f"       → {pid}.md")
 
-    if save:
+    if save or link:
         page_path = project / "wiki" / f"{page_id}.md"
         if not page_path.exists():
             raise click.ClickException(f"Page file not found: {page_path}")
@@ -886,12 +966,104 @@ def related(page_id: str, limit: int, save: bool, project: Path | None) -> None:
         if fm is None:
             raise click.ClickException(f"No frontmatter in {page_id}")
 
-        fm.related_pages = [pid for pid, _, _ in related_pages]
-        write_page(page_path, fm, body)
-        click.echo(f"\nSaved {len(related_pages)} related page(s) to {page_id} frontmatter.")
+        if save:
+            existing = set(fm.related_pages or [])
+            for pid, _, _ in related_pages:
+                if pid not in existing:
+                    fm.related_pages.append(pid)
+                    existing.add(pid)
 
-    if not save and related_pages:
-        click.echo(f"\nRun with --save to write these into the page's frontmatter.")
+        if link:
+            # Append a Related Pages section with wikilinks, deduplicating
+            related_section_header = "## Related Pages"
+            existing_links = set()
+            if related_section_header in body:
+                for line in body.splitlines():
+                    if line.strip().startswith("- [["):
+                        # Extract page_id from [[page_id|title]]
+                        inner = line.strip()[4:]  # after "- [["
+                        pid_end = inner.find("|")
+                        if pid_end == -1:
+                            pid_end = inner.find("]]")
+                        if pid_end > 0:
+                            existing_links.add(inner[:pid_end])
+
+            new_links = []
+            for pid, title, _ in related_pages:
+                if pid not in existing_links:
+                    new_links.append(f"- [[{pid}|{title}]]")
+
+            if new_links:
+                if related_section_header not in body:
+                    body = body.rstrip() + f"\n\n{related_section_header}\n\n"
+                else:
+                    body = body.rstrip() + "\n"
+                body += "\n".join(new_links) + "\n"
+
+        write_page(page_path, fm, body)
+
+        actions = []
+        if save:
+            actions.append(f"{len(related_pages)} related page(s) to frontmatter")
+        if link:
+            actions.append(f"{len(new_links)} wikilink(s) to page body")
+        click.echo(f"\nSaved: {', '.join(actions)}.")
+
+    if not save and not link and related_pages:
+        click.echo(f"\nRun with --save (frontmatter) or --link (wikilinks in body).")
+
+
+@main.command("orphans")
+@click.option(
+    "--project",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Project root.",
+)
+def orphans(project: Path | None) -> None:
+    """List pages with no inbound or outbound wikilinks."""
+    from wikiloom.backlinks import BacklinkRegistry
+    from wikiloom.registry import Registry
+
+    if project is None:
+        project = _find_project_root(Path.cwd())
+        if project is None:
+            raise click.ClickException(
+                "Could not find a WikiLoom project (no wikiloom.toml found)."
+            )
+
+    registry = Registry(project / "_registry")
+    bl = BacklinkRegistry(project / "_registry")
+
+    # Build set of all pages that have any link (inbound or outbound)
+    linked_pages: set[str] = set()
+    for edge in bl.edges:
+        linked_pages.add(edge.source)
+        linked_pages.add(edge.target)
+
+    # Find pages in manifest that aren't in the linked set
+    orphan_list = []
+    for page_id, entry in registry.pages.items():
+        if entry.status != "active":
+            continue
+        if entry.type == "index":
+            continue
+        if page_id not in linked_pages:
+            orphan_list.append((page_id, entry.title, entry.type))
+
+    if not orphan_list:
+        click.echo("No orphan pages found.")
+        return
+
+    click.echo(f"Orphan pages ({len(orphan_list)}):\n")
+    for pid, title, ptype in sorted(orphan_list):
+        click.echo(f"  [{ptype}] {title}")
+        click.echo(f"          {pid}.md")
+
+    click.echo(
+        f"\nUse `wikiloom related <page_id>` to find connections, "
+        f"or `wikiloom relink` to re-run the linker."
+    )
 
 
 @main.command("review")
