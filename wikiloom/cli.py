@@ -253,16 +253,16 @@ def reindex(project: Path | None) -> None:
     help="Show sources, confidence, cost, and follow-ups alongside the answer.",
 )
 @click.option(
-    "--last",
+    "--last-detail",
     is_flag=True,
     default=False,
-    help="Show detail from the most recent query without making an LLM call.",
+    help="Show sources, confidence, and cost from the most recent query.",
 )
 @click.option(
-    "--save",
+    "--save-last",
     is_flag=True,
     default=False,
-    help="File the answer as a synthesis page in wiki/syntheses/.",
+    help="Save the most recent query answer as a wiki page in syntheses/.",
 )
 @click.option(
     "--max-pages",
@@ -279,16 +279,17 @@ def reindex(project: Path | None) -> None:
 def query(
     question: str | None,
     detail: bool,
-    last: bool,
-    save: bool,
+    last_detail: bool,
+    save_last: bool,
     max_pages: int,
     project: Path | None,
 ) -> None:
     """Ask a question and get an answer grounded in the wiki's content.
 
     Default output shows just the answer. Use ``--detail`` to include
-    sources, confidence, cost, and suggested follow-ups. Use ``--last``
-    to view detail from the most recent query without another LLM call.
+    sources, confidence, cost, and suggested follow-ups. Use ``--last-detail``
+    to view detail from the most recent query. Use ``--save-last``
+    to save the most recent answer as a synthesis page.
     """
     import json as json_mod
 
@@ -308,8 +309,18 @@ def query(
 
     last_query_path = project / "_registry" / "last_query.json"
 
-    # --last: show detail from the cached result, no LLM call
-    if last:
+    # --save-last: save the cached last query as a synthesis page
+    if save_last:
+        if not last_query_path.exists():
+            raise click.ClickException(
+                "No previous query result found. Run a query first."
+            )
+        data = json_mod.loads(last_query_path.read_text(encoding="utf-8"))
+        _save_query_as_page(data, project)
+        return
+
+    # --last-detail: show detail from the cached result, no LLM call
+    if last_detail:
         if not last_query_path.exists():
             raise click.ClickException("No previous query result found.")
         data = json_mod.loads(last_query_path.read_text(encoding="utf-8"))
@@ -319,7 +330,7 @@ def query(
         return
 
     if not question:
-        raise click.UsageError("Missing argument 'QUESTION'. Use --last to view the previous result.")
+        raise click.UsageError("Missing argument 'QUESTION'. Use --last-detail or --save-last for the previous result.")
 
     try:
         cfg = Config.load(project)
@@ -405,52 +416,54 @@ def query(
         click.echo("")
         _print_query_detail(result_data, project)
 
-    if not detail and answer.suggest_synthesis and not save:
-        click.echo(
-            "\nThis answer could be a good synthesis page. "
-            "Re-run with --save to file it."
-        )
+    if not detail:
+        hints = []
+        hints.append("--detail for sources and metadata")
+        hints.append("`wikiloom query --last-detail` to review later")
+        if answer.suggest_synthesis:
+            hints.append("`wikiloom query --save-last` to save as a wiki page")
+        click.echo(f"\nRun with {', '.join(hints)}.")
 
-    if not detail and not save:
-        click.echo(
-            "\nRun with --detail for sources and metadata, "
-            "or `wikiloom query --last` to see the most recent query with metadata and sources."
-        )
 
-    # --save: write as a synthesis page
-    if save:
-        slug = slugify(question)[:60] or "query-answer"
-        page_id = f"syntheses/{slug}"
-        page_path = project / "wiki" / "syntheses" / f"{slug}.md"
+def _save_query_as_page(data: dict, project: Path) -> None:
+    """Save a cached query result as a synthesis page."""
+    from wikiloom.frontmatter import Frontmatter, write_page
+    from wikiloom.registry import PageEntry, Registry
+    from wikiloom.utils import now_iso, slugify
 
-        sources_list = [
-            {"page_path": s.page_path, "relevance": s.relevance}
-            for s in answer.sources_consulted
-        ]
-        fm = Frontmatter(
-            title=question,
-            type="synthesis",
-            status="active",
-            created=now_iso(),
-            modified=now_iso(),
-            summary=answer.answer[:160].replace("\n", " "),
-            sources=sources_list,
-            source_count=len(sources_list),
-            confidence=answer.confidence,
-        )
-        write_page(page_path, fm, answer.answer)
+    question = data.get("question", "query-answer")
+    answer_text = data.get("answer", "")
+    confidence = data.get("confidence", "medium")
+    sources = data.get("sources_consulted", [])
 
-        registry = Registry(project / "_registry")
-        entry = PageEntry(
-            title=question,
-            type="synthesis",
-            summary=answer.answer[:160].replace("\n", " "),
-            confidence=answer.confidence,
-        )
-        registry.register_page(page_id, entry)
-        registry.save()
+    slug = slugify(question)[:60] or "query-answer"
+    page_id = f"syntheses/{slug}"
+    page_path = project / "wiki" / "syntheses" / f"{slug}.md"
 
-        click.echo(f"\nSaved to {page_path.relative_to(project)}")
+    fm = Frontmatter(
+        title=question,
+        type="synthesis",
+        status="active",
+        created=now_iso(),
+        modified=now_iso(),
+        summary=answer_text[:160].replace("\n", " "),
+        sources=sources,
+        source_count=len(sources),
+        confidence=confidence,
+    )
+    write_page(page_path, fm, answer_text)
+
+    registry = Registry(project / "_registry")
+    entry = PageEntry(
+        title=question,
+        type="synthesis",
+        summary=answer_text[:160].replace("\n", " "),
+        confidence=confidence,
+    )
+    registry.register_page(page_id, entry)
+    registry.save()
+
+    click.echo(f"Saved to {page_path.relative_to(project)}")
 
 
 def _print_query_detail(data: dict, project: Path) -> None:
