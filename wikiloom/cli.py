@@ -1010,7 +1010,10 @@ def related(page_id: str, limit: int, save: bool, link: bool, project: Path | No
         click.echo(f"\nSaved: {', '.join(actions)}.")
 
     if not save and not link and related_pages:
-        click.echo(f"\nRun with --save (frontmatter) or --link (wikilinks in body).")
+        click.echo(
+            "\nRun with --save to record these in frontmatter, --link to append"
+            "\nwikilinks in the page body, or both flags together to do both."
+        )
 
 
 @main.command("orphans")
@@ -1060,9 +1063,11 @@ def orphans(project: Path | None) -> None:
         click.echo(f"  [{ptype}] {title}")
         click.echo(f"          {pid}.md")
 
+    example_pid = sorted(orphan_list)[0][0]
     click.echo(
-        f"\nUse `wikiloom related <page_id>` to find connections, "
-        f"or `wikiloom relink` to re-run the linker."
+        f"\nTo find connections for a page, pass its path (without .md). Example:"
+        f"\n  wikiloom related {example_pid}"
+        f"\n\nOr run `wikiloom relink` to re-run the linker on all pages."
     )
 
 
