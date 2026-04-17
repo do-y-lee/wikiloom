@@ -1,8 +1,6 @@
-"""Project configuration loader for WikiLoom.
+"""Project configuration loader.
 
-Reads ``wikiloom.toml`` from a project root and exposes typed sections.
-This is a minimal implementation — only the fields needed by current
-components are populated. Future components can extend the dataclasses.
+Reads wikiloom.toml and exposes typed dataclass sections.
 """
 
 from __future__ import annotations

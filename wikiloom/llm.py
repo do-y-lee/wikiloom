@@ -1,44 +1,8 @@
 """LLM provider abstraction.
 
-Thin wrapper around ``litellm.completion`` that exposes three call
-shapes used by the rest of WikiLoom:
-
-- ``synthesize`` — structured output (JSON), used by the ingest
-  pipeline to turn extracted chunks into page proposals.
-- ``query`` — plain text, used by the query CLI.
-- ``vision_extract`` — multimodal, used by the image extractor when
-  a page needs captioning.
-
-Each call returns the raw result alongside token usage and an
-estimated USD cost, so callers can record real numbers in the event
-log and enforce the ``monthly_budget_usd`` cap.
-
-Design notes
-------------
-- ``litellm`` handles provider routing (Anthropic / OpenAI / Ollama
-  / etc.) based on the ``model`` string. We don't touch provider SDKs
-  directly. If / when Claude-specific features (prompt caching,
-  extended thinking, 1M context) become valuable, the cleanest path
-  is to pass them through via ``litellm``'s ``extra_headers`` /
-  ``cache_control`` escape hatches rather than forking a second SDK
-  path. Measure first, optimize second.
-- JSON-mode synthesis asks litellm for ``response_format={"type":
-  "json_object"}``. litellm translates that to each provider's
-  native structured-output mechanism. If a response comes back with
-  text that isn't valid JSON, we raise ``LLMResponseFormatError``
-  rather than silently returning the raw string — downstream code
-  assumes dicts.
-- Cost calculation uses ``litellm.cost_per_token`` so we don't
-  maintain a pricing table locally. A model that litellm doesn't
-  know about returns ``(0.0, 0.0)`` and we record ``cost_usd=0.0``
-  rather than crashing — the alternative would be an exception on
-  every call the moment a new model ships.
-- The client is synchronous by design. Parallelism across chunks is
-  the ingest processor's job, not the client's.
-- Tests monkeypatch ``litellm.completion`` so the unit suite never
-  hits a real API. A separate ``tests/test_llm_live.py`` can exercise
-  the real provider path gated behind ``@pytest.mark.live`` and the
-  presence of an API key.
+Wraps litellm.completion with three call shapes: synthesize (JSON),
+query (plain text), and vision_extract (multimodal). Returns token
+usage and cost estimates on every call.
 """
 
 from __future__ import annotations

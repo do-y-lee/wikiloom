@@ -1,11 +1,7 @@
 """Chunker for splitting oversized sources into LLM-sized pieces.
 
-The default path is **no chunking** — most files fit within the context
-budget as-is. Chunking is a fallback for oversized files only. We try
-boundary strategies in order of preference:
-    1. Markdown headings (# / ##)
-    2. PDF page boundaries (when metadata["pages"] is populated)
-    3. Paragraph groups with overlap (last resort)
+Splits by markdown headings, PDF page boundaries, or paragraph
+groups with overlap. Most files fit in one chunk without splitting.
 """
 
 from __future__ import annotations

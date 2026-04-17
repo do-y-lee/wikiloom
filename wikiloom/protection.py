@@ -1,28 +1,7 @@
 """Human Edit Protection.
 
-Git is the source of truth for "is this page human-authored?" — a page
-is protected if its most recent commit has a subject prefix outside
-``AUTO_COMMIT_TYPES``. ``HumanEditProtection`` is the reconciliation
-layer that keeps the manifest and frontmatter flags in sync with that
-git-level truth, and the content-level mechanism that separates human
-writing from LLM output via the ``<!-- wikiloom:auto -->`` marker.
-
-Two halves
-----------
-**Flag sync (``scan`` + ``sync``)**
-    ``scan`` returns pages whose manifest flag disagrees with git.
-    ``sync`` applies the fix: updates ``Registry.PageEntry.human_edited``
-    and ``Frontmatter.human_edited`` / ``human_edited_at``, then emits
-    a single aggregate ``HUMAN_EDIT`` event listing everything that
-    was reclassified.
-
-**Content mechanism (``split`` / ``merge`` / ``preserve_human``)**
-    A wiki page body can be split into a human region (before the
-    marker) and an auto region (after). The LLM-driven page writer
-    (Component 20) will call ``preserve_human`` before overwriting a
-    page so any existing human-authored content is kept intact.
-    Today nothing writes pages yet, so these are latent infrastructure
-    that the LLM enablement pass will light up.
+Keeps human-edit flags in sync with git history and manages the
+wikiloom:auto marker that separates human writing from LLM output.
 """
 
 from __future__ import annotations

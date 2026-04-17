@@ -1,13 +1,4 @@
-"""Exceptions raised by the ingest pipeline boundary guards.
-
-These are raised early, before any expensive work (raw copy,
-chunking, LLM synthesis) so a user running ``wikiloom ingest`` on
-bad input sees a clear message and no partial state on disk.
-
-The CLI layer (``wikiloom/cli.py``) catches these and re-raises as
-``click.ClickException`` for a clean stderr presentation. Library
-callers of ``ingest()`` see the typed exceptions directly.
-"""
+"""Exceptions raised by the ingest pipeline boundary guards."""
 
 from __future__ import annotations
 

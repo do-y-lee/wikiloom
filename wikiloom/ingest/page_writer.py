@@ -1,47 +1,8 @@
-"""Turn synthesis output into wiki pages on disk.
+"""Page writer: synthesis output → wiki pages on disk.
 
-The page writer is the single responsible party for translating
-``SynthesisResult`` into ``wiki/<category>/<slug>.md`` files. It
-handles three kinds of writes:
-
-1. **Fresh create** — target path doesn't exist. Write a new page
-   with the auto marker prepended so future re-ingests know the
-   whole body is LLM-generated.
-2. **Create collision** — target path exists because a prior ingest
-   already created this page. Default: skip. With ``force=True``:
-   replace the auto region via ``HumanEditProtection.preserve_human``
-   so hand-edits above the marker survive.
-3. **Update (append)** — the LLM's ``pages_to_update`` entry signals
-   that a new source contributes additional content to an existing
-   page. Append ``additions_markdown`` to the existing auto region,
-   preserve the human region, union the chunk_ids into frontmatter.
-
-Source page handling
---------------------
-Every ingest also produces a ``wiki/sources/<slug>.md`` page that
-summarizes the ingested document. Slug is derived from the source
-filename. On collision with a page from a different source (same
-filename slug, different source hash), a counter suffix is appended.
-
-Design notes
-------------
-- **Human region is load-bearing.** The ``<!-- wikiloom:auto -->``
-  marker semantics are the only thing standing between a user's
-  hand-edit and the LLM clobbering it. Every write path in this
-  module preserves it. The explicit test in
-  ``tests/test_page_writer.py::test_reingest_preserves_human_region``
-  is the invariant check that matters most.
-- **Chunk_ids are union, not overwrite.** When a page is updated,
-  its frontmatter carries chunk_ids from every prior source plus the
-  new one, so provenance click-through can see every chunk that
-  contributed to the page across the whole history.
-- **Registration is the page writer's job.** After writing a file,
-  the writer calls ``Registry.register_page`` so the manifest stays
-  consistent with disk. The processor saves the registry once at the
-  end of the whole ingest.
-- **No commits here.** The writer produces files and mutates the
-  in-memory registry. The processor bundles everything into a single
-  git commit, exactly like the pre-C20 pipeline.
+Handles three write paths: fresh creates, collision with --force
+(preserves human edits above the wikiloom:auto marker), and
+append-updates from new sources. Also writes source summary pages.
 """
 
 from __future__ import annotations

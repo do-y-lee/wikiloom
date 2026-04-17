@@ -1,15 +1,7 @@
 """Content-addressed catalog of ingested sources.
 
-Persists to ``_registry/sources.json``. Keyed by SHA-256 of the raw
-file bytes so that re-ingesting an identical file is a cheap no-op
-rather than a full pipeline run (which, once Component 20 lands, will
-cost real LLM tokens).
-
-URLs are **not** indexed here today. A URL-sourced ingest has to fetch
-and parse before we could compute a stable hash, by which point the
-expensive work is already done. When C20 lands and URL ingestion
-becomes common, we'll either hash the fetched bytes (after download)
-or add a separate URL-keyed secondary index.
+Persists to _registry/sources.json, keyed by SHA-256 of file bytes.
+Re-ingesting an identical file is a cheap no-op via hash lookup.
 """
 
 from __future__ import annotations

@@ -1,42 +1,9 @@
-"""Chunk → LLM → structured page proposals.
+"""Synthesis loop: chunks → LLM → structured page proposals.
 
-The synthesis loop is the bridge between extracted chunks and written
-wiki pages. It takes each chunk, builds a user prompt that includes
-the existing manifest (so the LLM can prefer updates over duplicates),
-calls ``LLMClient.synthesize``, validates the response against the
-``ingest_response.json`` schema, and accumulates the results into a
-structured ``SynthesisResult`` that the page writer can consume.
-
-Design notes
-------------
-- **Manual schema validator, no dependency.** The schema is ~80 lines
-  and the validation rules are: required fields present, types match,
-  enum values in range. A handwritten validator is easier to reason
-  about than importing ``jsonschema`` for one call site.
-- **Per-chunk state updates.** ``IngestState.mark_chunk_done`` /
-  ``mark_chunk_failed`` track progress across the run so a crashed
-  ingest can (in a future session) resume from the first non-done
-  chunk. Today we just use it to record progress for
-  ``wikiloom status`` diagnostics.
-- **Dedup across chunks.** Multi-chunk documents can redundantly
-  propose the same new page from chunks 1 and 2. We dedupe by
-  ``(type, suggested_slug)`` — first chunk wins. Future work: feed
-  already-proposed pages into later chunks' manifest context so the
-  LLM itself can prefer updates. For v1, first-wins is the cheap
-  correct default.
-- **Errors are isolated per chunk.** A provider error or schema
-  failure on chunk 5 of 15 marks that chunk as failed and continues.
-  The caller sees ``chunks_failed`` in the result and can decide
-  whether to abort or continue. Silently dropping chunks is a real
-  hazard — every failure is logged to ``notes``.
-- **Source summary: last-chunk-wins.** Multi-chunk docs produce one
-  ``source_summary`` per chunk; we keep the one from the last
-  successfully-processed chunk since the LLM has the most context
-  by then. Revisit in Session D when we see real output.
-- **Prompt loading prefers project override.** ``.wikiloom/prompts/
-  ingest.md`` in the project takes precedence over the packaged
-  template so users can customize the prompt without editing the
-  installed package.
+Calls LLMClient.synthesize per chunk, validates responses against
+the ingest_response.json schema, deduplicates proposals, and tracks
+per-chunk progress via IngestState. Aborts after 3 consecutive
+failures.
 """
 
 from __future__ import annotations

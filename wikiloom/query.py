@@ -1,24 +1,8 @@
 """Query pipeline: question → retrieval → LLM → structured answer.
 
-Closes the read side of WikiLoom: given a user's natural-language
-question, retrieve the most relevant wiki pages via FTS5, inject them
-as LLM context, and return a structured answer with source citations.
-
-Design notes
-------------
-- **Retrieval is FTS5-only for v1.** The SQLite cache's ``pages_fts``
-  table covers title + summary. Body search is a fallback grep.
-  Semantic (embedding-based) retrieval is a v2 consideration.
-- **Uses ``LLMClient.synthesize`` not ``query``.** The response
-  schema (``query_response.json``) is structured JSON with
-  ``sources_consulted``, ``confidence``, ``suggest_synthesis`` — so
-  we need JSON mode. ``LLMClient.query`` returns plain text.
-- **Page bodies are read from disk, not the cache.** FTS5 gives us
-  page_ids; we read the full markdown body so the LLM has real
-  content, not just summaries.
-- **Context cap.** To avoid blowing the token budget, we cap the
-  number of pages injected (default 5) and truncate each page body
-  to ``max_body_chars`` (default 4000 chars ≈ 1000 tokens).
+Retrieves relevant pages via FTS5 keyword search (with semantic
+embedding fallback), injects them as LLM context, and returns a
+structured answer with source citations and confidence.
 """
 
 from __future__ import annotations

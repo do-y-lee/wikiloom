@@ -1,20 +1,7 @@
 """Lint & Health System.
 
-Batch health checks over a WikiLoom project. ``WikiLinter`` is a pure
-reader over existing state — manifest, ``backlinks.json``, page
-frontmatter, sub-indexes, git history — and produces a ``LintReport``
-that the CLI can print or act on.
-
-Auto-fix (``fix_all``) repairs the mechanical issues (broken links
-→ plain text, missing frontmatter → defaults, stale pages → status
-flip). It skips any page whose most recent commit is a ``human-edit:``
-so hand-written content is never clobbered — this is the ground-floor
-enforcement point for Component 10 (Human Edit Protection).
-
-The broken-link check reads from ``backlinks.json`` rather than
-re-parsing page bodies: the ingest pipeline rebuilds backlinks before
-every commit, so the JSON is a trustworthy snapshot and we avoid
-duplicating wikilink regex logic with ``backlinks.py``.
+Batch health checks and auto-fix over a WikiLoom project. Skips
+human-edited pages to avoid clobbering hand-written content.
 """
 
 from __future__ import annotations

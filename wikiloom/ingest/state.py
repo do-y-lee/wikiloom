@@ -1,36 +1,8 @@
 """Per-ingest resume checkpoint.
 
-The ingest pipeline chunks a source, then (once Component 20 lands)
-runs an LLM synthesis call per chunk. That loop can fail partway
-through — rate limit, network blip, LLM refusal, parse error — and
-without a checkpoint every already-synthesized chunk is thrown away
-and re-paid for on the next run.
-
-``IngestState`` persists the progress of a single in-flight ingest
-to ``_registry/ingest_state.json``. It records the chunk plan up
-front, marks each chunk done as the synthesis loop advances, and is
-cleared by the processor on successful completion. A subsequent
-``wikiloom ingest`` run for the same source can then detect the
-leftover state and skip chunks already marked done.
-
-Design notes
-------------
-- One active ingest at a time. The processor holds ``FileLock`` for
-  the duration of the run, so we don't need concurrent-state support.
-  If ``ingest_state.json`` exists on startup it means the *previous*
-  run crashed.
-- The checkpoint is keyed by source content hash (or URL) so we can
-  match a resumed run to its state file. If the next ingest is for a
-  different source, the stale state is discarded — we don't
-  cross-contaminate.
-- Serialization is plain JSON via ``write_text``. That matches the
-  existing ``SourceCatalog`` / ``BacklinkRegistry`` pattern. Atomic
-  rename is overkill: a torn write is detected as a JSON parse error
-  and treated as "no state," which falls back to starting fresh.
-- This module provides the *infrastructure*. The synthesis loop that
-  calls ``mark_chunk_done`` lands with Component 20; for today the
-  processor only writes the initial plan and clears the state on
-  success, exercising the save/load/clear paths.
+Tracks per-chunk synthesis progress in _registry/ingest_state.json.
+Survives crashes so a failed run can be detected via wikiloom status.
+Cleared on successful completion.
 """
 
 from __future__ import annotations

@@ -1,20 +1,8 @@
 """Deterministic linking engine.
 
-Runs after the LLM writes prose. Takes plain markdown and inserts
-validated ``[[wikilinks]]`` using spaCy NER + rapidfuzz fuzzy matching
-against the manifest. No LLM in the loop.
-
-The engine uses **tiered confidence**:
-
-    high   (>= 95)   auto-link, no review
-    medium (>= 85)   auto-link, flagged in backlinks as confidence: medium
-    low    (>= 70)   defer to _registry/pending.json for batch review
-    < 70             ignored
-
-Domain-specific recognition is bootstrapped from the manifest itself:
-every existing page's title and aliases become spaCy ``EntityRuler``
-patterns, so "flash attention" or "LoRA" are caught even though
-``en_core_web_sm`` doesn't know about them out of the box.
+Inserts [[wikilinks]] into page bodies using spaCy NER + rapidfuzz
+fuzzy matching against the manifest. Tiered confidence: high
+auto-links, medium flags, low defers to pending.json.
 """
 
 from __future__ import annotations

@@ -1,27 +1,8 @@
-"""Tiered Navigation — IndexUpdater.
+"""Index regeneration.
 
-Regenerates ``wiki/index.md`` and ``wiki/<category>/index.md`` from the
-current manifest + on-disk frontmatter. Index files are the LLM's
-scalable entry point into the wiki: root → sub-index → specific pages,
-so the LLM never has to load the whole corpus into context.
-
-Design notes
-------------
-- **Frontmatter is preserved.** Each index.md keeps its existing YAML
-  frontmatter block on regeneration; only the markdown body is
-  rewritten. This protects any human annotations in the header.
-- **Deterministic output.** Rows sort by ``modified`` descending, then
-  page name ascending, so reindexing an unchanged wiki produces a
-  byte-identical file and doesn't create cosmetic git churn.
-- **Archive is excluded** from both the root index's category list
-  and ``rebuild_all``. Deprecated pages live there and the deprecate
-  flow maintains their index separately.
-- **Category descriptions are hard-coded.** They're conventional and
-  rarely change; pulling them into config would add surface area for
-  no user benefit.
-- **Query flow is deferred.** The ``wikiloom query`` CLI and the full
-  LLM-driven navigation loop land after Component 20 (LLM Provider
-  Abstraction). This module only handles the deterministic write path.
+Rebuilds wiki/index.md and wiki/<category>/index.md from the
+manifest and on-disk frontmatter. Deterministic output so unchanged
+wikis don't produce cosmetic git diffs.
 """
 
 from __future__ import annotations

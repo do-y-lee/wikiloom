@@ -1,9 +1,4 @@
-"""Exceptions raised by the LLM provider abstraction.
-
-Mirrors the pattern in ``wikiloom/ingest/errors.py``: a typed base
-class so callers can branch on category, with subclasses carrying
-structured context as instance attributes.
-"""
+"""Exceptions raised by the LLM provider abstraction."""
 
 from __future__ import annotations
 

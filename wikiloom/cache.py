@@ -1,31 +1,8 @@
 """SQLite query cache.
 
-The cache is a derived read-side index over the wiki: it mirrors
-``manifest.json`` (pages, aliases), ``backlinks.json`` (graph edges),
-and ``wiki/log.md`` (event history) into a single SQLite database at
-``_registry/wiki.db``. Query paths (``search``, ``get_stale``,
-``get_stats``) hit the db instead of reparsing JSON and walking the
-filesystem.
-
-Design notes
-------------
-- ``wiki.db`` is git-ignored. It is *derived* state — if it's missing,
-  corrupt, or out of sync, ``wikiloom rebuild-cache`` regenerates it
-  from on-disk files, which remain the source of truth.
-- ``full_rebuild`` wipes and repopulates every table. It's cheap at
-  today's scale (dozens to low thousands of pages) and side-steps
-  every incremental-upsert edge case.
-- ``sync_from_files`` is the per-commit hook writers call after a
-  successful commit. v1 implementation is "full_rebuild under the
-  hood" — correct, dumb, safe. Incremental upsert by changed file is
-  a later optimization and can slot in without changing the signature.
-- Schema lives here (not scaffold) so there is one source of truth for
-  the table definitions. ``scaffold.init_project`` calls ``init_cache``
-  to create the empty db at init time.
-- The FTS5 virtual table (``pages_fts``) is populated alongside
-  ``pages``. Title + summary cover the common search paths; body
-  indexing is deliberately out of scope for v1 — ``wikiloom search``
-  can fall back to grep for body matches.
+Derived read-side index at _registry/wiki.db. Mirrors manifest,
+backlinks, and page content for FTS5 search, stats, and embedding
+similarity queries. Regenerable via wikiloom rebuild-cache.
 """
 
 from __future__ import annotations

@@ -1,30 +1,8 @@
 """Backlink Registry & Graph.
 
-Turns ``[[target|display]]`` wikilinks embedded in wiki page bodies into
-a queryable bidirectional graph. Persists to
-``_registry/backlinks.json``; builds a NetworkX ``DiGraph`` lazily for
-path-finding and connectivity queries.
-
-Design notes
-------------
-- ``rebuild`` is a full scan today. The internals are structured around
-  a per-file extractor (``_extract_edges_from_page``) so incremental
-  updates can be added later without reshaping the public API.
-- ``linked_at`` is preserved across rebuilds: if an edge already existed
-  in ``backlinks.json``, its original timestamp is kept; only brand-new
-  edges stamp ``now_iso()``.
-- Every extracted edge defaults to ``confidence="high"``. Low-confidence
-  candidates live in ``pending.json`` and never reach this file.
-- ``context`` is the ~60 chars of plain text preceding the wikilink on
-  its line, normalized to a single-line snippet. Good enough for the
-  spec's "developed at" style; the linker can enrich later if needed.
-- The NetworkX graph is lazy (``self._graph is None`` until first use)
-  and ``rebuild`` invalidates it so callers that mix ``rebuild`` with
-  graph queries can't get stale results.
-- ``get_link_path`` traverses the graph **undirected**: a wiki user
-  thinks of ``A`` and ``B`` as "connected" whether the arrow points
-  forward or back. We keep the directed graph internally for
-  ``get_most_connected`` (inbound vs outbound matter there).
+Extracts wikilinks from page bodies into a bidirectional graph.
+Persists to _registry/backlinks.json with a lazy NetworkX DiGraph
+for path-finding and connectivity queries.
 """
 
 from __future__ import annotations

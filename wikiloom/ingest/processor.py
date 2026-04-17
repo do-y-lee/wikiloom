@@ -1,11 +1,7 @@
 """Ingest processor — single entry point for adding a source to the wiki.
 
-Runs the full ingest pipeline under ``FileLock`` so concurrent ingests
-serialize cleanly. The ``IngestResult`` return shape is stable across
-pipeline evolution: new stages fill in ``pages_created`` /
-``pages_updated`` without changing the public API, and every stage that
-produces files stages them into a single ingest git commit so history
-stays atomic.
+Runs extract → chunk → synthesize → write pages → link → commit
+under FileLock in one atomic pipeline.
 """
 
 from __future__ import annotations

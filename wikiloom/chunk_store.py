@@ -1,37 +1,8 @@
-"""Chunk persistence + provenance click-through storage.
+"""Chunk persistence for provenance click-through.
 
-The ingest pipeline produces chunks (from ``wikiloom/ingest/chunker.py``)
-that are held in memory during synthesis. Before Session A, those
-chunks were thrown away after the ingest committed. Now they persist
-to the SQLite cache's ``chunks`` table so each synthesized page can
-carry stable ``chunk_ids`` in its frontmatter, and a user running
-``wikiloom source <chunk_id>`` can retrieve the exact text the LLM saw.
-
-Design notes
-------------
-- **chunk_id derivation.** IDs are ``sha256(source_hash + chunk_index)``
-  truncated to 12 hex characters. Deterministic, stable across re-
-  ingests of the same file, collision-resistant at WikiLoom scale
-  (millions of chunks per source hash would be needed to collide).
-  Short enough to fit in frontmatter without visual noise.
-- **Source reference by hash, not FK.** ``source_hash`` points at
-  the sources.json catalog entry (SHA-256 of the source file bytes).
-  No SQLite foreign key is enforced — the sources catalog lives in
-  JSON, not SQLite. Referential integrity is maintained by the
-  ingest pipeline, which always persists chunks and catalog entries
-  together within a single FileLock window.
-- **URL sources don't produce chunks in Session A.** URL ingestion
-  bypasses the source catalog (NOTES.local.md item F). Until that's
-  resolved, URL-sourced chunks would have no stable source_hash to
-  reference, so the chunk store simply isn't called for URL flows.
-  File-based provenance works; URL provenance lands with F.
-- **Rewrite semantics on re-ingest.** ``persist_chunks`` clears any
-  prior rows for a given ``source_hash`` before inserting the new
-  set. A re-ingest with ``--force`` produces fresh chunk_ids (same
-  values if the file bytes are unchanged, different if not). Pages
-  still reference the old chunk_ids in their frontmatter — those
-  pointers become stale, and ``wikiloom source`` surfaces the miss
-  as a clean "not found" rather than a crash.
+Persists extracted chunks to the SQLite chunks table so synthesized
+pages can reference them via stable chunk_ids. Users run
+wikiloom source <chunk_id> to see the exact text the LLM saw.
 """
 
 from __future__ import annotations

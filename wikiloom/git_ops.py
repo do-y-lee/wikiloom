@@ -1,19 +1,8 @@
 """Git integration.
 
-Thin wrapper over GitPython that enforces WikiLoom's commit-message
-convention so downstream tools (linter, ``get_file_history``,
-``is_human_edited``) can classify commits by parsing their subject line.
-
-Commit subject grammar::
-
-    <type>: <description> [<stats>]
-
-Where ``<type>`` is one of: ``ingest``, ``query``, ``lint``, ``merge``,
-``deprecate``, ``human-edit``, ``migration``. The ``[<stats>]`` suffix is
-optional and human-readable only.
-
-Locking: ``GitOps`` does NOT acquire ``FileLock``. Callers that may race
-with other writers must already hold the project lock.
+Wrapper over GitPython enforcing WikiLoom's commit-message convention
+(type: description [stats]) for commit classification by the linter
+and human-edit protection.
 """
 
 from __future__ import annotations

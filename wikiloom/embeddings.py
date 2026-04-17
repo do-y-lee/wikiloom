@@ -1,30 +1,8 @@
 """Embedding provider abstraction.
 
-Turns text into dense vectors for semantic similarity search. Used
-by the query pipeline as a fallback when FTS5 keyword search finds
-no results — the query is embedded and compared against page
-embeddings via cosine similarity.
-
-Three backends, configured via ``[embeddings]`` in ``wikiloom.toml``:
-
-- **fastembed** (default): local ONNX model, ~100MB install, free,
-  no API key. ``BAAI/bge-small-en-v1.5`` by default.
-- **openai**: API-based, ~1MB install, needs ``OPENAI_API_KEY``.
-  ``text-embedding-3-small`` by default. Industry standard.
-- **sentence-transformers**: local PyTorch model, ~800MB+ install,
-  free. ``all-MiniLM-L6-v2`` by default. Most popular local lib.
-
-Design notes
-------------
-- **Lazy imports.** Each backend is imported only when selected so
-  users don't pay the install cost for providers they don't use. A
-  missing dependency produces a clear error with install instructions.
-- **Single interface.** ``get_embedder(config)`` returns an
-  ``Embedder`` with one method: ``embed_texts(texts) → vectors``.
-  The query and cache modules don't know which backend is active.
-- **Vectors are lists of floats, not numpy arrays.** Avoids a numpy
-  dependency for serialization to SQLite BLOBs. Cosine similarity
-  is computed with plain Python math — fast enough at wiki scale.
+Three backends (fastembed, openai, sentence-transformers) configured
+via [embeddings] in wikiloom.toml. Lazy-imported so only the selected
+provider needs to be installed.
 """
 
 from __future__ import annotations
