@@ -339,6 +339,26 @@ def query(
         except (ImportError, ValueError):
             pass  # embedding provider not installed; FTS5-only
 
+    import threading
+    import sys
+
+    stop_spinner = threading.Event()
+
+    def _spinner() -> None:
+        frames = ["Searching wiki...", "Reading pages...", "Thinking..."]
+        i = 0
+        while not stop_spinner.is_set():
+            msg = frames[min(i, len(frames) - 1)]
+            sys.stderr.write(f"\r{msg}")
+            sys.stderr.flush()
+            i += 1
+            stop_spinner.wait(timeout=2.0)
+        sys.stderr.write("\r" + " " * 40 + "\r")
+        sys.stderr.flush()
+
+    spinner_thread = threading.Thread(target=_spinner, daemon=True)
+    spinner_thread.start()
+
     try:
         answer = run_query(
             question=question,
@@ -348,7 +368,12 @@ def query(
             embedder=embedder,
         )
     except Exception as exc:
+        stop_spinner.set()
+        spinner_thread.join()
         raise click.ClickException(str(exc)) from exc
+
+    stop_spinner.set()
+    spinner_thread.join()
 
     # Save result for --last
     result_data = {
