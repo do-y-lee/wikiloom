@@ -76,12 +76,17 @@ def ingest(source: str, project: Path | None, force: bool) -> None:
     except IngestError as exc:
         raise click.ClickException(str(exc)) from exc
 
-    click.echo(f"Extracted: {result.content.content_type} "
-               f"({result.content.token_estimate} tokens estimated)")
-    if result.raw_path:
-        click.echo(f"Copied to: {result.raw_path.relative_to(project)}")
-    click.echo(f"Chunks: {len(result.chunks)} "
-               f"(needs_chunking={result.budget.needs_chunking})")
+    # Summary
+    created = len(result.pages_created)
+    updated = len(result.pages_updated)
+    if created or updated:
+        click.echo(
+            f"Done: {created} page(s) created, {updated} updated"
+            f" ({result.total_tokens_in + result.total_tokens_out:,} tokens, "
+            f"${result.total_cost_usd:.2f})"
+        )
+    else:
+        click.echo("Done: no pages synthesized.")
     for note in result.notes:
         click.echo(f"Note: {note}")
 
@@ -288,7 +293,7 @@ def query(
     import json as json_mod
 
     from wikiloom.config import Config
-    from wikiloom.frontmatter import Frontmatter, read_page, write_page
+    from wikiloom.frontmatter import Frontmatter, write_page
     from wikiloom.llm import LLMClient
     from wikiloom.query import run_query
     from wikiloom.registry import PageEntry, Registry

@@ -236,6 +236,7 @@ def ingest(
                 )
 
         # 1. Extract
+        click.echo(f"Extracting {source_path.name}...")
         extractor = router.route(source)
         content = extractor.extract(source_path)
 
@@ -243,8 +244,15 @@ def ingest(
         # extractor so the error message can cite the content_type.
         _guard_empty_extraction(content, ingest_cfg)
 
+        click.echo(
+            f"Extracted: {content.content_type} "
+            f"({content.token_estimate:,} tokens estimated)"
+        )
+
         # 2. Copy to raw/
         raw_path = copy_to_raw(source_path, content, project_root)
+        if raw_path is not None:
+            click.echo(f"Copied to: {raw_path.relative_to(project_root)}")
 
         # 3. Plan budget
         budget = plan_budget(content, max_tokens_per_operation)
@@ -254,6 +262,7 @@ def ingest(
             chunks = Chunker().split(content, budget)
         else:
             chunks = [content]
+        click.echo(f"Chunks: {len(chunks)}")
 
         # 4b. Write the resume checkpoint. Records the chunk plan so a
         # crash mid-synthesis (once Component 20 lands) can pick up
@@ -302,10 +311,12 @@ def ingest(
 
             # 5a. Pre-flight budget check — refuse before the LLM loop
             # if the estimated cost would breach the monthly budget.
+            click.echo("Running budget pre-flight check...")
             _preflight_budget_check(chunks, full_cfg)
 
             # 5b. Persist chunks so their text is queryable via
             # `wikiloom source <chunk_id>` after the ingest commits.
+            click.echo("Persisting chunks...")
             chunk_store = ChunkStore(registry_dir / "wiki.db")
             stored_chunks = chunk_store.persist_chunks(content_hash, chunks)
             chunk_ids = [s.chunk_id for s in stored_chunks]
@@ -321,6 +332,7 @@ def ingest(
                     f"  chunk {n}/{total}: {tokens} tokens, ${cost:.4f}"
                 )
 
+            click.echo(f"Synthesizing {len(chunks)} chunk(s) via {full_cfg.llm.model}...")
             synthesis = run_synthesis(
                 chunks=chunks,
                 chunk_ids=chunk_ids,
@@ -361,6 +373,7 @@ def ingest(
                     last_ingested_at=now_iso(),
                 )
 
+            click.echo("Writing pages...")
             writer = PageWriter(project_root, registry, force=force)
             write_result = writer.write(synthesis, source_entry=catalog_entry)
 
@@ -379,14 +392,13 @@ def ingest(
             # rebuild. The linker modifies page files in-place — the
             # paths in synthesis_written are updated on disk.
             if synthesis_written:
+                click.echo("Linking pages...")
                 from wikiloom.linker import LinkingEngine
 
                 linker = LinkingEngine(registry, config=full_cfg.linking)
                 linked_pages = linker.link_all(synthesis_written)
                 if linked_pages:
-                    click.echo(
-                        f"  linked {len(linked_pages)} page(s)"
-                    )
+                    click.echo(f"Linked {len(linked_pages)} page(s)")
 
                 # Stubs created by the linker are new files that need
                 # to be staged in the commit. Scan the wiki dir for
@@ -440,6 +452,7 @@ def ingest(
 
         # 11. Git commit. Empty staging no-ops to HEAD so this is safe
         # when synthesis produced no pages (e.g., every chunk failed).
+        click.echo("Committing...")
         git_ops = GitOps(project_root)
         staged: list[Path] = []
         if raw_path is not None:
