@@ -70,11 +70,19 @@ class IngestConfig:
     ``enable_budget_check`` gates the pre-flight monthly-budget check
     in the synthesis loop. Defaults to True in production; set to
     False in tests or when running a deliberately uncapped batch.
+
+    ``use_page_context`` enables semantic retrieval of existing pages
+    per chunk for prompt injection so the LLM can prefer UPDATE over
+    CREATE when a chunk overlaps with existing content. Set to False
+    to fall back to the simpler "most-recently-modified" snapshot.
+    ``page_context_top_k`` caps how many retrieved pages are injected.
     """
 
     max_file_size_mb: int = 50
     min_extracted_chars: int = 16
     enable_budget_check: bool = True
+    use_page_context: bool = True
+    page_context_top_k: int = 10
 
 
 @dataclass

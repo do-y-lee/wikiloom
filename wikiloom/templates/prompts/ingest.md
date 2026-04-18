@@ -56,7 +56,36 @@ You are a knowledge base assistant. Your job is to read source text and produce 
 
 ## Handling existing pages
 
-When the manifest shows an existing page for an entity/concept:
-- If the source adds new information, include it in `pages_to_update`
-- If the source contradicts existing information, add a `contradictions` array to the update entry
-- Do NOT create a new page for something that already exists
+The user prompt includes an "Existing pages in the wiki" table of
+pages semantically related to the current chunk. Use this table as
+your primary reference when deciding between UPDATE and CREATE.
+
+**For each page in the list, ask yourself:**
+
+1. Would this chunk's content fit naturally as additions to that
+   page, using its existing title and scope? → propose **UPDATE**
+   targeting `existing_path = <that page's page_id>`.
+
+2. Does the chunk describe a sibling concept, a more specific case,
+   a different mechanism, or a related-but-distinct topic?
+   → propose **CREATE**, even if the topic is related.
+
+**Tiebreaker rules when uncertain:**
+
+- **Default to CREATE.** Duplicates can be merged later with
+  `wikiloom merge`, but wrong merges require restoring archived
+  content and rewriting wikilinks — much harder to undo. Prefer
+  two slightly-overlapping pages over one incorrectly-merged page.
+- If you would need a **different page title** to accurately
+  describe this chunk's content, that's a CREATE signal.
+- If the chunk **contradicts** an existing page's claims, UPDATE
+  with a `contradictions` array rather than CREATE a rival page.
+
+**When using UPDATE:** copy the target `page_id` exactly from the
+table — do not paraphrase it, do not guess at the slug, and do not
+mix case. If no page in the table is a clear match, CREATE.
+
+**When creating:** pick a concise, canonical slug. Avoid
+disambiguating suffixes (e.g. prefer `transaction-posting` over
+`transaction-posting-banking`) unless a sibling concept with the
+bare slug truly exists on a different topic.

@@ -314,11 +314,17 @@ class WikiLinter:
         return stale
 
     def check_duplicates(self) -> list[DuplicateSet]:
-        """Fuzzy-match titles and aliases for near-duplicate pages.
+        """Fuzzy-match titles, aliases, slugs, and embeddings for near-duplicates.
 
-        Only runs on active pages. Pairs above ``_DUPLICATE_THRESHOLD``
-        are reported; unrelated titles stay well below.
+        Title/alias signal catches LLM output where the page name is
+        similar. Slug/embedding signal catches LLM output where the
+        slug got a disambiguating suffix (``pending-transactions`` vs
+        ``pending-transactions-banking``) or where titles diverged but
+        the bodies describe the same concept. Only runs on active pages
+        and only within the same type.
         """
+        from wikiloom.duplicates import find_duplicates
+
         pages = [
             (pid, entry)
             for pid, entry in self.registry.pages.items()
@@ -347,6 +353,34 @@ class WikiLinter:
                 duplicates.append(
                     DuplicateSet(pages=pair, reason=reason, score=score)
                 )
+
+        # Slug + embedding signal — catches duplicates the title check
+        # misses (different titles, same concept; slug-suffix variants).
+        # Cache may not exist yet on a fresh project; find_duplicates
+        # returns [] in that case.
+        try:
+            slug_pairs = find_duplicates(
+                self.project_root,
+                slug_threshold=85.0,
+                embedding_threshold=0.88,
+                same_type_only=True,
+            )
+        except Exception:
+            slug_pairs = []
+        for sp in slug_pairs:
+            pair = tuple(sorted((sp.page_a, sp.page_b)))
+            if pair in seen_pairs:
+                continue
+            seen_pairs.add(pair)
+            if sp.embedding_score >= 0.88:
+                reason = "embedding"
+                score = int(sp.embedding_score * 100)
+            else:
+                reason = "slug"
+                score = int(sp.slug_score)
+            duplicates.append(
+                DuplicateSet(pages=pair, reason=reason, score=score)
+            )
         return duplicates
 
     def check_frontmatter(self) -> list[str]:

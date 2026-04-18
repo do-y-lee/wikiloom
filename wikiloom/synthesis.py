@@ -283,6 +283,9 @@ def run_synthesis(
     project_root: Path,
     state: IngestState | None = None,
     progress_callback: ProgressCallback | None = None,
+    use_page_context: bool = True,
+    page_context_top_k: int = 10,
+    embedder: Any | None = None,
 ) -> SynthesisResult:
     """Run LLM synthesis across every chunk and return aggregated results.
 
@@ -297,6 +300,15 @@ def run_synthesis(
             chunk's progress is recorded so failed runs can be
             inspected (and future sessions can resume).
         progress_callback: Optional hook for live progress feedback.
+        use_page_context: When True and an ``embedder`` is supplied,
+            retrieve the top-K most semantically similar existing pages
+            per chunk and inject them into the prompt so the LLM can
+            prefer UPDATE over CREATE on overlapping content. Falls
+            back to the modified-order snapshot when disabled or when
+            the cache has no embeddings yet.
+        page_context_top_k: Cap on retrieved candidates per chunk.
+        embedder: Optional embedder for per-chunk retrieval. Pass the
+            same instance used elsewhere to avoid re-loading the model.
 
     Returns:
         ``SynthesisResult`` with aggregated page proposals, source
@@ -309,7 +321,8 @@ def run_synthesis(
         )
 
     system_prompt = load_prompt(project_root)
-    manifest_context = render_manifest_context(registry)
+    fallback_manifest_context = render_manifest_context(registry)
+    per_chunk_retrieval = use_page_context and embedder is not None
 
     pages_to_create: list[PageProposal] = []
     pages_to_update: list[PageProposal] = []
@@ -331,12 +344,28 @@ def run_synthesis(
         chunk_index = int(chunk.metadata.get("chunk_index", i))
         chunk_total = int(chunk.metadata.get("chunk_total", len(chunks)))
 
+        if per_chunk_retrieval:
+            from wikiloom.page_context import (
+                render_candidates,
+                retrieve_candidates_for_chunk,
+            )
+
+            candidates = retrieve_candidates_for_chunk(
+                chunk_text=chunk.text,
+                project_root=project_root,
+                embedder=embedder,
+                top_k=page_context_top_k,
+            )
+            chunk_context = render_candidates(candidates)
+        else:
+            chunk_context = fallback_manifest_context
+
         user_prompt = _render_user_prompt(
             chunk_text=chunk.text,
             chunk_id=chunk_id,
             chunk_index=chunk_index,
             chunk_total=chunk_total,
-            manifest_context=manifest_context,
+            manifest_context=chunk_context,
         )
 
         try:

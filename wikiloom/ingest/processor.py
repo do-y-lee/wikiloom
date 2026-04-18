@@ -184,6 +184,7 @@ def ingest(
     project_root: Path,
     max_tokens_per_operation: int = 8000,
     force: bool = False,
+    use_page_context: bool | None = None,
 ) -> IngestResult:
     """Run the ingest pipeline for a single source.
 
@@ -195,6 +196,9 @@ def ingest(
             in the catalog. Without this flag, a repeat ingest of an
             identical local file is a cheap no-op that only bumps the
             catalog's ``ingest_count``.
+        use_page_context: Overrides the project's ``[ingest] use_page_context``
+            config value for this run. None leaves the config setting in
+            place; True/False forces the behavior regardless of config.
 
     Returns:
         IngestResult describing what happened. Holds the lock for the
@@ -333,6 +337,15 @@ def ingest(
                 )
 
             click.echo(f"Synthesizing {len(chunks)} chunk(s) via {full_cfg.llm.model}...")
+            effective_page_context = (
+                full_cfg.ingest.use_page_context
+                if use_page_context is None
+                else use_page_context
+            )
+            synthesis_embedder = None
+            if effective_page_context:
+                from wikiloom.embeddings import load_embedder
+                synthesis_embedder = load_embedder(project_root)
             synthesis = run_synthesis(
                 chunks=chunks,
                 chunk_ids=chunk_ids,
@@ -341,6 +354,9 @@ def ingest(
                 project_root=project_root,
                 state=ingest_state,
                 progress_callback=_on_chunk_done,
+                use_page_context=effective_page_context,
+                page_context_top_k=full_cfg.ingest.page_context_top_k,
+                embedder=synthesis_embedder,
             )
 
             result.total_tokens_in = synthesis.total_tokens_in

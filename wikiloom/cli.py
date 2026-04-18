@@ -145,7 +145,15 @@ def _auto_commit(project: Path, commit_type: str, description: str) -> None:
     default=False,
     help="Re-run the full pipeline even if the source is already in the catalog.",
 )
-def ingest(source: str, project: Path | None, force: bool) -> None:
+@click.option(
+    "--no-page-context",
+    is_flag=True,
+    default=False,
+    help="Disable per-chunk semantic retrieval of existing pages for this run.",
+)
+def ingest(
+    source: str, project: Path | None, force: bool, no_page_context: bool
+) -> None:
     """Ingest a source file or URL into the wiki.
 
     Extracts content, copies local files to raw/, rebuilds backlinks and
@@ -164,8 +172,16 @@ def ingest(source: str, project: Path | None, force: bool) -> None:
             )
 
     _require_clean_tree(project, "ingest")
+    # CLI flag is a one-way opt-out. None leaves the config value in
+    # effect; False forces the behavior off for this run only.
+    use_page_context_override = False if no_page_context else None
     try:
-        result = run_ingest(source, project_root=project, force=force)
+        result = run_ingest(
+            source,
+            project_root=project,
+            force=force,
+            use_page_context=use_page_context_override,
+        )
     except IngestError as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -1210,6 +1226,339 @@ def orphans(project: Path | None) -> None:
         f"\n  wikiloom related {example_pid}"
         f"\n\nOr run `wikiloom relink` to re-run the linker on all pages."
     )
+
+
+@main.command("duplicates")
+@click.option(
+    "--slug-threshold",
+    type=float,
+    default=80.0,
+    help="Slug fuzzy-match threshold 0-100 (default: 80).",
+)
+@click.option(
+    "--embedding-threshold",
+    type=float,
+    default=0.85,
+    help="Embedding cosine threshold 0-1 (default: 0.85).",
+)
+@click.option(
+    "--cross-type",
+    is_flag=True,
+    default=False,
+    help="Also compare pages across different types (default: same-type only).",
+)
+@click.option(
+    "--limit",
+    type=int,
+    default=20,
+    help="Max number of pairs to print.",
+)
+@click.option(
+    "--review",
+    is_flag=True,
+    default=False,
+    help="Walk through every pair interactively, choosing merge/skip/swap/quit.",
+)
+@click.option(
+    "--auto-merge",
+    is_flag=True,
+    default=False,
+    help="Auto-merge only safe pairs (singular/plural, prefix variants) above thresholds.",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="With --auto-merge: print the plan without executing.",
+)
+@click.option(
+    "--project",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Project root.",
+)
+def duplicates(
+    slug_threshold: float,
+    embedding_threshold: float,
+    cross_type: bool,
+    limit: int,
+    review: bool,
+    auto_merge: bool,
+    dry_run: bool,
+    project: Path | None,
+) -> None:
+    """Find pages that may be duplicates of each other.
+
+    Default mode lists suspect pairs sorted by similarity. Use
+    --review for an interactive merge workflow, or --auto-merge to
+    batch-resolve only the safe singular/plural and prefix variants.
+    """
+    from wikiloom.duplicates import find_duplicates, suggest_winner
+
+    if review and auto_merge:
+        raise click.UsageError("--review and --auto-merge are mutually exclusive.")
+
+    if project is None:
+        project = _find_project_root(Path.cwd())
+        if project is None:
+            raise click.ClickException(
+                "Could not find a WikiLoom project (no wikiloom.toml found)."
+            )
+
+    if review or auto_merge:
+        _require_clean_tree(project, "duplicates")
+    else:
+        _warn_if_dirty(project)
+
+    pairs = find_duplicates(
+        project,
+        slug_threshold=slug_threshold,
+        embedding_threshold=embedding_threshold,
+        same_type_only=not cross_type,
+    )
+
+    if not pairs:
+        click.echo("No suspected duplicates found.")
+        return
+
+    if review:
+        _run_review_mode(project, pairs)
+        return
+
+    if auto_merge:
+        _run_auto_merge_mode(project, pairs, dry_run=dry_run)
+        return
+
+    shown = pairs[:limit]
+    click.echo(f"Suspected duplicate pairs ({len(pairs)}):\n")
+    for pair in shown:
+        if pair.embedding_score >= 0:
+            emb = f"emb {pair.embedding_score:.2f}"
+        else:
+            emb = "emb n/a"
+        click.echo(f"  slug {pair.slug_score:.0f}% | {emb}")
+        click.echo(f"    {pair.page_a}  ({pair.title_a})")
+        click.echo(f"    {pair.page_b}  ({pair.title_b})")
+        suggestion = suggest_winner(pair)
+        click.echo(
+            f"    → wikiloom merge {suggestion.winner_page_id} "
+            f"{suggestion.loser_page_id}  ({suggestion.reason})\n"
+        )
+
+    if len(pairs) > limit:
+        click.echo(
+            f"... and {len(pairs) - limit} more. Pass --limit N to see more."
+        )
+    click.echo(
+        "\nTip: use `wikiloom duplicates --review` to walk through them "
+        "interactively, or `--auto-merge` for safe singular/plural variants."
+    )
+
+
+def _run_review_mode(project: Path, pairs: list) -> None:
+    """Interactive walkthrough: prompt y/s/n/q for each pair."""
+    from wikiloom.duplicates import suggest_winner
+    from wikiloom.locking import FileLock
+    from wikiloom.merge import merge_pages
+
+    merged = 0
+    skipped = 0
+    total = len(pairs)
+    click.echo(f"Reviewing {total} suspected duplicate pair(s).")
+    click.echo("For each pair: [y]es merge / [s]wap winner-loser / [n]o skip / [q]uit\n")
+
+    for i, pair in enumerate(pairs, start=1):
+        suggestion = suggest_winner(pair)
+        emb = f"{pair.embedding_score:.2f}" if pair.embedding_score >= 0 else "n/a"
+        click.echo(f"--- Pair {i}/{total} (slug {pair.slug_score:.0f}%, emb {emb})")
+        click.echo(f"  WINNER (kept):    {suggestion.winner_page_id}  ({pair.title_a if suggestion.winner_page_id == pair.page_a else pair.title_b})")
+        click.echo(f"  LOSER (archived): {suggestion.loser_page_id}  ({pair.title_b if suggestion.winner_page_id == pair.page_a else pair.title_a})")
+        click.echo(f"  reason: {suggestion.reason}")
+
+        choice = click.prompt(
+            "Action",
+            type=click.Choice(["y", "s", "n", "q"], case_sensitive=False),
+            default="n",
+            show_choices=True,
+            show_default=True,
+        ).lower()
+
+        if choice == "q":
+            click.echo("Quit.")
+            break
+        if choice == "n":
+            skipped += 1
+            continue
+
+        winner = suggestion.winner_page_id
+        loser = suggestion.loser_page_id
+        if choice == "s":
+            winner, loser = loser, winner
+
+        try:
+            with FileLock(project):
+                merge_pages(project, winner, loser)
+                _sync_cache(project)
+                _auto_commit(project, "merge", f"{loser} into {winner}")
+            click.echo(f"  ✓ merged {loser} → {winner}\n")
+            merged += 1
+        except ValueError as exc:
+            click.echo(f"  ✗ skipped: {exc}\n")
+            skipped += 1
+
+    click.echo(f"\nDone. Merged: {merged}, skipped: {skipped}.")
+
+
+def _run_auto_merge_mode(project: Path, pairs: list, dry_run: bool) -> None:
+    """Batch-merge only pairs flagged is_safe_to_auto by suggest_winner."""
+    from wikiloom.duplicates import suggest_winner
+    from wikiloom.locking import FileLock
+    from wikiloom.merge import merge_pages
+
+    safe_plan: list = []
+    unsafe: list = []
+    for pair in pairs:
+        suggestion = suggest_winner(pair)
+        if suggestion.is_safe_to_auto:
+            safe_plan.append((pair, suggestion))
+        else:
+            unsafe.append((pair, suggestion))
+
+    if not safe_plan:
+        click.echo("No pairs match the safe auto-merge criteria.")
+        if unsafe:
+            click.echo(
+                f"\n{len(unsafe)} pair(s) need manual review. "
+                f"Run `wikiloom duplicates --review` to walk through them."
+            )
+        return
+
+    click.echo(f"Plan ({len(safe_plan)} safe merge(s)):\n")
+    for pair, suggestion in safe_plan:
+        emb = f"{pair.embedding_score:.2f}" if pair.embedding_score >= 0 else "n/a"
+        click.echo(
+            f"  {suggestion.loser_page_id}  →  {suggestion.winner_page_id}"
+            f"  (slug {pair.slug_score:.0f}%, emb {emb}, {suggestion.reason})"
+        )
+
+    if unsafe:
+        click.echo(
+            f"\nSkipping {len(unsafe)} ambiguous pair(s) — "
+            f"use `wikiloom duplicates --review` for those."
+        )
+
+    if dry_run:
+        click.echo("\nDry run. Nothing executed.")
+        return
+
+    if not click.confirm(f"\nProceed with {len(safe_plan)} merge(s)?"):
+        click.echo("Aborted.")
+        return
+
+    merged = 0
+    skipped = 0
+    for pair, suggestion in safe_plan:
+        try:
+            with FileLock(project):
+                merge_pages(
+                    project,
+                    suggestion.winner_page_id,
+                    suggestion.loser_page_id,
+                )
+                _sync_cache(project)
+                _auto_commit(
+                    project,
+                    "merge",
+                    f"{suggestion.loser_page_id} into {suggestion.winner_page_id}",
+                )
+            merged += 1
+        except ValueError as exc:
+            click.echo(
+                f"  ✗ {suggestion.loser_page_id}: {exc}"
+            )
+            skipped += 1
+
+    click.echo(f"\nDone. Merged: {merged}, skipped: {skipped}.")
+
+
+@main.command("merge")
+@click.argument("winner")
+@click.argument("loser")
+@click.option(
+    "--yes",
+    is_flag=True,
+    default=False,
+    help="Skip the confirmation prompt.",
+)
+@click.option(
+    "--project",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Project root.",
+)
+def merge(winner: str, loser: str, yes: bool, project: Path | None) -> None:
+    """Merge LOSER page into WINNER page.
+
+    Combines bodies (loser appended under a "Merged content" section
+    for human reconciliation), unions aliases/sources/chunk_ids,
+    rewrites inbound [[loser]] wikilinks to [[winner]], deprecates the
+    loser to wiki/archive/, and commits with a merge: prefix.
+    """
+    from wikiloom.locking import FileLock
+    from wikiloom.merge import merge_pages
+
+    if project is None:
+        project = _find_project_root(Path.cwd())
+        if project is None:
+            raise click.ClickException(
+                "Could not find a WikiLoom project (no wikiloom.toml found)."
+            )
+
+    # Strip .md / wiki/ prefix as the other commands do
+    winner = winner.replace(".md", "").strip("/")
+    if winner.startswith("wiki/"):
+        winner = winner[len("wiki/"):]
+    loser = loser.replace(".md", "").strip("/")
+    if loser.startswith("wiki/"):
+        loser = loser[len("wiki/"):]
+
+    if winner == loser:
+        raise click.UsageError("WINNER and LOSER must be different pages.")
+
+    _require_clean_tree(project, "merge")
+
+    if not yes:
+        click.echo(f"Merge: {loser}  →  {winner}")
+        click.echo("This will:")
+        click.echo(f"  - append {loser}'s body into {winner}")
+        click.echo(f"  - rewrite all [[{loser}]] wikilinks to [[{winner}]]")
+        click.echo(f"  - move {loser}.md into wiki/archive/")
+        click.echo(f"  - record {loser} as superseded_by {winner}")
+        if not click.confirm("\nProceed?"):
+            click.echo("Aborted.")
+            return
+
+    try:
+        with FileLock(project):
+            result = merge_pages(project, winner, loser)
+            _sync_cache(project)
+            _auto_commit(
+                project,
+                "merge",
+                f"{loser} into {winner}",
+            )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo(f"Merged {loser} into {winner}.")
+    if result.rewrote_links_in:
+        click.echo(
+            f"Rewrote wikilinks in {len(result.rewrote_links_in)} page(s)."
+        )
+    if result.archive_path is not None:
+        click.echo(
+            f"Archived {loser} → {result.archive_path.relative_to(project)}"
+        )
 
 
 @main.command("review")
