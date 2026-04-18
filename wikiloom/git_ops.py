@@ -146,6 +146,56 @@ class GitOps:
         message = f"human-edit: {rel} [protected]"
         return self._stage_and_commit([Path(rel)], message)
 
+    def commit(self, files: Iterable[Path], message: str) -> str:
+        """Stage ``files`` and create one commit with ``message``.
+
+        Generic entry point for the auto-commit path on writer commands
+        other than ingest. Callers pass a message that already carries
+        the classifying prefix (e.g. ``lint: ...``, ``relink: ...``).
+        """
+        return self._stage_and_commit(files, message)
+
+    # ------------------------------------------------------------------
+    # Working-tree status
+    # ------------------------------------------------------------------
+
+    def dirty_wiki_paths(self) -> list[Path]:
+        """Return paths under ``wiki/`` with uncommitted changes.
+
+        Includes modified (staged + unstaged) and untracked files.
+        Excludes ``wiki/log.md`` (append-only event log managed by
+        wikiloom itself) so it never triggers the dirty-tree guard.
+        Paths are returned relative to the repo root.
+        """
+        seen: set[str] = set()
+        out: list[Path] = []
+
+        def _include(rel_path: str) -> None:
+            if rel_path in seen:
+                return
+            if not rel_path.startswith("wiki/"):
+                return
+            if rel_path == "wiki/log.md":
+                return
+            seen.add(rel_path)
+            out.append(Path(rel_path))
+
+        head_valid = self.repo.head.is_valid()
+        if head_valid:
+            # Staged vs HEAD
+            for d in self.repo.index.diff(self.repo.head.commit):
+                _include(d.a_path or "")
+                _include(d.b_path or "")
+        # Unstaged (working tree vs index)
+        for d in self.repo.index.diff(None):
+            _include(d.a_path or "")
+            _include(d.b_path or "")
+        # Untracked
+        for u in self.repo.untracked_files:
+            _include(u)
+
+        return out
+
     # ------------------------------------------------------------------
     # History queries
     # ------------------------------------------------------------------

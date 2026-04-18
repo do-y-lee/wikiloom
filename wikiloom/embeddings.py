@@ -10,6 +10,7 @@ from __future__ import annotations
 import math
 import struct
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 
 
@@ -123,6 +124,29 @@ def get_embedder(config: EmbeddingConfig | None = None) -> Embedder:
             f"Options: {', '.join(sorted(_BACKENDS))}"
         )
     return backend_cls(model=config.model)
+
+
+def load_embedder(project: Path) -> Embedder | None:
+    """Read project config and return an embedder if embeddings are enabled.
+
+    Returns ``None`` when embeddings are disabled, the config file is
+    missing, or the backend fails to import. Callers can pass the result
+    straight into ``SQLiteCache.full_rebuild`` / ``sync_from_files``.
+    """
+    try:
+        from wikiloom.config import Config
+
+        cfg = Config.load(project)
+    except (FileNotFoundError, ValueError):
+        return None
+
+    if not cfg.embeddings.enabled:
+        return None
+
+    try:
+        return get_embedder(cfg.embeddings)
+    except (ImportError, ValueError):
+        return None
 
 
 # ----------------------------------------------------------------------

@@ -177,14 +177,30 @@ def _copy_templates(dest: Path) -> None:
 
 
 def _init_git(project_dir: Path) -> None:
-    """Initialize a git repository if one doesn't exist."""
+    """Initialize a git repository if one doesn't exist, and commit the
+    scaffold so the working tree starts clean.
+
+    The commit uses the ``init:`` prefix but ``init`` is deliberately not
+    in ``AUTO_COMMIT_TYPES`` — scaffold files are synthetic and not
+    treated as either human-edited or LLM-authored; the prefix exists
+    only to classify the event for log readers.
+    """
     from git import Repo
     from git.exc import InvalidGitRepositoryError
 
     try:
-        Repo(project_dir)
+        repo = Repo(project_dir)
     except InvalidGitRepositoryError:
-        Repo.init(project_dir)
+        repo = Repo.init(project_dir)
+
+    # Skip commit if nothing to commit or HEAD already has it.
+    repo.git.add("-A", "--", str(project_dir))
+    if repo.head.is_valid():
+        if not repo.index.diff(repo.head.commit):
+            return
+    elif not repo.index.entries:
+        return
+    repo.index.commit("init: scaffold wikiloom project")
 
 
 def init_project(

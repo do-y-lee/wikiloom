@@ -535,9 +535,10 @@ def ingest(
         # state. `wikiloom rebuild-cache` is the manual recovery path.
         if registry_dir.exists():
             from wikiloom.cache import SQLiteCache
+            from wikiloom.embeddings import load_embedder
 
             SQLiteCache(registry_dir / "wiki.db").sync_from_files(
-                project_root, staged
+                project_root, staged, embedder=load_embedder(project_root)
             )
 
         # 15. Clear the resume checkpoint. Reaching this line means the

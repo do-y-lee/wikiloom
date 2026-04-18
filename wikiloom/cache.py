@@ -302,16 +302,21 @@ class SQLiteCache:
         return page_count
 
     def sync_from_files(
-        self, project_root: Path, changed_files: list[Path] | None = None
+        self,
+        project_root: Path,
+        changed_files: list[Path] | None = None,
+        embedder: Any | None = None,
     ) -> None:
         """Refresh the cache after a write-side commit.
 
         v1 delegates to ``full_rebuild`` — correct and cheap at current
         scale. ``changed_files`` is accepted so callers don't need to
-        change when an incremental path lands later.
+        change when an incremental path lands later. ``embedder`` is
+        forwarded so auto-syncs preserve embeddings instead of wiping
+        them to NULL.
         """
         del changed_files  # unused in v1
-        self.full_rebuild(project_root)
+        self.full_rebuild(project_root, embedder=embedder)
 
     # ------------------------------------------------------------------
     # Reads

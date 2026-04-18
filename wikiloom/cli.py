@@ -39,6 +39,98 @@ def _find_project_root(start: Path) -> Path | None:
     return None
 
 
+def _sync_cache(project: Path) -> None:
+    """Refresh the SQLite query cache (FTS + embeddings) from on-disk state.
+
+    Every writer command calls this at the end so `wikiloom query` and
+    `wikiloom related` see the new state without a manual rebuild-cache.
+    """
+    from wikiloom.cache import SQLiteCache
+    from wikiloom.embeddings import load_embedder
+
+    registry_dir = project / "_registry"
+    if not registry_dir.exists():
+        return
+    SQLiteCache(registry_dir / "wiki.db").sync_from_files(
+        project, embedder=load_embedder(project)
+    )
+
+
+def _require_clean_tree(project: Path, command: str) -> None:
+    """Block writer commands when wiki/ has uncommitted changes.
+
+    Manual edits sitting in the working tree would get swept into the
+    command's auto-commit with the wrong classifying prefix (``lint:``,
+    ``ingest:``, etc.), silently marking them as LLM-authored. Raising
+    here forces the user to commit their edits with ``wikiloom save``
+    first so the classification stays honest.
+    """
+    from wikiloom.git_ops import GitOps
+
+    try:
+        git = GitOps(project)
+    except ValueError:
+        return  # not a git repo; nothing to guard
+    dirty = git.dirty_wiki_paths()
+    if not dirty:
+        return
+
+    preview = "\n".join(f"    {p}" for p in dirty[:5])
+    if len(dirty) > 5:
+        preview += f"\n    ... and {len(dirty) - 5} more"
+    raise click.ClickException(
+        f"Uncommitted changes in wiki/ ({len(dirty)} file(s)):\n"
+        f"{preview}\n\n"
+        f"These look like manual edits. Commit them first with:\n"
+        f"    wikiloom save\n\n"
+        f"Then re-run `wikiloom {command}`."
+    )
+
+
+def _warn_if_dirty(project: Path) -> None:
+    """Print a passive nudge if wiki/ has uncommitted changes.
+
+    Called at the top of read-only commands so users notice forgotten
+    edits without being blocked. Writer commands use the stricter
+    ``_require_clean_tree`` instead.
+    """
+    from wikiloom.git_ops import GitOps
+
+    try:
+        dirty = GitOps(project).dirty_wiki_paths()
+    except ValueError:
+        return
+    if dirty:
+        click.echo(
+            f"⚠ {len(dirty)} uncommitted edit(s) in wiki/ — "
+            f"run `wikiloom save` to commit.\n",
+            err=True,
+        )
+
+
+def _auto_commit(project: Path, commit_type: str, description: str) -> None:
+    """Stage every dirty file under ``wiki/`` + ``_registry/`` and commit.
+
+    Callers inside writer commands invoke this at the end, after the
+    cache sync, to persist their changes with a classifying prefix so
+    the human-edit classifier can distinguish them from manual edits.
+    No-ops silently when the repo is missing or nothing is staged.
+    """
+    from wikiloom.git_ops import GitOps
+
+    try:
+        git = GitOps(project)
+    except ValueError:
+        return
+    # Stage modified + untracked files under the wiki-managed dirs.
+    # `git add` on a directory path picks up both; deleted files are
+    # captured via the -A flag so renames/removals also land.
+    for scope in ("wiki", "_registry"):
+        if (project / scope).exists():
+            git.repo.git.add("-A", "--", scope)
+    git.commit([], f"{commit_type}: {description}")
+
+
 @main.command()
 @click.argument("source")
 @click.option(
@@ -71,6 +163,7 @@ def ingest(source: str, project: Path | None, force: bool) -> None:
                 "Run inside a project directory or pass --project."
             )
 
+    _require_clean_tree(project, "ingest")
     try:
         result = run_ingest(source, project_root=project, force=force)
     except IngestError as exc:
@@ -141,9 +234,25 @@ def lint(fix: bool, check_only: bool, project: Path | None) -> None:
     linter = WikiLinter(project, staleness=staleness)
 
     if fix:
+        _require_clean_tree(project, "lint --fix")
         with FileLock(project):
             report = linter.run_all()
             fixes = linter.fix_all(report)
+            _sync_cache(project)
+            if fixes.total_fixed:
+                parts: list[str] = []
+                if fixes.broken_links_fixed:
+                    parts.append(f"{fixes.broken_links_fixed} broken link(s)")
+                if fixes.stale_marked:
+                    parts.append(f"{fixes.stale_marked} stale")
+                if fixes.frontmatter_repaired:
+                    parts.append(f"{fixes.frontmatter_repaired} frontmatter")
+                detail = f" [{', '.join(parts)}]" if parts else ""
+                _auto_commit(
+                    project,
+                    "lint",
+                    f"repaired {fixes.total_fixed} page(s){detail}",
+                )
         _print_report(report)
         click.echo("")
         click.echo(
@@ -194,8 +303,16 @@ def protect(sync: bool, project: Path | None) -> None:
 
     pp = HumanEditProtection(project)
     if sync:
+        _require_clean_tree(project, "protect --sync")
         with FileLock(project):
             drifted = pp.sync()
+            if drifted:
+                _sync_cache(project)
+                _auto_commit(
+                    project,
+                    "protect",
+                    f"reclassified {len(drifted)} page(s)",
+                )
     else:
         drifted = pp.scan()
 
@@ -239,8 +356,15 @@ def reindex(project: Path | None) -> None:
                 "Could not find a WikiLoom project (no wikiloom.toml found)."
             )
 
+    _require_clean_tree(project, "reindex")
     with FileLock(project):
         written = IndexUpdater(project / "wiki").rebuild_all()
+        if written:
+            _auto_commit(
+                project,
+                "reindex",
+                f"rebuilt {len(written)} index file(s)",
+            )
     click.echo(f"Rebuilt {len(written)} index file(s).")
 
 
@@ -290,6 +414,7 @@ def relink(project: Path | None) -> None:
         click.echo("No pages to link.")
         return
 
+    _require_clean_tree(project, "relink")
     click.echo(f"Re-linking {len(all_pages)} page(s)...")
 
     with FileLock(project):
@@ -304,6 +429,14 @@ def relink(project: Path | None) -> None:
 
         # Rebuild indexes
         IndexUpdater(wiki_dir, registry=registry).rebuild_all()
+
+        _sync_cache(project)
+        if linked:
+            _auto_commit(
+                project,
+                "relink",
+                f"updated wikilinks across {len(linked)} page(s)",
+            )
 
     click.echo(f"Linked {len(linked)} page(s) with new wikilinks.")
     click.echo(f"Backlinks rebuilt.")
@@ -370,6 +503,9 @@ def query(
                 "Could not find a WikiLoom project (no wikiloom.toml found)."
             )
 
+    if not save_last:
+        _warn_if_dirty(project)
+
     last_query_path = project / "_registry" / "last_query.json"
 
     # --save-last: save the cached last query as a synthesis page
@@ -378,26 +514,10 @@ def query(
             raise click.ClickException(
                 "No previous query result found. Run a query first."
             )
+        _require_clean_tree(project, "query --save-last")
         data = json_mod.loads(last_query_path.read_text(encoding="utf-8"))
+        # _save_query_as_page performs the cache sync and auto-commit.
         _save_query_as_page(data, project)
-
-        # Rebuild cache so the new synthesis page is immediately
-        # searchable by future queries via FTS5 + embeddings.
-        from wikiloom.cache import SQLiteCache
-
-        cache = SQLiteCache(project / "_registry" / "wiki.db")
-        embedder = None
-        try:
-            from wikiloom.config import Config
-            from wikiloom.embeddings import get_embedder
-
-            cfg = Config.load(project)
-            if cfg.embeddings.enabled:
-                embedder = get_embedder(cfg.embeddings)
-        except (FileNotFoundError, ImportError, ValueError):
-            pass
-        cache.full_rebuild(project, embedder=embedder)
-        click.echo("Cache updated.")
         return
 
     # --last-detail: show detail from the cached result, no LLM call
@@ -543,6 +663,9 @@ def _save_query_as_page(data: dict, project: Path) -> None:
     )
     registry.register_page(page_id, entry)
     registry.save()
+    _sync_cache(project)
+    title_snippet = question[:60]
+    _auto_commit(project, "query", f'saved synthesis "{title_snippet}"')
 
     click.echo(f"Saved to {page_path.relative_to(project)}")
 
@@ -615,6 +738,8 @@ def status(project: Path | None) -> None:
             raise click.ClickException(
                 "Could not find a WikiLoom project (no wikiloom.toml found)."
             )
+
+    _warn_if_dirty(project)
 
     registry_dir = project / "_registry"
     cache = SQLiteCache(registry_dir / "wiki.db")
@@ -706,6 +831,8 @@ def log_cmd(limit: int, project: Path | None) -> None:
                 "Could not find a WikiLoom project (no wikiloom.toml found)."
             )
 
+    _warn_if_dirty(project)
+
     events = parse_log(project / "wiki" / "log.md")
     if not events:
         click.echo("No events recorded yet.")
@@ -753,6 +880,8 @@ def cost(project: Path | None) -> None:
             raise click.ClickException(
                 "Could not find a WikiLoom project (no wikiloom.toml found)."
             )
+
+    _warn_if_dirty(project)
 
     events = parse_log(project / "wiki" / "log.md")
     if not events:
@@ -816,6 +945,8 @@ def links(page_id: str, project: Path | None) -> None:
             raise click.ClickException(
                 "Could not find a WikiLoom project (no wikiloom.toml found)."
             )
+
+    _warn_if_dirty(project)
 
     page_id = page_id.replace(".md", "").strip("/")
     if page_id.startswith("wiki/"):
@@ -892,6 +1023,9 @@ def related(page_id: str, limit: int, save: bool, link: bool, project: Path | No
                 "Could not find a WikiLoom project (no wikiloom.toml found)."
             )
 
+    if not (save or link):
+        _warn_if_dirty(project)
+
     limit = min(limit, 10)
 
     # Strip .md suffix if user included it
@@ -958,6 +1092,7 @@ def related(page_id: str, limit: int, save: bool, link: bool, project: Path | No
         click.echo(f"       → {pid}.md")
 
     if save or link:
+        _require_clean_tree(project, "related")
         page_path = project / "wiki" / f"{page_id}.md"
         if not page_path.exists():
             raise click.ClickException(f"Page file not found: {page_path}")
@@ -1001,6 +1136,10 @@ def related(page_id: str, limit: int, save: bool, link: bool, project: Path | No
                 body += "\n".join(new_links) + "\n"
 
         write_page(page_path, fm, body)
+        _sync_cache(project)
+        _auto_commit(
+            project, "related", f"updated {page_id} with related pages"
+        )
 
         actions = []
         if save:
@@ -1034,6 +1173,8 @@ def orphans(project: Path | None) -> None:
             raise click.ClickException(
                 "Could not find a WikiLoom project (no wikiloom.toml found)."
             )
+
+    _warn_if_dirty(project)
 
     registry = Registry(project / "_registry")
     bl = BacklinkRegistry(project / "_registry")
@@ -1127,10 +1268,14 @@ def review(accept_all: bool, clear: bool, project: Path | None) -> None:
         return
 
     if clear:
+        _require_clean_tree(project, "review --clear")
         with FileLock(project):
             data["pending"] = []
             pending_path.write_text(
                 json.dumps(data, indent=2) + "\n", encoding="utf-8"
+            )
+            _auto_commit(
+                project, "review", f"cleared {len(items)} pending link(s)"
             )
         click.echo(f"Cleared {len(items)} pending link(s).")
         return
@@ -1151,6 +1296,7 @@ def review(accept_all: bool, clear: bool, project: Path | None) -> None:
         return
 
     # --accept-all: insert each pending link into its source page.
+    _require_clean_tree(project, "review --accept-all")
     wiki_dir = project / "wiki"
     inserted = 0
     with FileLock(project):
@@ -1183,6 +1329,11 @@ def review(accept_all: bool, clear: bool, project: Path | None) -> None:
         pending_path.write_text(
             json.dumps(data, indent=2) + "\n", encoding="utf-8"
         )
+        if inserted:
+            _sync_cache(project)
+            _auto_commit(
+                project, "review", f"accepted {inserted} pending link(s)"
+            )
 
     click.echo(f"Inserted {inserted} link(s), cleared pending list.")
 
@@ -1240,6 +1391,73 @@ def source(chunk_id: str, project: Path | None) -> None:
     click.echo(chunk.text)
 
 
+@main.command("save")
+@click.option(
+    "-m",
+    "--message",
+    type=str,
+    default=None,
+    help="Optional commit message. Defaults to 'human-edit: N page(s) [protected]'.",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Show what would be committed without creating a commit.",
+)
+@click.option(
+    "--project",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Project root. Defaults to walking upward from the current directory.",
+)
+def save(message: str | None, dry_run: bool, project: Path | None) -> None:
+    """Commit manual edits under wiki/ with a human-edit: prefix.
+
+    Use after editing wiki pages in your editor. The resulting commit
+    is classified as human-authored so auto-tools (lint --fix, re-ingest)
+    leave the affected pages alone.
+    """
+    from wikiloom.git_ops import GitOps
+    from wikiloom.locking import FileLock
+
+    if project is None:
+        project = _find_project_root(Path.cwd())
+        if project is None:
+            raise click.ClickException(
+                "Could not find a WikiLoom project (no wikiloom.toml found)."
+            )
+
+    try:
+        git = GitOps(project)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    dirty = git.dirty_wiki_paths()
+    if not dirty:
+        click.echo("Nothing to save — working tree is clean.")
+        return
+
+    if dry_run:
+        click.echo(f"Would commit {len(dirty)} file(s):")
+        for p in dirty:
+            click.echo(f"  {p}")
+        default_msg = message or f"human-edit: {len(dirty)} page(s) [protected]"
+        click.echo(f"\nMessage: {default_msg}")
+        return
+
+    commit_msg = message or f"human-edit: {len(dirty)} page(s) [protected]"
+    if not commit_msg.startswith("human-edit:"):
+        commit_msg = f"human-edit: {commit_msg}"
+
+    with FileLock(project):
+        git.repo.git.add("-A", "--", "wiki")
+        git.commit([], commit_msg)
+        _sync_cache(project)
+
+    click.echo(f"Saved {len(dirty)} file(s).")
+
+
 @main.command("rebuild-cache")
 @click.option(
     "--project",
@@ -1254,6 +1472,7 @@ def rebuild_cache(project: Path | None) -> None:
     Run this if it's missing, corrupt, or suspected to be out of sync.
     """
     from wikiloom.cache import SQLiteCache
+    from wikiloom.embeddings import load_embedder
     from wikiloom.locking import FileLock
 
     if project is None:
@@ -1263,17 +1482,9 @@ def rebuild_cache(project: Path | None) -> None:
                 "Could not find a WikiLoom project (no wikiloom.toml found)."
             )
 
-    embedder = None
-    try:
-        from wikiloom.config import Config
-        from wikiloom.embeddings import get_embedder
-
-        cfg = Config.load(project)
-        if cfg.embeddings.enabled:
-            embedder = get_embedder(cfg.embeddings)
-            click.echo("Computing embeddings...")
-    except (FileNotFoundError, ImportError, ValueError):
-        pass
+    embedder = load_embedder(project)
+    if embedder is not None:
+        click.echo("Computing embeddings...")
 
     with FileLock(project):
         cache = SQLiteCache(project / "_registry" / "wiki.db")
