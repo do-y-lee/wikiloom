@@ -2023,6 +2023,184 @@ def merge(winner: str, loser: str, yes: bool, project: Path | None) -> None:
         )
 
 
+@main.command("deprecate")
+@click.argument("page_id")
+@click.option(
+    "--superseded-by",
+    "superseded_by",
+    type=str,
+    default=None,
+    help="page_id of the replacement page (optional).",
+)
+@click.option(
+    "--yes",
+    is_flag=True,
+    default=False,
+    help="Skip the confirmation prompt.",
+)
+@click.option(
+    "--project",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Project root.",
+)
+def deprecate(
+    page_id: str,
+    superseded_by: str | None,
+    yes: bool,
+    project: Path | None,
+) -> None:
+    """Soft-remove an active page: move to wiki/archive/ and set status=deprecated.
+
+    The page file moves out of its category directory but stays on
+    disk in wiki/archive/. The manifest entry stays, with status flipped
+    to deprecated. Auto-tools and CLI commands stop surfacing the page,
+    but readers can still find it in archive.
+
+    To undo: `git revert` the deprecate commit.
+    To remove permanently: `wikiloom purge <page_id>` after deprecation.
+    """
+    from wikiloom.locking import FileLock
+    from wikiloom.registry import Registry
+
+    if project is None:
+        project = _find_project_root(Path.cwd())
+        if project is None:
+            raise click.ClickException(
+                "Could not find a WikiLoom project (no wikiloom.toml found)."
+            )
+
+    page_id = page_id.replace(".md", "").strip("/")
+    if page_id.startswith("wiki/"):
+        page_id = page_id[len("wiki/"):]
+    if superseded_by:
+        superseded_by = superseded_by.replace(".md", "").strip("/")
+        if superseded_by.startswith("wiki/"):
+            superseded_by = superseded_by[len("wiki/"):]
+
+    _require_clean_tree(project, "deprecate")
+
+    registry = Registry(project / "_registry", wiki_dir=project / "wiki")
+    entry = registry.get_page(page_id)
+    if entry is None:
+        raise click.ClickException(f"Page not found in manifest: {page_id}")
+    if entry.status == "deprecated":
+        raise click.ClickException(f"{page_id} is already deprecated.")
+    if superseded_by and registry.get_page(superseded_by) is None:
+        raise click.ClickException(
+            f"--superseded-by target not found: {superseded_by}"
+        )
+
+    if not yes:
+        click.echo(f"Deprecate: {page_id}  ({entry.title})")
+        if superseded_by:
+            click.echo(f"  superseded_by: {superseded_by}")
+        click.echo(f"  Will move wiki/{page_id}.md → wiki/archive/")
+        if not click.confirm("\nProceed?"):
+            click.echo("Aborted.")
+            return
+
+    with FileLock(project):
+        archive_path = registry.deprecate_page(
+            page_id,
+            superseded_by=superseded_by,
+            move_to_archive=True,
+            emit_event=True,
+        )
+        registry.save()
+        _sync_cache(project)
+        suffix = f" (superseded by {superseded_by})" if superseded_by else ""
+        _auto_commit(project, "deprecate", f"{page_id}{suffix}")
+
+    click.echo(f"Deprecated {page_id}.")
+    if archive_path is not None:
+        click.echo(f"Archived to {archive_path.relative_to(project)}")
+    click.echo(
+        "To undo: run `git revert HEAD` to restore the previous state."
+    )
+
+
+@main.command("purge")
+@click.argument("page_id")
+@click.option(
+    "--yes",
+    is_flag=True,
+    default=False,
+    help="Skip the typed-confirmation prompt. Use only in scripts.",
+)
+@click.option(
+    "--project",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Project root.",
+)
+def purge(page_id: str, yes: bool, project: Path | None) -> None:
+    """Permanently remove an already-deprecated page.
+
+    Deletes the file from wiki/archive/ and removes the manifest entry.
+    This is destructive — the page cannot be recovered through wikiloom
+    after this command (only via git history).
+
+    Refuses to run on active pages — deprecate them first with
+    `wikiloom deprecate <page_id>`.
+    """
+    from wikiloom.locking import FileLock
+    from wikiloom.registry import Registry
+
+    if project is None:
+        project = _find_project_root(Path.cwd())
+        if project is None:
+            raise click.ClickException(
+                "Could not find a WikiLoom project (no wikiloom.toml found)."
+            )
+
+    page_id = page_id.replace(".md", "").strip("/")
+    if page_id.startswith("wiki/"):
+        page_id = page_id[len("wiki/"):]
+
+    _require_clean_tree(project, "purge")
+
+    registry = Registry(project / "_registry", wiki_dir=project / "wiki")
+    entry = registry.get_page(page_id)
+    if entry is None:
+        raise click.ClickException(f"Page not found in manifest: {page_id}")
+    if entry.status != "deprecated":
+        raise click.ClickException(
+            f"{page_id} is not deprecated (status: {entry.status}). "
+            f"Run `wikiloom deprecate {page_id}` first to soft-remove it."
+        )
+
+    archive_name = page_id.replace("/", "__") + ".md"
+    archive_file = project / "wiki" / "archive" / archive_name
+
+    if not yes:
+        click.echo(f"⚠ PURGE: {page_id}  ({entry.title})")
+        click.echo("  This will permanently:")
+        if archive_file.exists():
+            click.echo(f"  - delete {archive_file.relative_to(project)}")
+        else:
+            click.echo("  - delete the manifest entry (archive file already missing)")
+        click.echo(f"  - remove the manifest entry for {page_id}")
+        click.echo("  This cannot be undone via wikiloom (only via git revert).")
+        typed = click.prompt(f"\nType the page_id to confirm", default="", show_default=False)
+        if typed.strip() != page_id:
+            click.echo("Aborted: confirmation did not match.")
+            return
+
+    with FileLock(project):
+        if archive_file.exists():
+            archive_file.unlink()
+        # Remove manifest entry directly — there's no Registry method for this
+        # because nothing else needs it. Purge is the only consumer.
+        if page_id in registry._pages:  # noqa: SLF001
+            del registry._pages[page_id]  # noqa: SLF001
+            registry.save()
+        _sync_cache(project)
+        _auto_commit(project, "deprecate", f"purge {page_id}")
+
+    click.echo(f"Purged {page_id}.")
+
+
 @main.command("review")
 @click.option(
     "--accept-all",
