@@ -256,6 +256,55 @@ def validate_ingest_response(data: Any) -> list[str]:
 # ----------------------------------------------------------------------
 
 
+def _format_abort_message(
+    *,
+    chunk_index: int,
+    chunk_total: int,
+    processed: int,
+    consecutive: int,
+    last_exc: Exception,
+) -> str:
+    """Build a user-facing message describing why a run aborted.
+
+    Calls out quota exhaustion specifically (no point retrying, top up
+    instead) versus generic transient errors (network/code bug). Always
+    notes how many chunks succeeded and how to resume — today that's
+    --force, since IngestState resume isn't wired into the synthesis
+    loop yet.
+    """
+    from wikiloom.llm import _is_quota_exhausted
+
+    remaining = chunk_total - chunk_index - 1
+    underlying = getattr(last_exc, "original", last_exc)
+    quota = _is_quota_exhausted(underlying)
+
+    lines = [
+        f"aborting after {consecutive} consecutive failure(s) at "
+        f"chunk {chunk_index + 1}/{chunk_total}.",
+        f"  {processed} chunk(s) succeeded and were saved as pages.",
+        f"  {remaining} chunk(s) remain unprocessed.",
+    ]
+    if quota:
+        lines.append(
+            "  Cause: LLM provider account is out of credits/quota."
+        )
+        lines.append(
+            "  Fix: top up your provider account, then re-run "
+            "`wikiloom ingest <file> --force` to retry."
+        )
+    else:
+        lines.append(
+            "  Fix: investigate the error above, then re-run "
+            "`wikiloom ingest <file> --force` to retry."
+        )
+    lines.append(
+        "  Note: --force re-processes ALL chunks (including ones "
+        "already saved) and re-pays for them. Auto-resume from the "
+        "checkpoint is planned for a future release."
+    )
+    return "\n".join(lines)
+
+
 def _render_user_prompt(
     chunk_text: str,
     chunk_id: str,
@@ -380,11 +429,14 @@ def run_synthesis(
             if state is not None:
                 state.mark_chunk_failed(chunk_index, str(exc))
             if consecutive_provider_failures >= max_consecutive_failures:
-                remaining = chunk_total - chunk_index - 1
                 notes.append(
-                    f"aborting: {consecutive_provider_failures} consecutive "
-                    f"provider errors — skipping {remaining} remaining chunk(s). "
-                    f"Fix the issue and re-run with --force."
+                    _format_abort_message(
+                        chunk_index=chunk_index,
+                        chunk_total=chunk_total,
+                        processed=processed,
+                        consecutive=consecutive_provider_failures,
+                        last_exc=exc,
+                    )
                 )
                 break
             continue
@@ -396,11 +448,14 @@ def run_synthesis(
             if state is not None:
                 state.mark_chunk_failed(chunk_index, str(exc))
             if consecutive_provider_failures >= max_consecutive_failures:
-                remaining = chunk_total - chunk_index - 1
                 notes.append(
-                    f"aborting: {consecutive_provider_failures} consecutive "
-                    f"failures — skipping {remaining} remaining chunk(s). "
-                    f"Fix the issue and re-run with --force."
+                    _format_abort_message(
+                        chunk_index=chunk_index,
+                        chunk_total=chunk_total,
+                        processed=processed,
+                        consecutive=consecutive_provider_failures,
+                        last_exc=exc,
+                    )
                 )
                 break
             continue

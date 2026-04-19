@@ -8,6 +8,8 @@ usage and cost estimates on every call.
 from __future__ import annotations
 
 import json
+import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -22,6 +24,76 @@ from wikiloom.llm_errors import (
     LLMProviderError,
     LLMResponseFormatError,
 )
+
+
+# Retry policy for transient LLM errors. Tuned conservatively — three
+# attempts with exponential backoff covers most rate-limit / network
+# blips without dragging out a failed run for minutes.
+_RETRY_MAX_ATTEMPTS = 3
+_RETRY_INITIAL_BACKOFF_S = 1.0
+
+_RETRYABLE_EXCEPTION_NAMES = frozenset(
+    {
+        "RateLimitError",
+        "APIConnectionError",
+        "Timeout",
+        "APITimeoutError",
+        "InternalServerError",
+        "ServiceUnavailableError",
+    }
+)
+
+# Substrings that indicate the provider account is out of credits or
+# quota. These should NOT retry — backoff won't bring money back.
+_QUOTA_MARKERS = (
+    "credit_balance_too_low",
+    "insufficient_quota",
+    "quota exceeded",
+    "billing",
+)
+
+
+def _is_retryable(exc: Exception) -> bool:
+    """True if the error is transient and worth retrying."""
+    if _is_quota_exhausted(exc):
+        return False
+    return type(exc).__name__ in _RETRYABLE_EXCEPTION_NAMES
+
+
+def _is_quota_exhausted(exc: Exception) -> bool:
+    """True if the provider says the account is out of credits/quota."""
+    msg = str(exc).lower()
+    return any(marker in msg for marker in _QUOTA_MARKERS)
+
+
+def _completion_with_retry(**completion_kwargs: Any) -> Any:
+    """``litellm.completion`` wrapper with retry-with-backoff.
+
+    Retries transient errors (rate limits, network blips, transient
+    5xx) up to ``_RETRY_MAX_ATTEMPTS`` times with exponential backoff
+    (1s → 2s → 4s by default). Quota-exhausted and auth errors raise
+    immediately — they won't recover by waiting.
+    """
+    backoff = _RETRY_INITIAL_BACKOFF_S
+    last_exc: Exception | None = None
+    for attempt in range(1, _RETRY_MAX_ATTEMPTS + 1):
+        try:
+            return litellm.completion(**completion_kwargs)
+        except Exception as exc:
+            last_exc = exc
+            if attempt == _RETRY_MAX_ATTEMPTS or not _is_retryable(exc):
+                raise
+            sys.stderr.write(
+                f"  LLM transient error ({type(exc).__name__}), "
+                f"retrying in {backoff:.0f}s (attempt {attempt}/{_RETRY_MAX_ATTEMPTS})...\n"
+            )
+            sys.stderr.flush()
+            time.sleep(backoff)
+            backoff *= 2
+    # Defensive — loop must either return or raise above.
+    if last_exc is not None:
+        raise last_exc
+    raise LLMError("retry loop exited unexpectedly without a result")
 
 # ----------------------------------------------------------------------
 # Result types
@@ -145,7 +217,7 @@ class LLMClient:
             {"role": "user", "content": user_prompt},
         ]
         try:
-            response = litellm.completion(
+            response = _completion_with_retry(
                 model=self.model,
                 messages=messages,
                 max_tokens=self.max_tokens,
@@ -188,7 +260,7 @@ class LLMClient:
             {"role": "user", "content": user_prompt},
         ]
         try:
-            response = litellm.completion(
+            response = _completion_with_retry(
                 model=self.model,
                 messages=messages,
                 max_tokens=self.max_tokens,
@@ -234,7 +306,7 @@ class LLMClient:
             }
         ]
         try:
-            response = litellm.completion(
+            response = _completion_with_retry(
                 model=self.model,
                 messages=messages,
                 max_tokens=self.max_tokens,

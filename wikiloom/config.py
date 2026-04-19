@@ -10,6 +10,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+
+class ConfigError(Exception):
+    """Raised when wikiloom.toml is malformed.
+
+    The CLI catches this and re-raises as ``click.ClickException`` so
+    users see a friendly error instead of a tomllib stacktrace.
+    """
+
 if sys.version_info >= (3, 11):
     import tomllib
 else:  # pragma: no cover - py3.10 fallback
@@ -121,14 +129,24 @@ class Config:
 
     @classmethod
     def load(cls, project_root: Path) -> Config:
-        """Load wikiloom.toml from the given project root."""
+        """Load wikiloom.toml from the given project root.
+
+        Raises ``FileNotFoundError`` if the file is missing and
+        ``ConfigError`` if it exists but can't be parsed (typo,
+        bad bracket, duplicate key, etc.).
+        """
         project_root = Path(project_root)
         toml_path = project_root / "wikiloom.toml"
         if not toml_path.exists():
             raise FileNotFoundError(f"No wikiloom.toml found at {toml_path}")
 
-        with toml_path.open("rb") as f:
-            data: dict[str, Any] = tomllib.load(f)
+        try:
+            with toml_path.open("rb") as f:
+                data: dict[str, Any] = tomllib.load(f)
+        except tomllib.TOMLDecodeError as exc:
+            raise ConfigError(
+                f"Could not parse {toml_path}: {exc}"
+            ) from exc
 
         cfg = cls(project_root=project_root)
         if "project" in data:

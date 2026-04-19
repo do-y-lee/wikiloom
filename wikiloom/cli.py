@@ -108,6 +108,66 @@ def _warn_if_dirty(project: Path) -> None:
         )
 
 
+def _load_config(project: Path):
+    """Load Config, returning None if missing and ClickException if malformed.
+
+    Centralizes the FileNotFoundError + ConfigError handling so individual
+    CLI handlers don't need to repeat it. Most callers tolerate a missing
+    config (treat as defaults) but a *broken* config should always surface
+    a friendly error rather than crashing.
+    """
+    from wikiloom.config import Config, ConfigError
+
+    try:
+        return Config.load(project)
+    except FileNotFoundError:
+        return None
+    except ConfigError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+def _post_flight_budget_warning(project: Path) -> None:
+    """Warn if month-to-date LLM spend exceeds the configured budget.
+
+    Read-only check: sums ``cost_usd`` across the current month's
+    events and compares against ``[llm] monthly_budget_usd``. Does NOT
+    abort — that's the pre-flight check's job. This is the post-run
+    "you went over" notice so users see it once the work is already
+    done. Silent when within budget or when no config is loaded.
+    """
+    from wikiloom.events import parse_log
+
+    cfg = _load_config(project)
+    if cfg is None:
+        return
+    budget = cfg.llm.monthly_budget_usd
+    if budget <= 0:
+        return
+
+    log_path = project / "wiki" / "log.md"
+    if not log_path.exists():
+        return
+    events = parse_log(log_path)
+    # Sum cost across the current calendar month.
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    month_prefix = now.strftime("%Y-%m")
+    total = sum(
+        e.cost_usd for e in events
+        if e.timestamp and e.timestamp.startswith(month_prefix)
+    )
+    if total <= budget:
+        return
+    click.echo(
+        f"\n⚠ Budget warning: month-to-date spend is ${total:.2f}, "
+        f"exceeding monthly_budget_usd (${budget:.2f}).\n"
+        f"  Subsequent ingests will fail pre-flight until you raise the "
+        f"budget in wikiloom.toml or wait for the next month.",
+        err=True,
+    )
+
+
 def _auto_commit(project: Path, commit_type: str, description: str) -> None:
     """Stage every dirty file under ``wiki/`` + ``_registry/`` and commit.
 
@@ -160,6 +220,7 @@ def ingest(
     indexes, and commits the result. Re-ingesting an identical local
     file is a cheap no-op (catalog dedup) unless ``--force`` is passed.
     """
+    from wikiloom.config import ConfigError
     from wikiloom.ingest.errors import IngestError
     from wikiloom.ingest.processor import ingest as run_ingest
 
@@ -184,6 +245,8 @@ def ingest(
         )
     except IngestError as exc:
         raise click.ClickException(str(exc)) from exc
+    except ConfigError as exc:
+        raise click.ClickException(str(exc)) from exc
 
     # Summary
     created = len(result.pages_created)
@@ -198,6 +261,7 @@ def ingest(
         click.echo("Done: no pages synthesized.")
     for note in result.notes:
         click.echo(f"Note: {note}")
+    _post_flight_budget_warning(project)
 
 
 @main.command()
@@ -227,7 +291,6 @@ def lint(fix: bool, check_only: bool, project: Path | None) -> None:
     protection). ``--check-only`` is the default behavior with an
     explicit name.
     """
-    from wikiloom.config import Config
     from wikiloom.lint import WikiLinter
     from wikiloom.locking import FileLock
 
@@ -241,11 +304,8 @@ def lint(fix: bool, check_only: bool, project: Path | None) -> None:
                 "Could not find a WikiLoom project (no wikiloom.toml found)."
             )
 
-    try:
-        cfg = Config.load(project)
-        dormant_cfg = cfg.dormant
-    except FileNotFoundError:
-        dormant_cfg = None
+    cfg = _load_config(project)
+    dormant_cfg = cfg.dormant if cfg is not None else None
 
     linter = WikiLinter(project, dormant=dormant_cfg)
 
@@ -397,7 +457,6 @@ def relink(project: Path | None) -> None:
     missed.
     """
     from wikiloom.backlinks import BacklinkRegistry
-    from wikiloom.config import Config
     from wikiloom.linker import LinkingEngine
     from wikiloom.locking import FileLock
     from wikiloom.registry import Registry
@@ -410,11 +469,8 @@ def relink(project: Path | None) -> None:
                 "Could not find a WikiLoom project (no wikiloom.toml found)."
             )
 
-    try:
-        cfg = Config.load(project)
-        linking_cfg = cfg.linking
-    except FileNotFoundError:
-        linking_cfg = None
+    cfg = _load_config(project)
+    linking_cfg = cfg.linking if cfg is not None else None
 
     wiki_dir = project / "wiki"
     all_pages = sorted(
@@ -504,7 +560,6 @@ def query(
     """
     import json as json_mod
 
-    from wikiloom.config import Config
     from wikiloom.llm import LLMClient
     from wikiloom.query import run_query
     from wikiloom.utils import now_iso
@@ -546,9 +601,8 @@ def query(
     if not question:
         raise click.UsageError("Missing argument 'QUESTION'. Use --last-detail or --save-last for the previous result.")
 
-    try:
-        cfg = Config.load(project)
-    except FileNotFoundError:
+    cfg = _load_config(project)
+    if cfg is None:
         raise click.ClickException(
             "Could not load wikiloom.toml. Run inside a project directory."
         )
@@ -944,14 +998,11 @@ def cost(project: Path | None) -> None:
     click.echo("---------------- -------- ------------ --------")
     click.echo(f"{'Total':<16} {total_events:>8} {total_tokens:>12,} ${total_cost:>7.2f}")
 
-    try:
-        from wikiloom.config import Config
-        cfg = Config.load(project)
+    cfg = _load_config(project)
+    if cfg is not None:
         budget = cfg.llm.monthly_budget_usd
         pct = (total_cost / budget * 100) if budget > 0 else 0
         click.echo(f"\nMonthly budget: ${budget:.2f} ({pct:.1f}% used)")
-    except FileNotFoundError:
-        pass
 
 
 @main.command("show")
@@ -1458,12 +1509,10 @@ def dormant(
 
 
 def _dormant_show_windows(project: Path) -> None:
-    from wikiloom.config import Config, DormantConfig
+    from wikiloom.config import DormantConfig
 
-    try:
-        cfg = Config.load(project).dormant
-    except FileNotFoundError:
-        cfg = DormantConfig()
+    loaded = _load_config(project)
+    cfg = loaded.dormant if loaded is not None else DormantConfig()
     click.echo("Dormant windows (change in wikiloom.toml [dormant]):")
     click.echo(f"  entity:    {cfg.entity_window_days} days")
     click.echo(f"  concept:   {cfg.concept_window_days} days")
@@ -1475,13 +1524,10 @@ def _dormant_show_windows(project: Path) -> None:
 
 
 def _dormant_list_candidates(project: Path) -> None:
-    from wikiloom.config import Config
     from wikiloom.lint import WikiLinter
 
-    try:
-        cfg = Config.load(project).dormant
-    except FileNotFoundError:
-        cfg = None
+    loaded = _load_config(project)
+    cfg = loaded.dormant if loaded is not None else None
     linter = WikiLinter(project, dormant=cfg)
     candidates = linter.check_dormant()
 
@@ -1574,10 +1620,8 @@ def _dormant_review(project: Path) -> None:
     from wikiloom.locking import FileLock
     from wikiloom.registry import Registry
 
-    try:
-        cfg = Config.load(project).dormant
-    except FileNotFoundError:
-        cfg = None
+    loaded = _load_config(project)
+    cfg = loaded.dormant if loaded is not None else None
     candidates = WikiLinter(project, dormant=cfg).check_dormant()
 
     if not candidates:

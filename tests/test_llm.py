@@ -363,3 +363,122 @@ def test_malformed_response_shape_raises_llm_error(
 
     with pytest.raises(LLMError):
         client.query("s", "u")
+
+
+# ----------------------------------------------------------------------
+# Retry on transient errors
+# ----------------------------------------------------------------------
+
+
+def _install_sequence(
+    monkeypatch: pytest.MonkeyPatch, responses: list[Any]
+) -> list[tuple[tuple, dict]]:
+    """Patch litellm.completion to return/raise from a sequence in order."""
+    calls: list[tuple[tuple, dict]] = []
+    iterator = iter(responses)
+
+    def fake_completion(*args: Any, **kwargs: Any) -> Any:
+        calls.append((args, kwargs))
+        item = next(iterator)
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+    monkeypatch.setattr(litellm, "completion", fake_completion)
+    return calls
+
+
+def _named_exception(name: str, message: str = "boom") -> Exception:
+    """Build an exception whose class name matches the retry classifier."""
+    cls = type(name, (Exception,), {})
+    return cls(message)
+
+
+def test_synthesize_retries_on_rate_limit_then_succeeds(
+    client: LLMClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Transient RateLimitError is retried; eventual success returns normally."""
+    monkeypatch.setattr("wikiloom.llm.time.sleep", lambda _s: None)
+    calls = _install_sequence(
+        monkeypatch,
+        [
+            _named_exception("RateLimitError"),
+            _make_response(json.dumps({"ok": True})),
+        ],
+    )
+
+    result = client.synthesize("s", "u")
+    assert result.result == {"ok": True}
+    assert len(calls) == 2  # one failure + one success
+
+
+def test_synthesize_retries_exhaust_then_raises(
+    client: LLMClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Persistent RateLimitError exhausts attempts and raises LLMProviderError."""
+    monkeypatch.setattr("wikiloom.llm.time.sleep", lambda _s: None)
+    calls = _install_sequence(
+        monkeypatch,
+        [
+            _named_exception("RateLimitError"),
+            _named_exception("RateLimitError"),
+            _named_exception("RateLimitError"),
+        ],
+    )
+
+    with pytest.raises(LLMProviderError):
+        client.synthesize("s", "u")
+    assert len(calls) == 3  # max attempts
+
+
+def test_synthesize_does_not_retry_on_quota_exhausted(
+    client: LLMClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Quota errors raise immediately — backoff won't bring credits back."""
+    monkeypatch.setattr("wikiloom.llm.time.sleep", lambda _s: None)
+    calls = _install_sequence(
+        monkeypatch,
+        [
+            _named_exception(
+                "RateLimitError",
+                "credit_balance_too_low: please top up",
+            ),
+        ],
+    )
+
+    with pytest.raises(LLMProviderError):
+        client.synthesize("s", "u")
+    assert len(calls) == 1  # no retries
+
+
+def test_synthesize_does_not_retry_on_auth_error(
+    client: LLMClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Non-retryable error types (auth, validation) fail immediately."""
+    monkeypatch.setattr("wikiloom.llm.time.sleep", lambda _s: None)
+    calls = _install_sequence(
+        monkeypatch,
+        [_named_exception("AuthenticationError", "invalid api key")],
+    )
+
+    with pytest.raises(LLMProviderError):
+        client.synthesize("s", "u")
+    assert len(calls) == 1
+
+
+def test_query_also_retries_transient_errors(
+    client: LLMClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Retry behavior applies to query() the same as synthesize()."""
+    monkeypatch.setattr("wikiloom.llm.time.sleep", lambda _s: None)
+    calls = _install_sequence(
+        monkeypatch,
+        [
+            _named_exception("APIConnectionError"),
+            _make_response("done"),
+        ],
+    )
+
+    result = client.query("s", "u")
+    assert result.text == "done"
+    assert len(calls) == 2
