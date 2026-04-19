@@ -91,7 +91,7 @@ def find_duplicates(
     try:
         rows = conn.execute(
             "SELECT page_id, title, type, inbound_links, created, embedding "
-            "FROM pages WHERE status = 'active'"
+            "FROM pages WHERE status != 'deprecated'"
         ).fetchall()
     finally:
         conn.close()

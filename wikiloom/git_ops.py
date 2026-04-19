@@ -21,7 +21,7 @@ from git.exc import InvalidGitRepositoryError, NoSuchPathError
 # commits made outside the wikiloom CLI (e.g. a quick edit in the user's
 # editor followed by ``git commit -m "fix typo"``).
 AUTO_COMMIT_TYPES: frozenset[str] = frozenset(
-    {"ingest", "query", "lint", "merge", "deprecate", "migration"}
+    {"ingest", "query", "lint", "merge", "deprecate", "migration", "dormant"}
 )
 
 

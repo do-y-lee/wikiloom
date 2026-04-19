@@ -175,7 +175,7 @@ def test_fresh_create_writes_chunk_ids_in_frontmatter(
 
     fm, _ = read_page(project / "wiki" / "concepts" / "foo.md")
     assert fm is not None
-    assert fm.chunk_ids == ["c-alpha"]
+    assert fm.all_chunk_ids() == ["c-alpha"]
 
 
 def test_fresh_create_writes_all_type_dirs(
@@ -314,8 +314,9 @@ def test_force_reingest_unions_chunk_ids(
 
     fm, _ = read_page(project / "wiki" / "concepts" / "foo.md")
     assert fm is not None
-    assert "c-first" in fm.chunk_ids
-    assert "c-second" in fm.chunk_ids
+    chunk_ids = fm.all_chunk_ids()
+    assert "c-first" in chunk_ids
+    assert "c-second" in chunk_ids
 
 
 # ----------------------------------------------------------------------
@@ -412,8 +413,9 @@ def test_update_unions_chunk_ids(project: Path, registry: Registry) -> None:
 
     fm, _ = read_page(project / "wiki" / "concepts" / "foo.md")
     assert fm is not None
-    assert "c-a" in fm.chunk_ids
-    assert "c-b" in fm.chunk_ids
+    chunk_ids = fm.all_chunk_ids()
+    assert "c-a" in chunk_ids
+    assert "c-b" in chunk_ids
 
 
 def test_update_to_nonexistent_page_is_skipped(

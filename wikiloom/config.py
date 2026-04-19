@@ -42,7 +42,15 @@ class LinkingConfig:
 
 
 @dataclass
-class StalenessConfig:
+class DormantConfig:
+    """Time-based windows for surfacing pages as dormant candidates.
+
+    A page is *dormant* when its ``frontmatter.modified`` timestamp is
+    older than the applicable window. Dormancy is purely informational
+    — pages stay visible and interactable across all CLI commands.
+    Marking a page dormant is a user action via ``wikiloom dormant``.
+    """
+
     default_window_days: int = 90
     entity_window_days: int = 180
     concept_window_days: int = 120
@@ -105,7 +113,7 @@ class Config:
     project: ProjectConfig = field(default_factory=ProjectConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     linking: LinkingConfig = field(default_factory=LinkingConfig)
-    staleness: StalenessConfig = field(default_factory=StalenessConfig)
+    dormant: DormantConfig = field(default_factory=DormantConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
     ingest: IngestConfig = field(default_factory=IngestConfig)
     embeddings: EmbeddingsConfig = field(default_factory=EmbeddingsConfig)
@@ -129,8 +137,8 @@ class Config:
             cfg.llm = LLMConfig(**_filter(LLMConfig, data["llm"]))
         if "linking" in data:
             cfg.linking = LinkingConfig(**_filter(LinkingConfig, data["linking"]))
-        if "staleness" in data:
-            cfg.staleness = StalenessConfig(**_filter(StalenessConfig, data["staleness"]))
+        if "dormant" in data:
+            cfg.dormant = DormantConfig(**_filter(DormantConfig, data["dormant"]))
         if "search" in data:
             cfg.search = SearchConfig(**_filter(SearchConfig, data["search"]))
         if "ingest" in data:

@@ -27,7 +27,7 @@ class PageEntry:
     inbound_link_count: int = 0
     outbound_link_count: int = 0
     confidence: str = "medium"
-    staleness_window_days: int = 90
+    dormant_window_days: int = 90
     human_edited: bool = False
     superseded_by: str | None = None
 
@@ -44,7 +44,7 @@ class PageEntry:
             "inbound_link_count": self.inbound_link_count,
             "outbound_link_count": self.outbound_link_count,
             "confidence": self.confidence,
-            "staleness_window_days": self.staleness_window_days,
+            "dormant_window_days": self.dormant_window_days,
             "human_edited": self.human_edited,
             "superseded_by": self.superseded_by,
         }
@@ -63,7 +63,10 @@ class PageEntry:
             inbound_link_count=data.get("inbound_link_count", 0),
             outbound_link_count=data.get("outbound_link_count", 0),
             confidence=data.get("confidence", "medium"),
-            staleness_window_days=data.get("staleness_window_days", 90),
+            dormant_window_days=data.get(
+                "dormant_window_days",
+                data.get("staleness_window_days", 90),  # legacy fallback
+            ),
             human_edited=data.get("human_edited", False),
             superseded_by=data.get("superseded_by"),
         )
@@ -143,10 +146,15 @@ class Registry:
         return self._pages.get(page_id)
 
     def get_page_list(self) -> list[PageListItem]:
-        """Return lightweight page list for LLM context injection."""
+        """Return lightweight page list for LLM context injection.
+
+        Includes both active and dormant pages — dormant pages remain
+        valid update targets so the LLM can propose freshening them.
+        Deprecated pages are excluded.
+        """
         items = []
         for page_id, entry in self._pages.items():
-            if entry.status == "active":
+            if entry.status != "deprecated":
                 items.append(PageListItem(
                     page_id=page_id,
                     title=entry.title,
@@ -181,8 +189,12 @@ class Registry:
         return aliases
 
     def get_stale_pages(self) -> list[PageEntry]:
-        """Return active pages that exceed their staleness window."""
-        stale: list[PageEntry] = []
+        """Return active pages that exceed their dormant window.
+
+        Name retained for backwards compatibility with callers; the
+        underlying field is now ``dormant_window_days``.
+        """
+        old: list[PageEntry] = []
         now = parse_iso(now_iso())
         for entry in self._pages.values():
             if entry.status != "active" or not entry.modified:
@@ -192,9 +204,9 @@ class Registry:
             except ValueError:
                 continue
             age_days = (now - modified).days
-            if age_days > entry.staleness_window_days:
-                stale.append(entry)
-        return stale
+            if age_days > entry.dormant_window_days:
+                old.append(entry)
+        return old
 
     # ------------------------------------------------------------------
     # Write API

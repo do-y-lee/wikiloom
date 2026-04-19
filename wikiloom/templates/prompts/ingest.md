@@ -89,3 +89,10 @@ mix case. If no page in the table is a clear match, CREATE.
 disambiguating suffixes (e.g. prefer `transaction-posting` over
 `transaction-posting-banking`) unless a sibling concept with the
 bare slug truly exists on a different topic.
+
+**Dormant pages in the candidates table:** rows marked `[dormant]`
+in the status column are pages that haven't been updated recently
+but are still valid wiki entries. They are excellent UPDATE targets
+when the chunk extends or refreshes the topic — propose an UPDATE
+just like for active pages. Dormancy is a hint that the page may
+benefit from refreshing, not a signal to avoid it.

@@ -104,8 +104,9 @@ class PageWriter:
 
         # 1. Source page
         if synthesis.source_summary is not None and source_entry is not None:
+            all_chunk_ids = _all_chunk_ids_from_synthesis(synthesis)
             src_path = self._write_source_page(
-                synthesis.source_summary, source_entry
+                synthesis.source_summary, source_entry, all_chunk_ids
             )
             if src_path is not None:
                 # Source pages are always fresh-or-updated, not "created"
@@ -122,12 +123,11 @@ class PageWriter:
                     type_="source",
                     summary=synthesis.source_summary.one_line,
                     source_hash=source_entry.content_hash,
-                    chunk_ids=_all_chunk_ids_from_synthesis(synthesis),
                 )
 
         # 2. pages_to_create
         for proposal in synthesis.pages_to_create:
-            outcome = self._write_create(proposal)
+            outcome = self._write_create(proposal, source_entry)
             if outcome.kind == "created":
                 result.created_paths.append(outcome.path)
             elif outcome.kind == "updated":
@@ -140,7 +140,7 @@ class PageWriter:
 
         # 3. pages_to_update
         for proposal in synthesis.pages_to_update:
-            outcome = self._write_update(proposal)
+            outcome = self._write_update(proposal, source_entry)
             if outcome.kind == "updated":
                 result.updated_paths.append(outcome.path)
             elif outcome.kind == "skipped":
@@ -159,6 +159,7 @@ class PageWriter:
         self,
         summary: SourceSummary,
         source_entry: SourceEntry,
+        all_chunk_ids: list[str],
     ) -> Path | None:
         """Write the summary page for a just-ingested source."""
         target = self._resolve_source_path(source_entry)
@@ -168,7 +169,6 @@ class PageWriter:
         if target.exists():
             body = self.protection.preserve_human(target, summary.content_markdown)
             body = _ensure_auto_marker(body)
-
         fm = Frontmatter(
             title=summary.title or source_entry.name,
             type="source",
@@ -181,6 +181,7 @@ class PageWriter:
                     "hash": source_entry.content_hash,
                     "name": source_entry.name,
                     "raw_path": source_entry.raw_path or "",
+                    "chunk_ids": all_chunk_ids,
                 }
             ],
             source_count=1,
@@ -229,7 +230,11 @@ class PageWriter:
     # pages_to_create
     # ------------------------------------------------------------------
 
-    def _write_create(self, proposal: PageProposal) -> "_WriteOutcome":
+    def _write_create(
+        self,
+        proposal: PageProposal,
+        source_entry: SourceEntry | None,
+    ) -> "_WriteOutcome":
         target = self._resolve_create_path(proposal)
         page_id = _path_to_page_id(target, self.wiki_dir)
 
@@ -240,14 +245,10 @@ class PageWriter:
             body = self.protection.preserve_human(target, proposal.content_markdown)
             body = _ensure_auto_marker(body)
             existing_fm, _ = read_page(target)
-            chunk_ids = _union_chunk_ids(
-                existing=(existing_fm.chunk_ids if existing_fm else []),
-                new=[proposal.chunk_id],
-            )
             fm = self._make_create_frontmatter(
                 proposal=proposal,
                 existing_fm=existing_fm,
-                chunk_ids=chunk_ids,
+                source_entry=source_entry,
             )
             write_page(target, fm, body)
             self._register(
@@ -256,7 +257,6 @@ class PageWriter:
                 type_=proposal.type,
                 summary=_derive_summary(proposal.content_markdown),
                 confidence=proposal.confidence,
-                chunk_ids=chunk_ids,
             )
             return _WriteOutcome(kind="updated", path=target, page_id=page_id)
 
@@ -265,7 +265,7 @@ class PageWriter:
         fm = self._make_create_frontmatter(
             proposal=proposal,
             existing_fm=None,
-            chunk_ids=[proposal.chunk_id],
+            source_entry=source_entry,
         )
         write_page(target, fm, body)
         self._register(
@@ -274,7 +274,6 @@ class PageWriter:
             type_=proposal.type,
             summary=_derive_summary(proposal.content_markdown),
             confidence=proposal.confidence,
-            chunk_ids=[proposal.chunk_id],
         )
         return _WriteOutcome(kind="created", path=target, page_id=page_id)
 
@@ -291,8 +290,12 @@ class PageWriter:
         self,
         proposal: PageProposal,
         existing_fm: Frontmatter | None,
-        chunk_ids: list[str],
+        source_entry: SourceEntry | None,
     ) -> Frontmatter:
+        existing_sources = (existing_fm.sources if existing_fm else [])
+        sources = _append_source(
+            existing_sources, source_entry, [proposal.chunk_id]
+        )
         return Frontmatter(
             title=proposal.title,
             type=proposal.type,
@@ -301,20 +304,23 @@ class PageWriter:
             modified=now_iso(),
             summary=_derive_summary(proposal.content_markdown),
             aliases=(existing_fm.aliases if existing_fm else []),
-            sources=(existing_fm.sources if existing_fm else []),
-            source_count=(existing_fm.source_count if existing_fm else 1),
+            sources=sources,
+            source_count=len(sources) or 1,
             confidence=proposal.confidence or "medium",
             human_edited=False,
             contradictions=(existing_fm.contradictions if existing_fm else []),
             tags=(existing_fm.tags if existing_fm else []),
-            chunk_ids=chunk_ids,
         )
 
     # ------------------------------------------------------------------
     # pages_to_update
     # ------------------------------------------------------------------
 
-    def _write_update(self, proposal: PageProposal) -> "_WriteOutcome":
+    def _write_update(
+        self,
+        proposal: PageProposal,
+        source_entry: SourceEntry | None,
+    ) -> "_WriteOutcome":
         page_id = _normalize_existing_path(proposal.existing_path or "")
         if not page_id:
             return _WriteOutcome(kind="skipped", path=Path(), page_id="<empty>")
@@ -334,33 +340,37 @@ class PageWriter:
             merged_auto = proposal.additions_markdown
         new_body = HumanEditProtection.merge(human, merged_auto)
 
-        chunk_ids = _union_chunk_ids(
-            existing=existing_fm.chunk_ids,
-            new=[proposal.chunk_id],
-        )
         merged_contradictions = list(existing_fm.contradictions or [])
         for c in proposal.contradictions or []:
             if c not in merged_contradictions:
                 merged_contradictions.append(c)
 
+        # Auto-freshen: re-ingest update on a dormant page flips it
+        # back to active. The user's "this is dormant" label was only
+        # accurate at the time it was set; the page just got new content.
+        new_status = "active" if existing_fm.status == "dormant" else existing_fm.status
+        # Append the contributing source (or extend its chunk_ids if
+        # already present). Provenance lives entirely under sources now.
+        merged_sources = _append_source(
+            existing_fm.sources, source_entry, [proposal.chunk_id]
+        )
         fm = Frontmatter(
             title=existing_fm.title,
             type=existing_fm.type,
-            status=existing_fm.status,
+            status=new_status,
             created=existing_fm.created or now_iso(),
             modified=now_iso(),
             summary=existing_fm.summary,
             aliases=existing_fm.aliases,
-            sources=existing_fm.sources,
-            source_count=existing_fm.source_count + 1,
+            sources=merged_sources,
+            source_count=len(merged_sources),
             confidence=existing_fm.confidence,
-            staleness_window_days=existing_fm.staleness_window_days,
+            dormant_window_days=existing_fm.dormant_window_days,
             human_edited=existing_fm.human_edited,
             human_edited_at=existing_fm.human_edited_at,
             superseded_by=existing_fm.superseded_by,
             contradictions=merged_contradictions,
             tags=existing_fm.tags,
-            chunk_ids=chunk_ids,
         )
         write_page(target, fm, new_body)
         self._register(
@@ -370,7 +380,6 @@ class PageWriter:
             summary=existing_fm.summary,
             confidence=existing_fm.confidence,
             source_hash=None,
-            chunk_ids=chunk_ids,
         )
         return _WriteOutcome(kind="updated", path=target, page_id=page_id)
 
@@ -387,7 +396,6 @@ class PageWriter:
         summary: str = "",
         confidence: str = "medium",
         source_hash: str | None = None,
-        chunk_ids: list[str] | None = None,
     ) -> None:
         page_id = _path_to_page_id(path, self.wiki_dir)
         existing = self.registry.get_page(page_id)
@@ -432,20 +440,55 @@ def _ensure_auto_marker(body: str) -> str:
     return f"{AUTO_MARKER}\n\n{body.lstrip()}"
 
 
-def _union_chunk_ids(existing: list[str], new: list[str]) -> list[str]:
-    """Union two chunk_id lists while preserving insertion order.
+def _append_source(
+    existing: list[dict],
+    source_entry: SourceEntry | None,
+    chunk_ids: list[str] | None = None,
+) -> list[dict]:
+    """Append ``source_entry`` to ``existing`` and union ``chunk_ids``.
 
-    Existing chunks stay in their original order; new chunks are
-    appended in the order they appear. Deterministic output is
-    important for git-diff stability on re-ingest.
+    If a source with the same ``hash`` (or ``name`` as fallback)
+    already exists in ``existing``, its ``chunk_ids`` list is extended
+    with any new ids from ``chunk_ids`` (deduped, order preserved).
+    Otherwise a new entry is appended. Returns a new list — never
+    mutates the input.
     """
-    seen: set[str] = set()
-    merged: list[str] = []
-    for cid in list(existing) + list(new):
-        if cid and cid not in seen:
-            seen.add(cid)
-            merged.append(cid)
-    return merged
+    out: list[dict] = []
+    for s in existing:
+        if not isinstance(s, dict):
+            continue
+        copy = dict(s)
+        copy["chunk_ids"] = list(s.get("chunk_ids") or [])
+        out.append(copy)
+
+    if source_entry is None:
+        return out
+
+    new_chunk_ids = list(chunk_ids or [])
+
+    # Find an existing matching source and extend its chunk_ids.
+    for s in out:
+        same_hash = s.get("hash") and s["hash"] == source_entry.content_hash
+        same_name = (
+            not s.get("hash") and s.get("name") == source_entry.name
+        )
+        if same_hash or same_name:
+            seen = set(s["chunk_ids"])
+            for cid in new_chunk_ids:
+                if cid and cid not in seen:
+                    seen.add(cid)
+                    s["chunk_ids"].append(cid)
+            return out
+
+    out.append(
+        {
+            "hash": source_entry.content_hash,
+            "name": source_entry.name,
+            "raw_path": source_entry.raw_path or "",
+            "chunk_ids": new_chunk_ids,
+        }
+    )
+    return out
 
 
 def _normalize_existing_path(raw: str) -> str:

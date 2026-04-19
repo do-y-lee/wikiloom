@@ -205,7 +205,7 @@ def ingest(
     "--fix",
     is_flag=True,
     default=False,
-    help="Apply auto-fixes for broken links, missing frontmatter, and stale pages.",
+    help="Apply auto-fixes for broken links and missing frontmatter.",
 )
 @click.option(
     "--check-only",
@@ -243,11 +243,11 @@ def lint(fix: bool, check_only: bool, project: Path | None) -> None:
 
     try:
         cfg = Config.load(project)
-        staleness = cfg.staleness
+        dormant_cfg = cfg.dormant
     except FileNotFoundError:
-        staleness = None
+        dormant_cfg = None
 
-    linter = WikiLinter(project, staleness=staleness)
+    linter = WikiLinter(project, dormant=dormant_cfg)
 
     if fix:
         _require_clean_tree(project, "lint --fix")
@@ -259,8 +259,6 @@ def lint(fix: bool, check_only: bool, project: Path | None) -> None:
                 parts: list[str] = []
                 if fixes.broken_links_fixed:
                     parts.append(f"{fixes.broken_links_fixed} broken link(s)")
-                if fixes.stale_marked:
-                    parts.append(f"{fixes.stale_marked} stale")
                 if fixes.frontmatter_repaired:
                     parts.append(f"{fixes.frontmatter_repaired} frontmatter")
                 detail = f" [{', '.join(parts)}]" if parts else ""
@@ -274,7 +272,6 @@ def lint(fix: bool, check_only: bool, project: Path | None) -> None:
         click.echo(
             f"Fixed: {fixes.total_fixed} "
             f"(broken links: {fixes.broken_links_fixed}, "
-            f"stale: {fixes.stale_marked}, "
             f"frontmatter: {fixes.frontmatter_repaired})"
         )
         if fixes.skipped_human_edited:
@@ -702,9 +699,14 @@ def _print_query_detail(data: dict, project: Path) -> None:
             # Resolve friendly name: page title + original source file
             title = page_path
             source_file = ""
+            modified = ""
+            page_status = ""
             entry = registry.get_page(page_path) if page_path else None
             if entry:
                 title = entry.title
+                modified = (entry.modified or "")[:10]  # YYYY-MM-DD
+                if entry.status and entry.status != "active":
+                    page_status = entry.status
             page_file = project / "wiki" / f"{page_path}.md"
             if page_file.exists():
                 fm, _ = read_page(page_file)
@@ -717,6 +719,10 @@ def _print_query_detail(data: dict, project: Path) -> None:
             line = f"  [{relevance}] {title}"
             if source_file:
                 line += f" (from {source_file})"
+            if modified:
+                line += f" — modified {modified}"
+            if page_status:
+                line += f" [{page_status}]"
             click.echo(line)
             click.echo(f"            → {page_path}.md")
 
@@ -768,9 +774,13 @@ def status(project: Path | None) -> None:
         for t, count in sorted(stats["by_type"].items()):
             click.echo(f"    {t}: {count}")
     if stats["by_status"]:
-        for s, count in sorted(stats["by_status"].items()):
-            if s != "active":
-                click.echo(f"    ({s}): {count}")
+        active_n = stats["by_status"].get("active", 0)
+        dormant_n = stats["by_status"].get("dormant", 0)
+        deprecated_n = stats["by_status"].get("deprecated", 0)
+        click.echo(
+            f"  Status: active {active_n}, dormant {dormant_n}, "
+            f"deprecated {deprecated_n}"
+        )
     click.echo(f"  Human-edited: {stats['human_edited']}")
     click.echo(f"  Backlinks: {stats['backlinks']}")
     click.echo(f"  Aliases: {stats['aliases']}")
@@ -787,7 +797,9 @@ def status(project: Path | None) -> None:
         linked_pages.add(edge.target)
     orphan_count = sum(
         1 for pid, entry in registry_obj.pages.items()
-        if entry.status == "active" and entry.type != "index" and pid not in linked_pages
+        if entry.status != "deprecated"
+        and entry.type != "index"
+        and pid not in linked_pages
     )
     click.echo(f"  Orphans: {orphan_count}")
 
@@ -940,6 +952,123 @@ def cost(project: Path | None) -> None:
         click.echo(f"\nMonthly budget: ${budget:.2f} ({pct:.1f}% used)")
     except FileNotFoundError:
         pass
+
+
+@main.command("show")
+@click.argument("page_id")
+@click.option(
+    "--field",
+    "field",
+    type=str,
+    default=None,
+    help="Print just one frontmatter field (e.g. sources, aliases, modified).",
+)
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    default=False,
+    help="Emit JSON instead of pretty-printed YAML.",
+)
+@click.option(
+    "--project",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Project root.",
+)
+def show(
+    page_id: str,
+    field: str | None,
+    as_json: bool,
+    project: Path | None,
+) -> None:
+    """Show a page's frontmatter metadata.
+
+    Default mode pretty-prints the full frontmatter. Use --field to
+    extract a single field; chunk_ids is computed by flattening every
+    source's chunk_ids list.
+    """
+    import json as json_mod
+
+    from wikiloom.frontmatter import read_page
+
+    if project is None:
+        project = _find_project_root(Path.cwd())
+        if project is None:
+            raise click.ClickException(
+                "Could not find a WikiLoom project (no wikiloom.toml found)."
+            )
+
+    _warn_if_dirty(project)
+
+    page_id = page_id.replace(".md", "").strip("/")
+    if page_id.startswith("wiki/"):
+        page_id = page_id[len("wiki/"):]
+    page_path = project / "wiki" / f"{page_id}.md"
+    if not page_path.exists():
+        raise click.ClickException(f"Page not found: {page_id}")
+
+    fm, _ = read_page(page_path)
+    if fm is None:
+        raise click.ClickException(f"No frontmatter in {page_id}")
+
+    data = fm.to_dict()
+    # Synthetic field: flat chunk_ids across all sources.
+    data["chunk_ids"] = fm.all_chunk_ids()
+
+    if field is not None:
+        if field not in data:
+            available = ", ".join(sorted(data.keys()))
+            raise click.ClickException(
+                f"Unknown field {field!r}. Available: {available}"
+            )
+        value = data[field]
+        if as_json:
+            click.echo(json_mod.dumps(value, indent=2, ensure_ascii=False))
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    click.echo(
+                        json_mod.dumps(item, ensure_ascii=False)
+                    )
+                else:
+                    click.echo(str(item))
+        elif value is None:
+            click.echo("(none)")
+        else:
+            click.echo(str(value))
+        return
+
+    if as_json:
+        click.echo(json_mod.dumps(data, indent=2, ensure_ascii=False))
+        return
+
+    # Pretty default — key: value, lists/dicts compact.
+    click.echo(f"page: {page_id}\n")
+    for key, value in data.items():
+        if value in ([], {}, None):
+            click.echo(f"  {key}: -")
+            continue
+        if isinstance(value, list):
+            click.echo(f"  {key} ({len(value)}):")
+            for item in value:
+                if isinstance(item, dict):
+                    name = (
+                        item.get("name")
+                        or item.get("page_id")
+                        or item.get("hash")
+                        or json_mod.dumps(item, ensure_ascii=False)
+                    )
+                    extra = ""
+                    if "chunk_ids" in item:
+                        extra = f" (chunks: {len(item.get('chunk_ids') or [])})"
+                    click.echo(f"    - {name}{extra}")
+                else:
+                    click.echo(f"    - {item}")
+        elif isinstance(value, dict):
+            click.echo(f"  {key}: {json_mod.dumps(value, ensure_ascii=False)}")
+        else:
+            click.echo(f"  {key}: {value}")
 
 
 @main.command("links")
@@ -1201,10 +1330,12 @@ def orphans(project: Path | None) -> None:
         linked_pages.add(edge.source)
         linked_pages.add(edge.target)
 
-    # Find pages in manifest that aren't in the linked set
+    # Find pages in manifest that aren't in the linked set. Dormant
+    # pages count as orphans the same as active ones — being old
+    # doesn't change whether anything links to them.
     orphan_list = []
     for page_id, entry in registry.pages.items():
-        if entry.status != "active":
+        if entry.status == "deprecated":
             continue
         if entry.type == "index":
             continue
@@ -1226,6 +1357,293 @@ def orphans(project: Path | None) -> None:
         f"\n  wikiloom related {example_pid}"
         f"\n\nOr run `wikiloom relink` to re-run the linker on all pages."
     )
+
+
+@main.command("dormant")
+@click.argument("page", required=False)
+@click.option(
+    "--list-marked",
+    is_flag=True,
+    default=False,
+    help="List currently-marked dormant pages (instead of candidates).",
+)
+@click.option(
+    "--windows",
+    is_flag=True,
+    default=False,
+    help="Show the dormant window configuration.",
+)
+@click.option(
+    "--unmark",
+    is_flag=True,
+    default=False,
+    help="Unmark a page (flip dormant → active). Requires PAGE.",
+)
+@click.option(
+    "--review",
+    is_flag=True,
+    default=False,
+    help="Walk through dormant candidates interactively.",
+)
+@click.option(
+    "--project",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Project root.",
+)
+def dormant(
+    page: str | None,
+    list_marked: bool,
+    windows: bool,
+    unmark: bool,
+    review: bool,
+    project: Path | None,
+) -> None:
+    """Manage dormant pages: pages older than their window.
+
+    Dormancy is a time-driven label, not a verdict on usefulness.
+    A page is a candidate when its modified date exceeds the window
+    configured in [dormant] for its type. Marking is a user decision.
+
+    Modes:
+
+    \b
+      wikiloom dormant                 list candidates (active past window)
+      wikiloom dormant --list-marked   list pages currently marked dormant
+      wikiloom dormant --windows       show window config
+      wikiloom dormant <page>          mark a page as dormant
+      wikiloom dormant <page> --unmark flip a dormant page back to active
+      wikiloom dormant --review        walk through candidates interactively
+    """
+    mode_count = sum([bool(page), list_marked, windows, review])
+    if mode_count > 1:
+        raise click.UsageError(
+            "Choose one mode: PAGE, --list-marked, --windows, or --review."
+        )
+    if unmark and not page:
+        raise click.UsageError("--unmark requires a PAGE argument.")
+
+    if project is None:
+        project = _find_project_root(Path.cwd())
+        if project is None:
+            raise click.ClickException(
+                "Could not find a WikiLoom project (no wikiloom.toml found)."
+            )
+
+    if windows:
+        _dormant_show_windows(project)
+        return
+
+    if list_marked:
+        _warn_if_dirty(project)
+        _dormant_list_marked(project)
+        return
+
+    if review:
+        _require_clean_tree(project, "dormant --review")
+        _dormant_review(project)
+        return
+
+    if page:
+        _require_clean_tree(project, "dormant")
+        page_id = page.replace(".md", "").strip("/")
+        if page_id.startswith("wiki/"):
+            page_id = page_id[len("wiki/"):]
+        _dormant_set_status(project, page_id, mark=not unmark)
+        return
+
+    # Default: list candidates
+    _warn_if_dirty(project)
+    _dormant_list_candidates(project)
+
+
+def _dormant_show_windows(project: Path) -> None:
+    from wikiloom.config import Config, DormantConfig
+
+    try:
+        cfg = Config.load(project).dormant
+    except FileNotFoundError:
+        cfg = DormantConfig()
+    click.echo("Dormant windows (change in wikiloom.toml [dormant]):")
+    click.echo(f"  entity:    {cfg.entity_window_days} days")
+    click.echo(f"  concept:   {cfg.concept_window_days} days")
+    click.echo(f"  synthesis: {cfg.synthesis_window_days} days")
+    click.echo(f"  default:   {cfg.default_window_days} days")
+    click.echo(
+        "\nPer-page overrides via `dormant_window_days` in frontmatter."
+    )
+
+
+def _dormant_list_candidates(project: Path) -> None:
+    from wikiloom.config import Config
+    from wikiloom.lint import WikiLinter
+
+    try:
+        cfg = Config.load(project).dormant
+    except FileNotFoundError:
+        cfg = None
+    linter = WikiLinter(project, dormant=cfg)
+    candidates = linter.check_dormant()
+
+    if not candidates:
+        click.echo("No dormant candidates — all active pages are within their windows.")
+        return
+
+    click.echo(
+        f"Dormant candidates ({len(candidates)}, active pages past window):\n"
+    )
+    for c in sorted(candidates, key=lambda x: -x.age_days):
+        click.echo(
+            f"  {c.page_id}  ({c.age_days}d old, window {c.window_days}d)"
+        )
+    click.echo(
+        "\nMark a candidate with `wikiloom dormant <page>`, "
+        "or walk through interactively with `wikiloom dormant --review`."
+    )
+
+
+def _dormant_list_marked(project: Path) -> None:
+    from wikiloom.registry import Registry
+
+    registry = Registry(project / "_registry")
+    marked = [
+        (pid, entry)
+        for pid, entry in registry.pages.items()
+        if entry.status == "dormant"
+    ]
+    if not marked:
+        click.echo("No pages currently marked dormant.")
+        return
+
+    click.echo(f"Marked dormant ({len(marked)}):\n")
+    for pid, entry in sorted(marked):
+        modified = (entry.modified or "")[:10]
+        click.echo(f"  {pid}  ({entry.title}) — last modified {modified}")
+    click.echo(
+        "\nUnmark with `wikiloom dormant <page> --unmark`."
+    )
+
+
+def _dormant_set_status(project: Path, page_id: str, mark: bool) -> None:
+    """Flip a single page between active and dormant."""
+    from wikiloom.frontmatter import parse_frontmatter, render_frontmatter
+    from wikiloom.locking import FileLock
+    from wikiloom.registry import Registry
+
+    target_status = "dormant" if mark else "active"
+    verb = "mark" if mark else "unmark"
+
+    page_path = project / "wiki" / f"{page_id}.md"
+    if not page_path.exists():
+        raise click.ClickException(f"Page not found: {page_id}")
+
+    with FileLock(project):
+        registry = Registry(project / "_registry")
+        entry = registry.get_page(page_id)
+        if entry is None:
+            raise click.ClickException(f"Page not in manifest: {page_id}")
+        if mark and entry.status == "dormant":
+            click.echo(f"{page_id} is already dormant.")
+            return
+        if not mark and entry.status != "dormant":
+            click.echo(f"{page_id} is not dormant (status: {entry.status}).")
+            return
+
+        text = page_path.read_text(encoding="utf-8")
+        fm, body = parse_frontmatter(text)
+        if fm is None:
+            raise click.ClickException(f"No frontmatter in {page_id}")
+        fm.status = target_status
+        page_path.write_text(
+            render_frontmatter(fm) + "\n" + body, encoding="utf-8"
+        )
+        entry.status = target_status
+        registry.save()
+
+        _sync_cache(project)
+        _auto_commit(project, "dormant", f"{verb} {page_id}")
+
+    click.echo(f"{verb.capitalize()}ed {page_id}.")
+
+
+def _dormant_review(project: Path) -> None:
+    """Interactive triage of dormant candidates."""
+    from wikiloom.config import Config
+    from wikiloom.frontmatter import parse_frontmatter, render_frontmatter
+    from wikiloom.lint import WikiLinter
+    from wikiloom.locking import FileLock
+    from wikiloom.registry import Registry
+
+    try:
+        cfg = Config.load(project).dormant
+    except FileNotFoundError:
+        cfg = None
+    candidates = WikiLinter(project, dormant=cfg).check_dormant()
+
+    if not candidates:
+        click.echo("No dormant candidates to review.")
+        return
+
+    total = len(candidates)
+    marked = 0
+    skipped = 0
+    click.echo(f"Reviewing {total} candidate(s).")
+    click.echo("For each: [m]ark dormant / [n]ext (skip) / [q]uit\n")
+
+    for i, candidate in enumerate(sorted(candidates, key=lambda x: -x.age_days), start=1):
+        registry = Registry(project / "_registry")
+        entry = registry.get_page(candidate.page_id)
+        if entry is None:
+            continue
+        click.echo(
+            f"--- {i}/{total}: {candidate.page_id} ({entry.type})"
+        )
+        click.echo(f"  title: {entry.title}")
+        click.echo(
+            f"  age:   {candidate.age_days}d (window {candidate.window_days}d)"
+        )
+        if entry.summary:
+            click.echo(f"  summary: {entry.summary[:100]}")
+
+        choice = click.prompt(
+            "Action",
+            type=click.Choice(["m", "n", "q"], case_sensitive=False),
+            default="n",
+            show_choices=True,
+            show_default=True,
+        ).lower()
+
+        if choice == "q":
+            click.echo("Quit.")
+            break
+        if choice == "n":
+            skipped += 1
+            continue
+
+        page_path = project / "wiki" / f"{candidate.page_id}.md"
+        if not page_path.exists():
+            click.echo(f"  ✗ skipped: file missing")
+            skipped += 1
+            continue
+        with FileLock(project):
+            text = page_path.read_text(encoding="utf-8")
+            fm, body = parse_frontmatter(text)
+            if fm is None:
+                click.echo(f"  ✗ skipped: no frontmatter")
+                skipped += 1
+                continue
+            fm.status = "dormant"
+            page_path.write_text(
+                render_frontmatter(fm) + "\n" + body, encoding="utf-8"
+            )
+            entry.status = "dormant"
+            registry.save()
+            _sync_cache(project)
+            _auto_commit(project, "dormant", f"mark {candidate.page_id}")
+        click.echo(f"  ✓ marked dormant\n")
+        marked += 1
+
+    click.echo(f"\nDone. Marked: {marked}, skipped: {skipped}.")
 
 
 @main.command("duplicates")
@@ -1800,11 +2218,50 @@ def save(message: str | None, dry_run: bool, project: Path | None) -> None:
         commit_msg = f"human-edit: {commit_msg}"
 
     with FileLock(project):
+        # Auto-bump frontmatter.modified on each saved page so manual
+        # edits don't silently roll into dormant. Also flip dormant →
+        # active since the user just touched the page.
+        freshened = _bump_modified_and_freshen(project, dirty)
         git.repo.git.add("-A", "--", "wiki")
         git.commit([], commit_msg)
         _sync_cache(project)
 
     click.echo(f"Saved {len(dirty)} file(s).")
+    if freshened:
+        click.echo(f"Freshened {freshened} dormant page(s) back to active.")
+
+
+def _bump_modified_and_freshen(project: Path, paths: list[Path]) -> int:
+    """For each wiki page in ``paths``, bump frontmatter.modified to now
+    and flip dormant → active. Returns the count of pages freshened.
+
+    Skips files without frontmatter, missing files, and non-page files
+    (everything outside ``wiki/`` or named ``log.md`` / ``index.md``).
+    """
+    from wikiloom.frontmatter import parse_frontmatter, render_frontmatter
+    from wikiloom.utils import now_iso
+
+    freshened = 0
+    timestamp = now_iso()
+    for rel in paths:
+        if rel.parts[:1] != ("wiki",) or rel.name in ("log.md", "index.md"):
+            continue
+        full = project / rel
+        if not full.exists() or full.suffix != ".md":
+            continue
+        text = full.read_text(encoding="utf-8")
+        fm, body = parse_frontmatter(text)
+        if fm is None:
+            continue
+        original_status = fm.status
+        fm.modified = timestamp
+        if fm.status == "dormant":
+            fm.status = "active"
+            freshened += 1
+        new_text = render_frontmatter(fm) + "\n" + body
+        if new_text != text or original_status != fm.status:
+            full.write_text(new_text, encoding="utf-8")
+    return freshened
 
 
 @main.command("rebuild-cache")
@@ -1859,10 +2316,13 @@ def _print_report(report) -> None:
             click.echo(f"    {b.source} → {b.target} ({b.reason})")
     if report.orphans:
         click.echo(f"  Orphans ({len(report.orphans)}): {', '.join(report.orphans[:10])}")
-    if report.stale:
-        click.echo(f"  Stale ({len(report.stale)}):")
-        for s in report.stale[:10]:
-            click.echo(f"    {s.page_id} ({s.age_days}d > {s.window_days}d)")
+    if report.dormant:
+        click.echo(
+            f"  Dormant candidates ({len(report.dormant)}, informational — "
+            f"use `wikiloom dormant <page>` to mark):"
+        )
+        for d in report.dormant[:10]:
+            click.echo(f"    {d.page_id} ({d.age_days}d > {d.window_days}d)")
     if report.duplicates:
         click.echo(f"  Duplicates ({len(report.duplicates)}):")
         for d in report.duplicates[:10]:

@@ -13,7 +13,7 @@ from pathlib import Path
 from rapidfuzz import fuzz
 
 from wikiloom.backlinks import BacklinkRegistry
-from wikiloom.config import StalenessConfig
+from wikiloom.config import DormantConfig
 from wikiloom.frontmatter import (
     Frontmatter,
     parse_frontmatter,
@@ -38,7 +38,7 @@ class BrokenLink:
 
 
 @dataclass(frozen=True)
-class StalePage:
+class DormantPage:
     page_id: str
     age_days: int
     window_days: int
@@ -63,7 +63,7 @@ class Contradiction:
 class LintReport:
     broken_links: list[BrokenLink] = field(default_factory=list)
     orphans: list[str] = field(default_factory=list)
-    stale: list[StalePage] = field(default_factory=list)
+    dormant: list[DormantPage] = field(default_factory=list)
     duplicates: list[DuplicateSet] = field(default_factory=list)
     frontmatter_issues: list[str] = field(default_factory=list)
     index_drift: list[str] = field(default_factory=list)
@@ -72,10 +72,11 @@ class LintReport:
 
     @property
     def total_issues(self) -> int:
+        # ``dormant`` is informational, not an "issue" — older pages
+        # don't lower project health. Excluded from this count.
         return (
             len(self.broken_links)
             + len(self.orphans)
-            + len(self.stale)
             + len(self.duplicates)
             + len(self.frontmatter_issues)
             + len(self.index_drift)
@@ -91,7 +92,6 @@ class LintReport:
 @dataclass
 class FixReport:
     broken_links_fixed: int = 0
-    stale_marked: int = 0
     frontmatter_repaired: int = 0
     indexes_rebuilt: int = 0
     skipped_human_edited: int = 0
@@ -100,7 +100,6 @@ class FixReport:
     def total_fixed(self) -> int:
         return (
             self.broken_links_fixed
-            + self.stale_marked
             + self.frontmatter_repaired
             + self.indexes_rebuilt
         )
@@ -137,12 +136,12 @@ class WikiLinter:
     def __init__(
         self,
         project_root: Path,
-        staleness: StalenessConfig | None = None,
+        dormant: DormantConfig | None = None,
     ) -> None:
         self.project_root = Path(project_root)
         self.wiki_dir = self.project_root / "wiki"
         self.registry_dir = self.project_root / "_registry"
-        self.staleness = staleness or StalenessConfig()
+        self.dormant = dormant or DormantConfig()
 
         self.registry = Registry(self.registry_dir, self.wiki_dir)
         self.backlinks = BacklinkRegistry(self.registry_dir, self.wiki_dir)
@@ -160,7 +159,7 @@ class WikiLinter:
         return LintReport(
             broken_links=self.check_broken_links(),
             orphans=self.check_orphans(),
-            stale=self.check_staleness(),
+            dormant=self.check_dormant(),
             duplicates=self.check_duplicates(),
             frontmatter_issues=self.check_frontmatter(),
             index_drift=self.check_index_consistency(),
@@ -186,15 +185,9 @@ class WikiLinter:
             if self._strip_broken_wikilink(page_path, broken.target):
                 fixes.broken_links_fixed += 1
 
-        for stale in report.stale:
-            page_path = self._page_path(stale.page_id)
-            if page_path is None:
-                continue
-            if self._is_protected(page_path):
-                fixes.skipped_human_edited += 1
-                continue
-            if self._mark_stale(page_path):
-                fixes.stale_marked += 1
+        # Dormant pages are reported but never auto-marked. Marking is
+        # a user decision via `wikiloom dormant <page>` — age alone is
+        # not a verdict on usefulness.
 
         for page_id in report.frontmatter_issues:
             page_path = self._page_path(page_id)
@@ -250,8 +243,8 @@ class WikiLinter:
             entry = self.registry.get_page(edge.target)
             if entry is None:
                 reason = "missing"
-            elif entry.status == "active" or entry.status == "stub":
-                continue
+            elif entry.status in ("active", "stub", "dormant"):
+                continue  # dormant pages are valid link targets
             else:
                 reason = entry.status  # "deprecated" | "archived" | ...
             broken.append(
@@ -289,14 +282,16 @@ class WikiLinter:
                 orphans.add(page_id)
         return sorted(orphans)
 
-    def check_staleness(self) -> list[StalePage]:
-        """Active pages whose ``modified`` date exceeds the staleness window.
+    def check_dormant(self) -> list[DormantPage]:
+        """Active pages whose ``modified`` date exceeds the dormant window.
 
-        Per-page ``staleness_window_days`` in the manifest takes
+        Per-page ``dormant_window_days`` in the manifest takes
         precedence; otherwise falls back to per-type windows from
-        ``StalenessConfig``.
+        ``DormantConfig``. Dormant pages whose status is already
+        ``dormant`` (user-marked) are not reported again — they're
+        already known.
         """
-        stale: list[StalePage] = []
+        dormant_candidates: list[DormantPage] = []
         now = parse_iso(now_iso())
         for page_id, entry in self.registry.pages.items():
             if entry.status != "active" or not entry.modified:
@@ -306,12 +301,12 @@ class WikiLinter:
             except ValueError:
                 continue
             age_days = (now - modified).days
-            window = entry.staleness_window_days or self._window_for_type(entry.type)
+            window = entry.dormant_window_days or self._window_for_type(entry.type)
             if age_days > window:
-                stale.append(
-                    StalePage(page_id=page_id, age_days=age_days, window_days=window)
+                dormant_candidates.append(
+                    DormantPage(page_id=page_id, age_days=age_days, window_days=window)
                 )
-        return stale
+        return dormant_candidates
 
     def check_duplicates(self) -> list[DuplicateSet]:
         """Fuzzy-match titles, aliases, slugs, and embeddings for near-duplicates.
@@ -328,7 +323,7 @@ class WikiLinter:
         pages = [
             (pid, entry)
             for pid, entry in self.registry.pages.items()
-            if entry.status == "active"
+            if entry.status != "deprecated"
         ]
         duplicates: list[DuplicateSet] = []
         seen_pairs: set[tuple[str, str]] = set()
@@ -487,17 +482,6 @@ class WikiLinter:
             page_path.write_text(new_body, encoding="utf-8")
         return True
 
-    def _mark_stale(self, page_path: Path) -> bool:
-        text = page_path.read_text(encoding="utf-8")
-        fm, body = parse_frontmatter(text)
-        if fm is None or fm.status == "stale":
-            return False
-        fm.status = "stale"
-        page_path.write_text(
-            render_frontmatter(fm) + "\n" + body, encoding="utf-8"
-        )
-        return True
-
     def _repair_frontmatter(self, page_path: Path) -> bool:
         """Fill in missing required fields with sensible defaults."""
         text = page_path.read_text(encoding="utf-8")
@@ -565,12 +549,12 @@ class WikiLinter:
 
     def _window_for_type(self, page_type: str) -> int:
         if page_type == "entity":
-            return self.staleness.entity_window_days
+            return self.dormant.entity_window_days
         if page_type == "concept":
-            return self.staleness.concept_window_days
+            return self.dormant.concept_window_days
         if page_type == "synthesis":
-            return self.staleness.synthesis_window_days
-        return self.staleness.default_window_days
+            return self.dormant.synthesis_window_days
+        return self.dormant.default_window_days
 
     def _infer_type(self, page_path: Path) -> str:
         parts = page_path.resolve().relative_to(self.wiki_dir.resolve()).parts

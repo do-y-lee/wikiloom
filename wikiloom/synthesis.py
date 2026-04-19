@@ -144,8 +144,10 @@ def render_manifest_context(
     duplicates. Capped so the context block stays token-bounded on
     large wikis.
     """
-    active = [p for p in registry.pages.values() if p.status == "active"]
-    pages = sorted(active, key=lambda p: p.modified or "", reverse=True)[:max_pages]
+    # Include both active and dormant pages — dormant is informational,
+    # not a quarantine. Only deprecated pages are excluded.
+    live = [p for p in registry.pages.values() if p.status != "deprecated"]
+    pages = sorted(live, key=lambda p: p.modified or "", reverse=True)[:max_pages]
     if not pages:
         return "(the manifest is empty — no existing pages yet)"
 

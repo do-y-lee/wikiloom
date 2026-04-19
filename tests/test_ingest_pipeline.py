@@ -275,10 +275,11 @@ def test_ingest_with_synthesis_writes_pages_end_to_end(
     assert org_y.exists()
     assert source_page.exists()
 
-    # Each synthesized page carries the chunk_id that produced it
+    # Each synthesized page carries the chunk_id that produced it,
+    # nested under its source entry in `sources`.
     fm, _ = read_page(topic_x)
     assert fm is not None
-    assert len(fm.chunk_ids) == 1
+    assert len(fm.all_chunk_ids()) == 1
 
     # Metrics populated on the IngestResult
     assert result.total_tokens_in == 500

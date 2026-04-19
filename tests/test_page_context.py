@@ -219,9 +219,26 @@ def test_render_candidates_table_format() -> None:
         )
     ]
     out = render_candidates(cands)
-    assert "| page_id | type | title | summary |" in out
+    assert "| page_id | type | title | status | summary |" in out
     assert "concepts/foo" in out
     assert "A short summary" in out
+    assert "active" in out
+
+
+def test_render_candidates_marks_dormant_status() -> None:
+    """Dormant candidates render with [dormant] in the status column."""
+    cands = [
+        PageCandidate(
+            page_id="concepts/old",
+            type="concept",
+            title="Old",
+            summary="An older topic",
+            similarity=0.92,
+            status="dormant",
+        )
+    ]
+    out = render_candidates(cands)
+    assert "[dormant]" in out
 
 
 def test_embedder_failure_returns_empty(project: Path) -> None:

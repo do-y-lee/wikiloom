@@ -26,6 +26,7 @@ class PageCandidate:
     title: str
     summary: str
     similarity: float
+    status: str = "active"  # "active" or "dormant" — annotates the rendered table
 
 
 def retrieve_candidates_for_chunk(
@@ -60,9 +61,13 @@ def retrieve_candidates_for_chunk(
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     try:
+        # Include both active and dormant pages — dormant pages are
+        # valid update targets and the LLM should see them so it can
+        # propose freshening updates rather than creating duplicates.
         rows = conn.execute(
-            "SELECT page_id, type, title, summary, embedding "
-            "FROM pages WHERE status = 'active' AND embedding IS NOT NULL"
+            "SELECT page_id, type, title, summary, status, embedding "
+            "FROM pages "
+            "WHERE status != 'deprecated' AND embedding IS NOT NULL"
         ).fetchall()
     finally:
         conn.close()
@@ -86,6 +91,7 @@ def retrieve_candidates_for_chunk(
                 title=row["title"],
                 summary=row["summary"] or "",
                 similarity=score,
+                status=row["status"] or "active",
             )
         )
 
@@ -103,13 +109,18 @@ def render_candidates(candidates: list[PageCandidate]) -> str:
     if not candidates:
         return "(no semantically related pages found — this chunk's topic is likely new)"
     lines = [
-        "| page_id | type | title | summary |",
-        "|---|---|---|---|",
+        "| page_id | type | title | status | summary |",
+        "|---|---|---|---|---|",
     ]
     for c in candidates:
         summary = c.summary.replace("\n", " ").replace("|", "\\|")
         if len(summary) > 100:
             summary = summary[:97] + "..."
         title = c.title.replace("|", "\\|")
-        lines.append(f"| {c.page_id} | {c.type} | {title} | {summary} |")
+        # Mark dormant pages so the LLM knows they are valid update
+        # targets that may benefit from a freshening UPDATE.
+        status_marker = "[dormant]" if c.status == "dormant" else "active"
+        lines.append(
+            f"| {c.page_id} | {c.type} | {title} | {status_marker} | {summary} |"
+        )
     return "\n".join(lines)

@@ -80,17 +80,13 @@ def merge_pages(
             winner_fm.aliases or [],
             (loser_fm.aliases if loser_fm else []) + [loser_entry.title],
         )
+        # Merge sources, including their nested chunk_ids — when both
+        # sides reference the same source, their chunk_ids unions.
         winner_fm.sources = _union_sources(
             winner_fm.sources or [],
             loser_fm.sources if loser_fm else [],
         )
-        winner_fm.chunk_ids = _union_strings(
-            winner_fm.chunk_ids or [],
-            loser_fm.chunk_ids if loser_fm else [],
-        )
-        winner_fm.source_count = max(
-            len(winner_fm.sources), winner_fm.source_count or 0
-        )
+        winner_fm.source_count = len(winner_fm.sources)
         winner_fm.modified = now_iso()
         write_page(winner_path, winner_fm, new_body)
     else:
@@ -174,18 +170,39 @@ def _union_strings(a: list[str], b: list[str]) -> list[str]:
 
 
 def _union_sources(a: list[dict], b: list[dict]) -> list[dict]:
-    """Union two source-dict lists, deduping by ``name``."""
-    seen: set[str] = set()
+    """Union two source-dict lists, deduping by ``hash`` (then ``name``).
+
+    When the same source appears on both sides, the resulting entry's
+    ``chunk_ids`` is the union of both sides' chunk_ids (order-preserved,
+    deduped). Non-dict entries pass through unchanged.
+    """
+    by_key: dict[str, dict] = {}
+    order: list[str] = []
     out: list[dict] = []
+
+    def _key(item: dict) -> str:
+        return item.get("hash") or item.get("name", "").lower() or str(id(item))
+
     for item in list(a) + list(b):
         if not isinstance(item, dict):
             out.append(item)
             continue
-        key = (item.get("name") or "").lower() or str(item)
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(item)
+        k = _key(item)
+        if k not in by_key:
+            by_key[k] = {
+                **item,
+                "chunk_ids": list(item.get("chunk_ids") or []),
+            }
+            order.append(k)
+        else:
+            existing_ids = by_key[k]["chunk_ids"]
+            seen = set(existing_ids)
+            for cid in item.get("chunk_ids") or []:
+                if cid and cid not in seen:
+                    seen.add(cid)
+                    existing_ids.append(cid)
+
+    out.extend(by_key[k] for k in order)
     return out
 
 

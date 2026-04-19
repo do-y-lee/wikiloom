@@ -65,7 +65,12 @@ high_confidence_threshold = 95
 medium_confidence_threshold = 85
 low_confidence_threshold = 70
 
-[staleness]
+# Dormant windows. A page becomes a dormant *candidate* when its
+# `modified` timestamp is older than the window for its type.
+# Marking is a user action via `wikiloom dormant <page>` — wikiloom
+# never auto-flips status based on age. Dormant is a hint, not a
+# verdict. Per-page override via `dormant_window_days` in frontmatter.
+[dormant]
 default_window_days = 90
 entity_window_days = 180
 concept_window_days = 120
@@ -98,7 +103,7 @@ aliases: []
 sources: []
 source_count: 0
 confidence: "high"
-staleness_window_days: 365
+dormant_window_days: 365
 human_edited: false
 human_edited_at: null
 superseded_by: null
@@ -126,7 +131,7 @@ aliases: []
 sources: []
 source_count: 0
 confidence: "high"
-staleness_window_days: 365
+dormant_window_days: 365
 human_edited: false
 human_edited_at: null
 superseded_by: null

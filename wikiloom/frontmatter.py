@@ -11,7 +11,12 @@ import yaml
 
 @dataclass
 class Frontmatter:
-    """Represents YAML frontmatter for a wiki page."""
+    """Represents YAML frontmatter for a wiki page.
+
+    Provenance lives inside ``sources`` — each source dict carries
+    its own ``chunk_ids`` list. Use ``all_chunk_ids()`` to get a
+    flat list across all sources.
+    """
 
     title: str
     type: str  # entity, concept, source, synthesis, decision
@@ -20,17 +25,31 @@ class Frontmatter:
     modified: str = ""
     summary: str = ""
     aliases: list[str] = field(default_factory=list)
-    sources: list[dict[str, str]] = field(default_factory=list)
+    # Each source dict: {"hash": str, "name": str, "raw_path": str,
+    # "chunk_ids": list[str]}
+    sources: list[dict[str, Any]] = field(default_factory=list)
     source_count: int = 0
     confidence: str = "medium"
-    staleness_window_days: int = 90
+    dormant_window_days: int = 90
     human_edited: bool = False
     human_edited_at: str | None = None
     superseded_by: str | None = None
     contradictions: list[dict[str, str]] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
-    chunk_ids: list[str] = field(default_factory=list)
     related_pages: list[str] = field(default_factory=list)
+
+    def all_chunk_ids(self) -> list[str]:
+        """Flatten chunk_ids across all sources, preserving order."""
+        out: list[str] = []
+        seen: set[str] = set()
+        for src in self.sources:
+            if not isinstance(src, dict):
+                continue
+            for cid in src.get("chunk_ids") or []:
+                if cid and cid not in seen:
+                    seen.add(cid)
+                    out.append(cid)
+        return out
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to a dict suitable for YAML serialization."""
@@ -45,13 +64,12 @@ class Frontmatter:
             "sources": self.sources,
             "source_count": self.source_count,
             "confidence": self.confidence,
-            "staleness_window_days": self.staleness_window_days,
+            "dormant_window_days": self.dormant_window_days,
             "human_edited": self.human_edited,
             "human_edited_at": self.human_edited_at,
             "superseded_by": self.superseded_by,
             "contradictions": self.contradictions,
             "tags": self.tags,
-            "chunk_ids": self.chunk_ids,
             "related_pages": self.related_pages,
         }
 
@@ -69,13 +87,15 @@ class Frontmatter:
             sources=data.get("sources", []),
             source_count=data.get("source_count", 0),
             confidence=data.get("confidence", "medium"),
-            staleness_window_days=data.get("staleness_window_days", 90),
+            dormant_window_days=data.get(
+                "dormant_window_days",
+                data.get("staleness_window_days", 90),  # legacy fallback
+            ),
             human_edited=data.get("human_edited", False),
             human_edited_at=data.get("human_edited_at"),
             superseded_by=data.get("superseded_by"),
             contradictions=data.get("contradictions", []),
             tags=data.get("tags", []),
-            chunk_ids=data.get("chunk_ids", []),
             related_pages=data.get("related_pages", []),
         )
 

@@ -8,13 +8,13 @@ from pathlib import Path
 import pytest
 
 from wikiloom.backlinks import BacklinkRegistry
-from wikiloom.config import StalenessConfig
+from wikiloom.config import DormantConfig
 from wikiloom.frontmatter import Frontmatter, render_frontmatter
 from wikiloom.lint import (
     BrokenLink,
+    DormantPage,
     DuplicateSet,
     LintReport,
-    StalePage,
     WikiLinter,
 )
 from wikiloom.registry import PageEntry, Registry
@@ -205,31 +205,31 @@ def test_check_orphans_skips_source_pages(project: Path) -> None:
 
 
 # ----------------------------------------------------------------------
-# check_staleness
+# check_dormant
 # ----------------------------------------------------------------------
 
 
-def test_check_staleness_flags_old_concept(project: Path) -> None:
+def test_check_dormant_flags_old_concept(project: Path) -> None:
     old = _iso_days_ago(200)
     _write_page(project, "concepts/old.md", modified=old)
     reg = Registry(project / "_registry", project / "wiki")
     reg.register_page(
         "concepts/old",
-        PageEntry(title="Old", type="concept", modified=old, staleness_window_days=0),
+        PageEntry(title="Old", type="concept", modified=old, dormant_window_days=0),
     )
     # Clobber modified which register_page auto-refreshes
     reg.pages["concepts/old"].modified = old
-    reg.pages["concepts/old"].staleness_window_days = 120
+    reg.pages["concepts/old"].dormant_window_days = 120
     reg.save()
 
-    linter = WikiLinter(project, staleness=StalenessConfig(concept_window_days=120))
-    stale = linter.check_staleness()
-    assert len(stale) == 1
-    assert stale[0].page_id == "concepts/old"
-    assert stale[0].age_days >= 120
+    linter = WikiLinter(project, dormant=DormantConfig(concept_window_days=120))
+    dormant = linter.check_dormant()
+    assert len(dormant) == 1
+    assert dormant[0].page_id == "concepts/old"
+    assert dormant[0].age_days >= 120
 
 
-def test_check_staleness_uses_per_type_window(project: Path) -> None:
+def test_check_dormant_uses_per_type_window(project: Path) -> None:
     recent = _iso_days_ago(30)
     _write_page(project, "syntheses/recent.md", type_="synthesis", modified=recent)
     reg = Registry(project / "_registry", project / "wiki")
@@ -238,15 +238,15 @@ def test_check_staleness_uses_per_type_window(project: Path) -> None:
         PageEntry(title="Recent", type="synthesis"),
     )
     reg.pages["syntheses/recent"].modified = recent
-    reg.pages["syntheses/recent"].staleness_window_days = 0  # force fallback
+    reg.pages["syntheses/recent"].dormant_window_days = 0  # force fallback
     reg.save()
 
     # Synthesis window is 60 days by default — 30-day page is fresh
     linter = WikiLinter(project)
-    assert linter.check_staleness() == []
+    assert linter.check_dormant() == []
 
 
-def test_check_staleness_skips_deprecated(project: Path) -> None:
+def test_check_dormant_skips_deprecated(project: Path) -> None:
     old = _iso_days_ago(500)
     reg = Registry(project / "_registry", project / "wiki")
     reg.register_page(
@@ -257,7 +257,7 @@ def test_check_staleness_skips_deprecated(project: Path) -> None:
     reg.save()
 
     linter = WikiLinter(project)
-    assert linter.check_staleness() == []
+    assert linter.check_dormant() == []
 
 
 # ----------------------------------------------------------------------
@@ -458,7 +458,12 @@ def test_fix_all_strips_broken_wikilinks(project: Path) -> None:
     assert "the ghost" in content
 
 
-def test_fix_all_marks_stale_pages(project: Path) -> None:
+def test_fix_all_does_not_auto_mark_dormant(project: Path) -> None:
+    """`lint --fix` reports dormant candidates but never marks them.
+
+    Marking is a user decision via `wikiloom dormant <page>` — age
+    alone is not a verdict on usefulness.
+    """
     old = _iso_days_ago(500)
     page = _write_page(project, "concepts/old.md", modified=old)
     reg = Registry(project / "_registry", project / "wiki")
@@ -470,8 +475,13 @@ def test_fix_all_marks_stale_pages(project: Path) -> None:
     report = linter.run_all()
     fixes = linter.fix_all(report)
 
-    assert fixes.stale_marked >= 1
-    assert "status: stale" in page.read_text(encoding="utf-8")
+    # The candidate should appear in the report but the page must NOT
+    # have been auto-marked dormant.
+    assert any(d.page_id == "concepts/old" for d in report.dormant)
+    assert "status: dormant" not in page.read_text(encoding="utf-8")
+    # FixReport no longer carries a stale_marked / dormant_marked counter.
+    assert not hasattr(fixes, "stale_marked")
+    assert not hasattr(fixes, "dormant_marked")
 
 
 def test_fix_all_repairs_missing_frontmatter(project: Path) -> None:
@@ -516,17 +526,18 @@ def test_fix_all_skips_human_edited_pages(
 
 
 def test_lint_report_total_issues_sums_all_categories() -> None:
+    """Dormant is informational and excluded from the issue count."""
     report = LintReport(
         broken_links=[BrokenLink("a", "b", "")],
         orphans=["c"],
-        stale=[StalePage("d", 100, 90)],
+        dormant=[DormantPage("d", 100, 90)],  # informational, not counted
         duplicates=[DuplicateSet(pages=("e", "f"), reason="title", score=95)],
         frontmatter_issues=["g"],
         index_drift=["concepts"],
         contradictions=[],
         stubs=["h"],
     )
-    assert report.total_issues == 7
+    assert report.total_issues == 6  # excludes the dormant entry
     assert report.is_healthy is False
 
 

@@ -122,11 +122,11 @@ def test_get_stale_pages_returns_only_old_pages(registry: Registry) -> None:
     registry.register_page("entities/fresh", _entry("Fresh"))
     # Override the modified timestamp set by register_page
     registry._pages["entities/fresh"].modified = fresh_modified
-    registry._pages["entities/fresh"].staleness_window_days = 90
+    registry._pages["entities/fresh"].dormant_window_days = 90
 
     registry.register_page("entities/stale", _entry("Stale"))
     registry._pages["entities/stale"].modified = old_modified
-    registry._pages["entities/stale"].staleness_window_days = 90
+    registry._pages["entities/stale"].dormant_window_days = 90
 
     stale = registry.get_stale_pages()
     assert len(stale) == 1
