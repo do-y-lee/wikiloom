@@ -232,6 +232,82 @@ tags: []
 """
 
 
+def _project_readme(
+    name: str, domain: str, provider: str, model: str
+) -> str:
+    """Generate the per-project README that ships with ``wikiloom init``.
+
+    This is the user's first orientation document — it explains the
+    directory layout, lists the commands they'll actually use, and
+    describes the editing workflow (edit → ``wikiloom save``). Kept
+    short on purpose; upstream docs handle the long tail.
+    """
+    label = PROVIDER_PRESETS[provider]["label"]
+    domain_line = domain if domain else "(not set — edit wikiloom.toml or the ingest prompt)"
+    return f"""\
+# {name}
+
+A WikiLoom wiki.
+
+- **Domain:** {domain_line}
+- **Provider:** {label}
+- **Model:** {model}
+
+## Directory layout
+
+```
+{name}/
+├── wiki/             # your knowledge base (markdown pages you can edit)
+├── raw/              # original sources copied on ingest (papers, code, etc.)
+├── _registry/        # manifest, backlinks, SQLite cache (derived — don't hand-edit)
+├── .wikiloom/        # prompts + schema the LLM reads
+├── wikiloom.toml     # project config (provider, model, budget, windows)
+├── .env              # your API key (gitignored)
+└── .env.example      # committed template for collaborators
+```
+
+## Common commands
+
+```
+wikiloom ingest <file|url>   # add a source to the wiki
+wikiloom query "question"    # ask the wiki; --save to persist the answer
+wikiloom status              # page counts, tokens, monthly spend
+wikiloom log                 # recent events
+wikiloom cost                # token + spend breakdown
+wikiloom save                # commit your manual edits
+wikiloom review              # review pending link candidates
+wikiloom --help              # full command list
+```
+
+## Editing workflow
+
+Edit any page under `wiki/` in your editor, or tweak `wikiloom.toml`
+or the prompts under `.wikiloom/prompts/`. When done, run:
+
+```
+wikiloom save
+```
+
+This commits your changes with a `human-edit:` prefix so auto-tools
+(`lint --fix`, re-ingest) leave them alone. Most wikiloom commands
+will also print a reminder if you have uncommitted edits.
+
+## Configuration
+
+Runtime settings live in `wikiloom.toml`. Changes take effect on the
+next command — no restart needed.
+
+- `[llm] monthly_budget_usd` caps ingest + query spending.
+- `[dormant]` windows flag pages as "dormant" once their `modified`
+  timestamp is older than the window for their type (it's a hint, not
+  a filter — dormant pages stay fully interactable).
+
+## Docs
+
+Upstream project: https://github.com/your-org/wikiloom
+"""
+
+
 def _root_index_content(name: str) -> str:
     """Generate the root wiki index."""
     return f"""\
@@ -449,6 +525,13 @@ def init_project(
     # and fill in their key. `.env` itself is gitignored below.
     (project_dir / ".env.example").write_text(
         _generate_env_example(chosen_provider), encoding="utf-8"
+    )
+
+    # README.md — per-project orientation doc (commands, layout,
+    # editing workflow). First file users open after `cd my-wiki`.
+    (project_dir / "README.md").write_text(
+        _project_readme(name, domain, chosen_provider, chosen_model),
+        encoding="utf-8",
     )
 
     # .gitignore

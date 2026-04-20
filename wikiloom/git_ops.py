@@ -25,6 +25,24 @@ AUTO_COMMIT_TYPES: frozenset[str] = frozenset(
 )
 
 
+def _is_wiki_page(rel_path: str) -> bool:
+    """Human-editable wiki page under ``wiki/`` (excludes log.md)."""
+    return rel_path.startswith("wiki/") and rel_path != "wiki/log.md"
+
+
+def _is_human_editable(rel_path: str) -> bool:
+    """Superset of ``_is_wiki_page``: also the user-owned config and
+    prompt files that ``wikiloom save`` is responsible for committing.
+    """
+    if _is_wiki_page(rel_path):
+        return True
+    if rel_path == "wikiloom.toml":
+        return True
+    if rel_path.startswith(".wikiloom/prompts/") and rel_path.endswith(".md"):
+        return True
+    return False
+
+
 @dataclass(frozen=True)
 class CommitInfo:
     """Summary of a single commit affecting a file."""
@@ -167,30 +185,37 @@ class GitOps:
         wikiloom itself) so it never triggers the dirty-tree guard.
         Paths are returned relative to the repo root.
         """
+        return self._collect_dirty(_is_wiki_page)
+
+    def dirty_human_paths(self) -> list[Path]:
+        """Return all uncommitted paths considered human-editable.
+
+        Covers ``wiki/`` pages (minus log.md), ``wikiloom.toml`` and
+        ``.wikiloom/prompts/*.md``. These are the files ``wikiloom save``
+        is responsible for committing and the status-line reminder
+        watches for. Index/README/derived files are excluded.
+        """
+        return self._collect_dirty(_is_human_editable)
+
+    def _collect_dirty(self, predicate) -> list[Path]:
         seen: set[str] = set()
         out: list[Path] = []
 
         def _include(rel_path: str) -> None:
-            if rel_path in seen:
+            if not rel_path or rel_path in seen:
                 return
-            if not rel_path.startswith("wiki/"):
-                return
-            if rel_path == "wiki/log.md":
+            if not predicate(rel_path):
                 return
             seen.add(rel_path)
             out.append(Path(rel_path))
 
-        head_valid = self.repo.head.is_valid()
-        if head_valid:
-            # Staged vs HEAD
+        if self.repo.head.is_valid():
             for d in self.repo.index.diff(self.repo.head.commit):
                 _include(d.a_path or "")
                 _include(d.b_path or "")
-        # Unstaged (working tree vs index)
         for d in self.repo.index.diff(None):
             _include(d.a_path or "")
             _include(d.b_path or "")
-        # Untracked
         for u in self.repo.untracked_files:
             _include(u)
 

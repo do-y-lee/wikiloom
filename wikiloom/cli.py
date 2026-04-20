@@ -245,22 +245,26 @@ def _require_clean_tree(project: Path, command: str) -> None:
 
 
 def _warn_if_dirty(project: Path) -> None:
-    """Print a passive nudge if wiki/ has uncommitted changes.
+    """Print a passive nudge if any human-tracked file is uncommitted.
 
-    Called at the top of read-only commands so users notice forgotten
-    edits without being blocked. Writer commands use the stricter
-    ``_require_clean_tree`` instead.
+    Covers ``wiki/`` pages, ``wikiloom.toml``, and
+    ``.wikiloom/prompts/*.md`` — everything ``wikiloom save`` handles.
+    Called at the top of read-only and writer commands so users notice
+    forgotten edits without being blocked. Writer commands that would
+    collide with an auto-commit additionally use ``_require_clean_tree``
+    (scoped to ``wiki/``) for hard protection.
     """
     from wikiloom.git_ops import GitOps
 
     try:
-        dirty = GitOps(project).dirty_wiki_paths()
+        dirty = GitOps(project).dirty_human_paths()
     except ValueError:
         return
     if dirty:
+        n = len(dirty)
+        plural = "" if n == 1 else "s"
         click.echo(
-            f"⚠ {len(dirty)} uncommitted edit(s) in wiki/ — "
-            f"run `wikiloom save` to commit.\n",
+            f"⚠ {n} uncommitted edit{plural} — run `wikiloom save` to commit.\n",
             err=True,
         )
 
@@ -390,6 +394,7 @@ def ingest(
             )
 
     _require_clean_tree(project, "ingest")
+    _warn_if_dirty(project)
     # CLI flag is a one-way opt-out. None leaves the config value in
     # effect; False forces the behavior off for this run only.
     use_page_context_override = False if no_page_context else None
@@ -2558,11 +2563,12 @@ def source(chunk_id: str, project: Path | None) -> None:
     help="Project root. Defaults to walking upward from the current directory.",
 )
 def save(message: str | None, dry_run: bool, project: Path | None) -> None:
-    """Commit manual edits under wiki/ with a human-edit: prefix.
+    """Commit manual edits with a human-edit: prefix.
 
-    Use after editing wiki pages in your editor. The resulting commit
-    is classified as human-authored so auto-tools (lint --fix, re-ingest)
-    leave the affected pages alone.
+    Picks up edits to pages under ``wiki/``, plus ``wikiloom.toml`` and
+    ``.wikiloom/prompts/*.md``. The resulting commit is classified as
+    human-authored so auto-tools (lint --fix, re-ingest) leave the
+    affected pages alone.
     """
     from wikiloom.git_ops import GitOps
     from wikiloom.locking import FileLock
@@ -2579,7 +2585,7 @@ def save(message: str | None, dry_run: bool, project: Path | None) -> None:
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
 
-    dirty = git.dirty_wiki_paths()
+    dirty = git.dirty_human_paths()
     if not dirty:
         click.echo("Nothing to save — working tree is clean.")
         return
@@ -2588,20 +2594,25 @@ def save(message: str | None, dry_run: bool, project: Path | None) -> None:
         click.echo(f"Would commit {len(dirty)} file(s):")
         for p in dirty:
             click.echo(f"  {p}")
-        default_msg = message or f"human-edit: {len(dirty)} page(s) [protected]"
+        default_msg = message or f"human-edit: {len(dirty)} file(s) [protected]"
         click.echo(f"\nMessage: {default_msg}")
         return
 
-    commit_msg = message or f"human-edit: {len(dirty)} page(s) [protected]"
+    commit_msg = message or f"human-edit: {len(dirty)} file(s) [protected]"
     if not commit_msg.startswith("human-edit:"):
         commit_msg = f"human-edit: {commit_msg}"
 
     with FileLock(project):
         # Auto-bump frontmatter.modified on each saved page so manual
         # edits don't silently roll into dormant. Also flip dormant →
-        # active since the user just touched the page.
+        # active since the user just touched the page. `_bump_...`
+        # self-skips anything that isn't a wiki/*.md page, so config
+        # and prompt edits flow through untouched.
         freshened = _bump_modified_and_freshen(project, dirty)
-        git.repo.git.add("-A", "--", "wiki")
+        # `git add -A -- <paths>` handles adds, modifications, and
+        # deletions in one call, which matters for pages the user
+        # removed via their editor.
+        git.repo.git.add("-A", "--", *[str(p) for p in dirty])
         git.commit([], commit_msg)
         _sync_cache(project)
 
