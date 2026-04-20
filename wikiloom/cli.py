@@ -18,48 +18,86 @@ def main() -> None:
 @click.option("--path", type=click.Path(path_type=Path), default=None,
               help="Parent directory for the project. Defaults to current directory.")
 @click.option("--domain", default="", help="Domain description (e.g. 'AI safety research').")
-def init(name: str, path: Path | None, domain: str) -> None:
+@click.option(
+    "--provider",
+    type=click.Choice(["anthropic", "openai", "google", "ollama"]),
+    default="anthropic",
+    show_default=True,
+    help="LLM provider preset. Sets the default model and API key env var in "
+         "the generated wikiloom.toml.",
+)
+@click.option(
+    "--model",
+    default=None,
+    help="Override the provider's default model (e.g. 'gpt-5-mini', "
+         "'gemini/gemini-2.5-flash', 'gemma3').",
+)
+def init(
+    name: str,
+    path: Path | None,
+    domain: str,
+    provider: str,
+    model: str | None,
+) -> None:
     """Initialize a new WikiLoom project.
 
     Creates the full directory structure, config files, git repo,
     and empty registry files.
     """
     from wikiloom.scaffold import (
-        DEFAULT_MODEL,
         DEFAULT_MONTHLY_BUDGET_USD,
-        DEFAULT_PROVIDER,
-        PROVIDER_API_KEY_ENV,
+        PROVIDER_PRESETS,
         init_project,
+        resolve_provider_model,
     )
 
-    project_dir = init_project(name=name, path=path, domain=domain)
+    chosen_provider, chosen_model = resolve_provider_model(provider, model)
+    preset = PROVIDER_PRESETS[chosen_provider]
 
-    api_key_env = PROVIDER_API_KEY_ENV.get(
-        DEFAULT_PROVIDER, f"{DEFAULT_PROVIDER.upper()}_API_KEY"
+    project_dir = init_project(
+        name=name,
+        path=path,
+        domain=domain,
+        provider=chosen_provider,
+        model=chosen_model,
     )
+
     prompt_path = project_dir / ".wikiloom" / "prompts" / "ingest.md"
     config_path = project_dir / "wikiloom.toml"
     domain_line = domain if domain else "(not set — edit the prompt to add one)"
 
     click.echo(f"✓ Initialized WikiLoom project at {project_dir}")
     click.echo("")
-    click.echo(f"  Domain: {domain_line}")
-    click.echo(f"  Model:  {DEFAULT_MODEL}  ({DEFAULT_PROVIDER.capitalize()})")
-    click.echo(f"  Budget: ${DEFAULT_MONTHLY_BUDGET_USD:g}/month")
+    click.echo(f"  Domain:   {domain_line}")
+    click.echo(f"  Provider: {preset['label']}")
+    click.echo(f"  Model:    {chosen_model}")
+    click.echo(f"  Budget:   ${DEFAULT_MONTHLY_BUDGET_USD:g}/month")
     click.echo("")
     click.echo("Next steps:")
     click.echo("")
-    click.echo("  1. Set your API key")
-    click.echo(f"     export {api_key_env}=...")
+
+    api_key_env = preset["api_key_env"]
+    if api_key_env:
+        click.echo("  1. Set your API key")
+        click.echo(f"     export {api_key_env}=...")
+        click.echo(f"     ({preset['api_key_hint']})")
+    else:
+        click.echo("  1. Start your local LLM runtime")
+        click.echo(f"     {preset['api_key_hint']}")
     click.echo("")
+
     click.echo("  2. (Recommended) Review the synthesis prompt — shapes every page WikiLoom writes")
     click.echo(f"     {prompt_path}")
     click.echo("")
+
     click.echo("  3. (Optional) Adjust LLM model, budget, or dormant windows")
     click.echo(f"     {config_path}")
-    click.echo("     Tip: switch to claude-haiku-4-5-20251001 for cheap iteration,")
-    click.echo(f"          back to {DEFAULT_MODEL} once the prompt feels right.")
+    cheap_model = preset["cheap_model"]
+    if cheap_model:
+        click.echo(f"     Tip: switch to {cheap_model} for cheap iteration,")
+        click.echo(f"          back to {chosen_model} once the prompt feels right.")
     click.echo("")
+
     click.echo("  4. Ingest your first file")
     click.echo(f"     cd {project_dir.name}")
     click.echo("     wikiloom ingest path/to/doc.pdf")

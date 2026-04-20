@@ -55,19 +55,69 @@ SCHEMA_VERSION = 1
 # post-init summary so the printed "next steps" never drifts from what
 # was actually written to wikiloom.toml.
 DEFAULT_PROVIDER = "anthropic"
-DEFAULT_MODEL = "claude-sonnet-4-6"
 DEFAULT_MONTHLY_BUDGET_USD = 50.0
 
-# Env var each provider reads its API key from. Kept next to
-# DEFAULT_PROVIDER so adding a provider in one place updates both the
-# scaffold default and the init-time API key hint.
-PROVIDER_API_KEY_ENV = {
-    "anthropic": "ANTHROPIC_API_KEY",
-    "openai": "OPENAI_API_KEY",
+# Provider presets. Each entry captures the default model, the
+# cheap-tier model for iteration, the env var where the API key is
+# read from (None = no key needed), a short hint for the post-init
+# next-steps panel, and the human-readable label shown in the summary.
+# Adding a provider here updates the config generator, the `--provider`
+# choices, and the CLI output together.
+PROVIDER_PRESETS: dict[str, dict[str, str | None]] = {
+    "anthropic": {
+        "label": "Anthropic",
+        "default_model": "claude-sonnet-4-6",
+        "cheap_model": "claude-haiku-4-5-20251001",
+        "api_key_env": "ANTHROPIC_API_KEY",
+        "api_key_hint": "Get one at https://console.anthropic.com/settings/keys",
+    },
+    "openai": {
+        "label": "OpenAI",
+        "default_model": "gpt-5",
+        "cheap_model": "gpt-5-mini",
+        "api_key_env": "OPENAI_API_KEY",
+        "api_key_hint": "Get one at https://platform.openai.com/api-keys",
+    },
+    "google": {
+        "label": "Google Gemini",
+        "default_model": "gemini/gemini-2.5-pro",
+        "cheap_model": "gemini/gemini-2.5-flash",
+        "api_key_env": "GEMINI_API_KEY",
+        "api_key_hint": "Get one at https://aistudio.google.com/apikey",
+    },
+    "ollama": {
+        "label": "Ollama (local)",
+        "default_model": "llama3",
+        "cheap_model": None,
+        "api_key_env": None,
+        "api_key_hint": (
+            "No API key needed. Start Ollama locally: `ollama serve`. "
+            "Swap models with --model gemma3, mistral, qwen2.5, etc."
+        ),
+    },
 }
 
 
-def _generate_config(name: str, domain: str) -> str:
+def resolve_provider_model(
+    provider: str | None, model: str | None
+) -> tuple[str, str]:
+    """Resolve (provider, model) from user flags to concrete values.
+
+    Missing provider falls back to ``DEFAULT_PROVIDER``; missing model
+    falls back to the preset's ``default_model``. Raises ``KeyError``
+    on an unknown provider so callers surface a clear error rather
+    than writing a broken config.
+    """
+    chosen_provider = provider or DEFAULT_PROVIDER
+    if chosen_provider not in PROVIDER_PRESETS:
+        raise KeyError(chosen_provider)
+    chosen_model = model or PROVIDER_PRESETS[chosen_provider]["default_model"]
+    return chosen_provider, chosen_model  # type: ignore[return-value]
+
+
+def _generate_config(
+    name: str, domain: str, provider: str, model: str
+) -> str:
     """Generate wikiloom.toml content."""
     return f"""\
 [project]
@@ -77,8 +127,8 @@ created = "{now_iso()}"
 schema_version = {SCHEMA_VERSION}
 
 [llm]
-provider = "{DEFAULT_PROVIDER}"
-model = "{DEFAULT_MODEL}"
+provider = "{provider}"
+model = "{model}"
 max_tokens_per_operation = 8000
 monthly_budget_usd = {DEFAULT_MONTHLY_BUDGET_USD}
 
@@ -254,6 +304,8 @@ def init_project(
     name: str,
     path: Path | None = None,
     domain: str = "",
+    provider: str | None = None,
+    model: str | None = None,
 ) -> Path:
     """Create a new WikiLoom project with full directory structure.
 
@@ -261,10 +313,14 @@ def init_project(
         name: Project name (used in config and index).
         path: Parent directory. Defaults to current directory.
         domain: Optional domain description (e.g. "AI safety research").
+        provider: LLM provider preset key (see ``PROVIDER_PRESETS``).
+            Defaults to ``DEFAULT_PROVIDER``.
+        model: Specific model name. Defaults to the preset's default.
 
     Returns:
         Path to the created project directory.
     """
+    chosen_provider, chosen_model = resolve_provider_model(provider, model)
     if path is None:
         path = Path.cwd()
 
@@ -344,7 +400,8 @@ def init_project(
 
     # wikiloom.toml
     (project_dir / "wikiloom.toml").write_text(
-        _generate_config(name, domain), encoding="utf-8"
+        _generate_config(name, domain, chosen_provider, chosen_model),
+        encoding="utf-8",
     )
 
     # .gitignore
