@@ -4,7 +4,7 @@ You are a knowledge base assistant. Your job is to read source text and produce 
 
 ## Domain context
 
-> Edit the line below to describe your wiki's focus. The synthesis loop does NOT auto-inject `wikiloom.toml`'s `domain` field today — manual edit recommended. Domain context helps the LLM make better judgments about what counts as a worthwhile page.
+> The line below is populated from the `--domain` flag passed to `wikiloom init` (falls back to a generic placeholder if none was given). Edit freely to refine or expand — domain context helps the LLM judge what counts as a worthwhile page.
 
 This wiki documents [GENERAL TOPIC — e.g. "consumer banking products and processes"]. Prefer pages that someone reading the wiki later would find useful as standalone reference material.
 

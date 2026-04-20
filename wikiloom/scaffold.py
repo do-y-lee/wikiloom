@@ -51,6 +51,22 @@ build/
 # so the two never drift.
 SCHEMA_VERSION = 1
 
+# Scaffold defaults. Referenced by both `_generate_config` and the CLI's
+# post-init summary so the printed "next steps" never drifts from what
+# was actually written to wikiloom.toml.
+DEFAULT_PROVIDER = "anthropic"
+DEFAULT_MODEL = "claude-sonnet-4-6"
+DEFAULT_MONTHLY_BUDGET_USD = 50.0
+
+# Env var each provider reads its API key from. Kept next to
+# DEFAULT_PROVIDER so adding a provider in one place updates both the
+# scaffold default and the init-time API key hint.
+PROVIDER_API_KEY_ENV = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openai": "OPENAI_API_KEY",
+}
+
+
 def _generate_config(name: str, domain: str) -> str:
     """Generate wikiloom.toml content."""
     return f"""\
@@ -61,10 +77,10 @@ created = "{now_iso()}"
 schema_version = {SCHEMA_VERSION}
 
 [llm]
-provider = "anthropic"
-model = "claude-sonnet-4-6"
+provider = "{DEFAULT_PROVIDER}"
+model = "{DEFAULT_MODEL}"
 max_tokens_per_operation = 8000
-monthly_budget_usd = 50.0
+monthly_budget_usd = {DEFAULT_MONTHLY_BUDGET_USD}
 
 [linking]
 ner_model = "en_core_web_sm"
@@ -160,8 +176,20 @@ tags: []
 """
 
 
-def _copy_templates(dest: Path) -> None:
-    """Copy template files from the package to .wikiloom/ directory."""
+_INGEST_DOMAIN_PLACEHOLDER = (
+    'This wiki documents [GENERAL TOPIC — e.g. "consumer banking products '
+    'and processes"]. Prefer pages that someone reading the wiki later '
+    'would find useful as standalone reference material.'
+)
+
+
+def _copy_templates(dest: Path, domain: str = "") -> None:
+    """Copy template files from the package to .wikiloom/ directory.
+
+    When ``domain`` is non-empty, the ingest prompt's placeholder sentence
+    is rewritten to reference the user's domain so the first ingest has
+    real context without requiring a manual edit.
+    """
     templates_pkg = importlib_resources.files("wikiloom") / "templates"
 
     # schema.md
@@ -175,9 +203,15 @@ def _copy_templates(dest: Path) -> None:
     prompts_dir.mkdir(exist_ok=True)
     for prompt_name in ("ingest.md", "query.md", "lint.md"):
         src = templates_pkg / "prompts" / prompt_name
-        (prompts_dir / prompt_name).write_text(
-            src.read_text(encoding="utf-8"), encoding="utf-8"
-        )
+        content = src.read_text(encoding="utf-8")
+        if prompt_name == "ingest.md" and domain:
+            replacement = (
+                f"This wiki documents {domain}. Prefer pages that someone "
+                f"reading the wiki later would find useful as standalone "
+                f"reference material."
+            )
+            content = content.replace(_INGEST_DOMAIN_PLACEHOLDER, replacement)
+        (prompts_dir / prompt_name).write_text(content, encoding="utf-8")
 
     # output_formats/
     formats_dir = dest / "output_formats"
@@ -306,7 +340,7 @@ def init_project(
     # .wikiloom/ schema directory
     wikiloom_dir = project_dir / ".wikiloom"
     wikiloom_dir.mkdir(exist_ok=True)
-    _copy_templates(wikiloom_dir)
+    _copy_templates(wikiloom_dir, domain=domain)
 
     # wikiloom.toml
     (project_dir / "wikiloom.toml").write_text(

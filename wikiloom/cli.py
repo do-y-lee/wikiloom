@@ -24,10 +24,47 @@ def init(name: str, path: Path | None, domain: str) -> None:
     Creates the full directory structure, config files, git repo,
     and empty registry files.
     """
-    from wikiloom.scaffold import init_project
+    from wikiloom.scaffold import (
+        DEFAULT_MODEL,
+        DEFAULT_MONTHLY_BUDGET_USD,
+        DEFAULT_PROVIDER,
+        PROVIDER_API_KEY_ENV,
+        init_project,
+    )
 
     project_dir = init_project(name=name, path=path, domain=domain)
-    click.echo(f"Initialized WikiLoom project at {project_dir}")
+
+    api_key_env = PROVIDER_API_KEY_ENV.get(
+        DEFAULT_PROVIDER, f"{DEFAULT_PROVIDER.upper()}_API_KEY"
+    )
+    prompt_path = project_dir / ".wikiloom" / "prompts" / "ingest.md"
+    config_path = project_dir / "wikiloom.toml"
+    domain_line = domain if domain else "(not set — edit the prompt to add one)"
+
+    click.echo(f"✓ Initialized WikiLoom project at {project_dir}")
+    click.echo("")
+    click.echo(f"  Domain: {domain_line}")
+    click.echo(f"  Model:  {DEFAULT_MODEL}  ({DEFAULT_PROVIDER.capitalize()})")
+    click.echo(f"  Budget: ${DEFAULT_MONTHLY_BUDGET_USD:g}/month")
+    click.echo("")
+    click.echo("Next steps:")
+    click.echo("")
+    click.echo("  1. Set your API key")
+    click.echo(f"     export {api_key_env}=...")
+    click.echo("")
+    click.echo("  2. (Recommended) Review the synthesis prompt — shapes every page WikiLoom writes")
+    click.echo(f"     {prompt_path}")
+    click.echo("")
+    click.echo("  3. (Optional) Adjust LLM model, budget, or dormant windows")
+    click.echo(f"     {config_path}")
+    click.echo("     Tip: switch to claude-haiku-4-5-20251001 for cheap iteration,")
+    click.echo(f"          back to {DEFAULT_MODEL} once the prompt feels right.")
+    click.echo("")
+    click.echo("  4. Ingest your first file")
+    click.echo(f"     cd {project_dir.name}")
+    click.echo("     wikiloom ingest path/to/doc.pdf")
+    click.echo("")
+    click.echo("Run `wikiloom --help` to see all commands.")
 
 
 def _find_project_root(start: Path) -> Path | None:
