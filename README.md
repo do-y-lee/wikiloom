@@ -127,7 +127,25 @@ my-wiki/
 
 ## Key concepts
 
-**Human-edit protection.** Every auto-generated page has a `<!-- wikiloom:auto -->` marker. Content you write above the marker is yours — re-ingests and `lint --fix` will never touch it. Content below the marker is LLM-generated and gets replaced on re-ingest.
+**Human-edit protection.** Every auto-generated page has a `<!-- wikiloom:auto -->` marker. Two layers of protection work together:
+
+- **The `human-edit:` commit prefix.** When you run `wikiloom save`, the resulting commit is classified as human-authored. `lint --fix` skips the page; re-synthesis tools leave it alone. This protection is "soft" — it lasts until the next auto-action (e.g. a re-ingest commit) clears it.
+- **The marker is the durable boundary.** Content **above** `<!-- wikiloom:auto -->` survives every operation, including `wikiloom ingest <file> --force` (the only command that wipes the auto region). Content below the marker is LLM-generated and may be replaced on `--force` re-ingest.
+
+**Tip — pinning personal notes:** to make a note that survives every future re-synthesis of a page (including `--force`), put it above the marker. Example:
+
+```markdown
+# Transformer
+
+> **My note:** the original paper used post-norm; modern impls use pre-norm.
+
+<!-- wikiloom:auto -->
+
+## Architecture
+... (LLM-generated content)
+```
+
+Normal `wikiloom ingest <new-source>` updates only **append** to the auto region — your edits below the marker also survive in that case. The marker only matters when you re-synthesize from scratch via `--force`.
 
 **Tiered linking confidence.** The linking engine scores each potential wikilink:
 - **High (>= 95):** auto-inserted
@@ -135,7 +153,7 @@ my-wiki/
 - **Low (>= 70):** deferred to `pending.json` for manual review via `wikiloom review`
 - **Below 70:** ignored
 
-**Structural provenance.** Each chunk of a source document is persisted to the SQLite cache with a stable `chunk_id` derived from `sha256(source_hash + chunk_index)`. Pages reference their source chunks via `chunk_ids` in frontmatter. This is deterministic and survives re-ingests of the same file.
+**Structural provenance.** Each chunk of a source document is persisted to the SQLite cache with a stable `chunk_id` derived from `sha256(source_hash + chunk_index)`. Pages reference their contributing chunks under each entry in their `sources` frontmatter array — every source dict carries its own `chunk_ids` list, so you can trace every claim back to a specific chunk of a specific document. Use `wikiloom show <page> --field sources` to inspect, or `wikiloom source <chunk_id>` to view the original chunk text.
 
 **Budget enforcement.** Before running LLM synthesis, ingest estimates the token cost and refuses if it would exceed `[llm] monthly_budget_usd` in `wikiloom.toml`. Disable with `[ingest] enable_budget_check = false`.
 

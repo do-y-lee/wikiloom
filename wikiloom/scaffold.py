@@ -30,8 +30,10 @@ RAW_SUBDIRS = [
 ]
 
 GITIGNORE_CONTENT = """\
-# WikiLoom
+# WikiLoom — derived / transient state
 _registry/wiki.db
+_registry/last_query.json
+_registry/ingest_state.json
 .wikiloom.lock
 
 # Python
@@ -43,6 +45,12 @@ build/
 .venv/
 """
 
+# Single source of truth for the on-disk schema version. Bump when the
+# manifest / frontmatter / sources schema changes in a way that needs a
+# migration. Used by both wikiloom.toml and _registry/schema_version.json
+# so the two never drift.
+SCHEMA_VERSION = 1
+
 def _generate_config(name: str, domain: str) -> str:
     """Generate wikiloom.toml content."""
     return f"""\
@@ -50,7 +58,7 @@ def _generate_config(name: str, domain: str) -> str:
 name = "{name}"
 domain = "{domain}"
 created = "{now_iso()}"
-schema_version = 1
+schema_version = {SCHEMA_VERSION}
 
 [llm]
 provider = "anthropic"
@@ -283,7 +291,7 @@ def init_project(
 
     # Schema version
     schema_version = {
-        "version": 1,
+        "version": SCHEMA_VERSION,
         "created": now_iso(),
         "migrations": [],
     }
