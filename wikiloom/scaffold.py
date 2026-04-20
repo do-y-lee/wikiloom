@@ -36,6 +36,9 @@ _registry/last_query.json
 _registry/ingest_state.json
 .wikiloom.lock
 
+# API keys — .env is local only; .env.example is committed as a template
+.env
+
 # Python
 __pycache__/
 *.py[cod]
@@ -96,6 +99,44 @@ PROVIDER_PRESETS: dict[str, dict[str, str | None]] = {
         ),
     },
 }
+
+
+def _generate_env_example(provider: str) -> str:
+    """Generate a `.env.example` template keyed to the chosen provider.
+
+    Leaves the selected provider's key uncommented with an empty value,
+    and includes the other providers' keys commented out so users can
+    switch without hunting for the right variable name.
+    """
+    preset = PROVIDER_PRESETS[provider]
+    selected_env = preset["api_key_env"]
+    selected_label = preset["label"]
+
+    lines = [
+        "# WikiLoom API keys — copy this file to `.env` and fill in the",
+        "# key for your provider. `.env` is gitignored; this template is",
+        "# committed so collaborators know which variables to set.",
+        "",
+    ]
+
+    if selected_env:
+        lines.append(f"# {selected_label} (selected at init)")
+        lines.append(f"{selected_env}=")
+    else:
+        lines.append(f"# {selected_label} needs no API key — run `ollama serve` instead.")
+
+    others = [
+        (p, data)
+        for p, data in PROVIDER_PRESETS.items()
+        if p != provider and data["api_key_env"]
+    ]
+    if others:
+        lines.append("")
+        lines.append("# Other providers — uncomment the one you use:")
+        for _, data in others:
+            lines.append(f"# {data['api_key_env']}=")
+
+    return "\n".join(lines) + "\n"
 
 
 def resolve_provider_model(
@@ -402,6 +443,12 @@ def init_project(
     (project_dir / "wikiloom.toml").write_text(
         _generate_config(name, domain, chosen_provider, chosen_model),
         encoding="utf-8",
+    )
+
+    # .env.example — committed template. Users `cp .env.example .env`
+    # and fill in their key. `.env` itself is gitignored below.
+    (project_dir / ".env.example").write_text(
+        _generate_env_example(chosen_provider), encoding="utf-8"
     )
 
     # .gitignore

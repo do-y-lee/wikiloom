@@ -2,15 +2,73 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import click
+from dotenv import find_dotenv, load_dotenv
 
 
 @click.group()
 @click.version_option(version="0.1.0", prog_name="wikiloom")
 def main() -> None:
     """WikiLoom — LLM-maintained knowledge bases with deterministic linking."""
+    # Load `.env` from the project root (walks up from cwd until it
+    # finds one). Existing shell exports win — `load_dotenv` does not
+    # override, so users who set keys in `~/.zshrc` keep that behavior.
+    load_dotenv(find_dotenv(usecwd=True))
+
+
+def _maybe_create_env_file(
+    project_dir: Path,
+    provider: str,
+    api_key_env: str | None,
+    no_interactive: bool,
+) -> str:
+    """Optionally prompt to create `.env` and capture the API key.
+
+    Returns one of:
+      - ``"saved"``  — .env was created with the key filled in.
+      - ``"empty"``  — .env was created but the key field is empty
+                       (user hit Enter at the key prompt).
+      - ``"skipped"`` — no .env was created; user should cp from
+                        .env.example themselves.
+
+    Ollama (no api_key_env) and non-interactive contexts always
+    return ``"skipped"``.
+    """
+    from wikiloom.scaffold import _generate_env_example
+
+    if not api_key_env:
+        return "skipped"
+    if no_interactive or not sys.stdin.isatty():
+        return "skipped"
+
+    click.echo("")
+    if not click.confirm(
+        f"Create .env now and paste your {api_key_env}?", default=True
+    ):
+        return "skipped"
+
+    key_value = click.prompt(
+        f"Paste your {api_key_env} (input hidden, press Enter to skip)",
+        default="",
+        show_default=False,
+        hide_input=True,
+    ).strip()
+
+    env_content = _generate_env_example(provider)
+    if key_value:
+        env_content = env_content.replace(
+            f"{api_key_env}=", f"{api_key_env}={key_value}", 1
+        )
+    (project_dir / ".env").write_text(env_content, encoding="utf-8")
+
+    if key_value:
+        click.echo(f"✓ Saved {api_key_env} to {project_dir}/.env")
+        return "saved"
+    click.echo(f"✓ Created {project_dir}/.env (key field left empty)")
+    return "empty"
 
 
 @main.command()
@@ -32,12 +90,21 @@ def main() -> None:
     help="Override the provider's default model (e.g. 'gpt-5-mini', "
          "'gemini/gemini-2.5-flash', 'gemma3').",
 )
+@click.option(
+    "--no-interactive",
+    is_flag=True,
+    default=False,
+    help="Skip the interactive .env / API-key prompt. Useful for scripted "
+         "or CI-driven init. The prompt is also auto-skipped when stdin "
+         "isn't a terminal.",
+)
 def init(
     name: str,
     path: Path | None,
     domain: str,
     provider: str,
     model: str | None,
+    no_interactive: bool,
 ) -> None:
     """Initialize a new WikiLoom project.
 
@@ -73,14 +140,29 @@ def init(
     click.echo(f"  Model:    {chosen_model}")
     click.echo(f"  Budget:   ${DEFAULT_MONTHLY_BUDGET_USD:g}/month")
     click.echo("")
+
+    api_key_env = preset["api_key_env"]
+    env_status = _maybe_create_env_file(
+        project_dir=project_dir,
+        provider=chosen_provider,
+        api_key_env=api_key_env,
+        no_interactive=no_interactive,
+    )
+
     click.echo("Next steps:")
     click.echo("")
 
-    api_key_env = preset["api_key_env"]
     if api_key_env:
-        click.echo("  1. Set your API key")
-        click.echo(f"     export {api_key_env}=...")
-        click.echo(f"     ({preset['api_key_hint']})")
+        click.echo("  1. API key")
+        if env_status == "saved":
+            click.echo(f"     ✓ {api_key_env} saved to {project_dir}/.env")
+        elif env_status == "empty":
+            click.echo(f"     Edit {project_dir}/.env and set {api_key_env}=...")
+            click.echo(f"     ({preset['api_key_hint']})")
+        else:
+            click.echo(f"     cd {project_dir.name} && cp .env.example .env")
+            click.echo(f"     Edit .env and set {api_key_env}=...")
+            click.echo(f"     ({preset['api_key_hint']})")
     else:
         click.echo("  1. Start your local LLM runtime")
         click.echo(f"     {preset['api_key_hint']}")
