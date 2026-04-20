@@ -272,7 +272,8 @@ A WikiLoom wiki.
 wikiloom ingest <file|url>   # add a source to the wiki
 wikiloom query "question"    # ask the wiki; --save to persist the answer
 wikiloom status              # page counts, tokens, monthly spend
-wikiloom log                 # recent events
+wikiloom log                 # recent LLM / system events
+wikiloom edits               # recent human edits (who edited what, when)
 wikiloom cost                # token + spend breakdown
 wikiloom save                # commit your manual edits
 wikiloom review              # review pending link candidates

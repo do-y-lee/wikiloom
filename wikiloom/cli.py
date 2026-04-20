@@ -1107,6 +1107,59 @@ def log_cmd(limit: int, project: Path | None) -> None:
         click.echo(f"\n... {len(events) - limit} more event(s). Use -n to see more.")
 
 
+@main.command("edits")
+@click.option("--limit", "-n", type=int, default=20, help="Number of recent edits to show.")
+@click.option(
+    "--project",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Project root.",
+)
+def edits(limit: int, project: Path | None) -> None:
+    """Show recent human edits committed via ``wikiloom save``.
+
+    Complements ``wikiloom log`` (LLM / system activity) by surfacing
+    the git history of ``human-edit:`` commits. Useful in multi-user
+    wikis to see who edited what, when. ``git log`` remains the
+    exhaustive source of truth.
+    """
+    from wikiloom.git_ops import GitOps
+
+    if project is None:
+        project = _find_project_root(Path.cwd())
+        if project is None:
+            raise click.ClickException(
+                "Could not find a WikiLoom project (no wikiloom.toml found)."
+            )
+
+    try:
+        gitops = GitOps(project)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    # iter_commits with --grep returns commits whose subject matches the
+    # regex. Anchored to the start of the subject so we don't catch
+    # anything that merely mentions "human-edit:" in the body.
+    commits = list(
+        gitops.repo.iter_commits(all=False, grep=r"^human-edit:", max_count=limit + 1)
+    )
+    if not commits:
+        click.echo("No human edits yet — use `wikiloom save` to commit manual changes.")
+        return
+
+    shown = commits[:limit]
+    author_width = max((len(c.author.name or "") for c in shown), default=6)
+    for c in shown:
+        when = c.authored_datetime.strftime("%Y-%m-%d")
+        author = (c.author.name or "?").ljust(author_width)
+        subject = c.message.splitlines()[0]
+        short = c.hexsha[:8]
+        click.echo(f"{when}  {author}  {subject}  ({short})")
+
+    if len(commits) > limit:
+        click.echo(f"\n... more edits exist. Use -n to see more.")
+
+
 @main.command("cost")
 @click.option(
     "--project",
