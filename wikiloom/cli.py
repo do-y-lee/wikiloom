@@ -315,8 +315,9 @@ def _post_flight_budget_warning(project: Path) -> None:
     now = datetime.now(timezone.utc)
     month_prefix = now.strftime("%Y-%m")
     total = sum(
-        e.cost_usd for e in events
-        if e.timestamp and e.timestamp.startswith(month_prefix)
+        float(e.get("cost_usd", 0.0) or 0.0)
+        for e in events
+        if str(e.get("timestamp", "")).startswith(month_prefix)
     )
     if total <= budget:
         return
@@ -769,7 +770,7 @@ def query(
             "Could not load wikiloom.toml. Run inside a project directory."
         )
 
-    llm_client = LLMClient(cfg)
+    llm_client = LLMClient(cfg, model=cfg.llm.for_query())
 
     # Load embedder for semantic fallback if enabled
     embedder = None
@@ -847,12 +848,12 @@ def query(
         _print_query_detail(result_data, project)
 
     if not detail:
-        hints = []
-        hints.append("--detail for sources and metadata")
-        hints.append("`wikiloom query --last-detail` to review later")
+        click.echo("")
+        click.echo("Next:")
+        click.echo(f'  wikiloom query --detail "{question}"   # re-run with sources + metadata')
+        click.echo("  wikiloom query --last-detail            # show sources + metadata for this answer without re-running")
         if answer.suggest_synthesis:
-            hints.append("`wikiloom query --save-last` to save as a wiki page")
-        click.echo(f"\nRun with {', '.join(hints)}.")
+            click.echo("  wikiloom query --save-last              # save this answer as a wiki synthesis page")
 
 
 def _save_query_as_page(data: dict, project: Path) -> None:

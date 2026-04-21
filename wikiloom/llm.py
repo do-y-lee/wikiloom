@@ -170,15 +170,24 @@ class LLMClient:
     """Provider-agnostic LLM client backed by litellm.
 
     Constructed with a full ``Config`` so per-component settings
-    (``llm.model``, ``llm.max_tokens_per_operation``) are available
-    without the caller plumbing them through. Holds no network state
-    — each method call is an independent ``litellm.completion`` with
-    its own retries governed by litellm's own defaults.
+    (``llm.default_model``, ``llm.max_tokens_per_operation``) are
+    available without the caller plumbing them through. Holds no
+    network state — each method call is an independent
+    ``litellm.completion`` with its own retries governed by litellm's
+    own defaults.
     """
 
-    def __init__(self, config: Config | LLMConfig):
+    def __init__(
+        self,
+        config: Config | LLMConfig,
+        model: str | None = None,
+    ):
+        """``model`` overrides ``config.llm.default_model`` when
+        provided — used by ingest/query to pick their per-command model
+        without mutating the shared config.
+        """
         llm_cfg = config.llm if isinstance(config, Config) else config
-        self.model: str = llm_cfg.model
+        self.model: str = model or llm_cfg.default_model
         self.max_tokens: int = llm_cfg.max_tokens_per_operation
 
     # ------------------------------------------------------------------

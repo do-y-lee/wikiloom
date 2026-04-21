@@ -160,36 +160,49 @@ def test_ingest_regenerates_index_files(
     assert "Concepts Index" in concepts_index.read_text()
 
 
-def test_ingest_produces_single_ingest_commit(
+def test_ingest_produces_two_ingest_commits(
     project: Path, sample_markdown: Path, mock_llm: MagicMock
 ) -> None:
+    """An ingest lands as a pair of commits: the data commit
+    (pages/backlinks/indexes/raw) and a small tail commit that
+    folds in ``wiki/log.md`` and ``_registry/sources.json`` so the
+    working tree is never left dirty.
+    """
     repo = git.Repo(project)
     commits_before = len(list(repo.iter_commits()))
 
     ingest(sample_markdown, project_root=project)
 
     commits_after = len(list(repo.iter_commits()))
-    assert commits_after == commits_before + 1
+    assert commits_after == commits_before + 2
 
     head = repo.head.commit
-    assert head.message.startswith("ingest: sample.md")
+    prev = head.parents[0]
+    assert head.message.startswith("ingest: log + catalog for sample.md")
+    assert prev.message.startswith("ingest: sample.md")
 
 
 def test_ingest_commit_includes_backlinks_and_indexes(
     project: Path, sample_markdown: Path, mock_llm: MagicMock
 ) -> None:
-    """The ingest commit should be atomic: raw copy + backlinks + indexes
-    all land in one commit so history reflects a coherent state."""
+    """The ingest data commit should be atomic: raw copy + backlinks +
+    indexes all land in HEAD~1 (the data commit); HEAD carries the
+    log + catalog tail so the working tree stays clean.
+    """
     repo = git.Repo(project)
     ingest(sample_markdown, project_root=project)
 
-    head = repo.head.commit
-    # Diff the ingest commit against its parent — every touched file in
-    # this run should appear in the delta.
-    changed = {item.a_path or item.b_path for item in head.diff(head.parents[0])}
+    data_commit = repo.head.commit.parents[0]
+    changed = {
+        item.a_path or item.b_path
+        for item in data_commit.diff(data_commit.parents[0])
+    }
     assert any("raw/articles/sample.md" in p for p in changed)
     assert any("_registry/backlinks.json" in p for p in changed)
     assert any("wiki/index.md" == p for p in changed)
+
+    # Working tree is clean immediately after ingest — no residual dirt.
+    assert repo.is_dirty(untracked_files=True) is False
 
 
 def test_ingest_is_reentrant_on_identical_source(
@@ -288,10 +301,14 @@ def test_ingest_with_synthesis_writes_pages_end_to_end(
     assert "concepts/topic-x" in result.pages_created
     assert "entities/org-y" in result.pages_created
 
-    # Single atomic commit includes every synthesized page
+    # Data commit (HEAD~1) includes every synthesized page; HEAD is the
+    # log + catalog tail commit.
     repo = git.Repo(project)
-    head = repo.head.commit
-    changed = {item.a_path or item.b_path for item in head.diff(head.parents[0])}
+    data_commit = repo.head.commit.parents[0]
+    changed = {
+        item.a_path or item.b_path
+        for item in data_commit.diff(data_commit.parents[0])
+    }
     assert "wiki/concepts/topic-x.md" in changed
     assert "wiki/entities/org-y.md" in changed
     assert "wiki/sources/sample.md" in changed

@@ -238,3 +238,32 @@ def test_cost_handles_zero_cost_events(project: Path) -> None:
     events = parse_log(project / "wiki" / "log.md")
     total_cost = sum(float(e.get("cost_usd", 0.0)) for e in events)
     assert total_cost == pytest.approx(0.05)
+
+
+def test_post_flight_budget_warning_reads_dict_events(
+    project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Regression: parse_log returns dicts, not objects. The post-flight
+    warning once used attribute access (``e.cost_usd``) and crashed
+    right after a successful ingest.
+    """
+    import tomli_w
+
+    from wikiloom.cli import _post_flight_budget_warning
+
+    # Set an unreachably low budget so the warning fires.
+    toml_path = project / "wikiloom.toml"
+    import tomllib
+
+    with toml_path.open("rb") as f:
+        cfg = tomllib.load(f)
+    cfg.setdefault("llm", {})["monthly_budget_usd"] = 0.01
+    toml_path.write_bytes(tomli_w.dumps(cfg).encode())
+
+    _emit_event(project, EventType.INGEST, "p.pdf", tokens_used=100, cost_usd=0.50)
+
+    _post_flight_budget_warning(project)  # must not raise
+
+    captured = capsys.readouterr()
+    assert "Budget warning" in captured.err
+    assert "0.50" in captured.err

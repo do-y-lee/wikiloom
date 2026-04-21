@@ -171,7 +171,7 @@ def _preflight_budget_check(
         return
     tokens_in = sum(max(1, c.token_estimate) for c in chunks)
     tokens_out = max(1, tokens_in // 2)
-    estimated = estimate_cost(tokens_in, tokens_out, cfg.llm.model)
+    estimated = estimate_cost(tokens_in, tokens_out, cfg.llm.for_ingest())
     if estimated > cfg.llm.monthly_budget_usd:
         raise BudgetExceededError(
             estimated_usd=estimated,
@@ -329,14 +329,15 @@ def ingest(
             # reused in step 10b for manifest sync — the page writer
             # mutates it in-place as pages are registered.
             registry = Registry(registry_dir)
-            llm_client = LLMClient(full_cfg)
+            ingest_model = full_cfg.llm.for_ingest()
+            llm_client = LLMClient(full_cfg, model=ingest_model)
 
             def _on_chunk_done(n: int, total: int, tokens: int, cost: float) -> None:
                 click.echo(
                     f"  chunk {n}/{total}: {tokens} tokens, ${cost:.4f}"
                 )
 
-            click.echo(f"Synthesizing {len(chunks)} chunk(s) via {full_cfg.llm.model}...")
+            click.echo(f"Synthesizing {len(chunks)} chunk(s) via {ingest_model}...")
             effective_page_context = (
                 full_cfg.ingest.use_page_context
                 if use_page_context is None
@@ -563,6 +564,24 @@ def ingest(
         # behind for the next run to inspect.
         if ingest_state is not None:
             ingest_state.clear()
+
+        # 16. Commit the post-commit tail (log.md + sources.json). These
+        # were written *after* step 11's ingest commit so the log event
+        # could carry that commit's hash. Leaving them uncommitted makes
+        # the working tree look dirty after every successful ingest, so
+        # we land them in a small follow-up commit under the same
+        # ``ingest:`` prefix. ``commit()`` no-ops if nothing changed.
+        tail_files: list[Path] = []
+        if log_path.parent.exists() and log_path.exists():
+            tail_files.append(log_path)
+        sources_path = registry_dir / "sources.json"
+        if sources_path.exists():
+            tail_files.append(sources_path)
+        if tail_files:
+            git_ops.commit(
+                tail_files,
+                f"ingest: log + catalog for {source_path.name}",
+            )
 
         return result
 

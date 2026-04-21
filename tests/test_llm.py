@@ -83,7 +83,7 @@ def config() -> Config:
     cfg = Config()
     cfg.llm = LLMConfig(
         provider="anthropic",
-        model="claude-sonnet-4-20250514",
+        default_model="claude-sonnet-4-20250514",
         max_tokens_per_operation=4000,
     )
     return cfg
@@ -149,7 +149,7 @@ def test_client_from_config(config: Config) -> None:
 
 def test_client_from_llm_config_directly() -> None:
     """Accepts a bare LLMConfig too, not just a full Config."""
-    llm_cfg = LLMConfig(model="foo-model", max_tokens_per_operation=1234)
+    llm_cfg = LLMConfig(default_model="foo-model", max_tokens_per_operation=1234)
     client = LLMClient(llm_cfg)
     assert client.model == "foo-model"
     assert client.max_tokens == 1234

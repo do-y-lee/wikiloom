@@ -35,9 +35,21 @@ class ProjectConfig:
 @dataclass
 class LLMConfig:
     provider: str = "anthropic"
-    model: str = "claude-sonnet-4-6"
+    # Default model used by any LLM-backed command that doesn't have
+    # its own override. Per-command overrides below stay empty unless
+    # the user explicitly wants a split setup (cheap model for ingest,
+    # stronger model for query).
+    default_model: str = "claude-sonnet-4-6"
+    ingest_model: str = ""
+    query_model: str = ""
     max_tokens_per_operation: int = 8000
     monthly_budget_usd: float = 50.0
+
+    def for_ingest(self) -> str:
+        return self.ingest_model or self.default_model
+
+    def for_query(self) -> str:
+        return self.query_model or self.default_model
 
 
 @dataclass

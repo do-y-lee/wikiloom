@@ -34,7 +34,7 @@ def live_client() -> LLMClient:
     cfg = Config()
     cfg.llm = LLMConfig(
         provider="anthropic",
-        model="claude-sonnet-4-20250514",
+        default_model="claude-sonnet-4-20250514",
         max_tokens_per_operation=400,
     )
     return LLMClient(cfg)

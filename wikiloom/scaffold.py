@@ -169,7 +169,14 @@ schema_version = {SCHEMA_VERSION}
 
 [llm]
 provider = "{provider}"
-model = "{model}"
+# `default_model` is used by any LLM-backed command that doesn't
+# have a per-command override below. Common split setup: cheap
+# `ingest_model` for bulk synthesis, stronger `query_model` for
+# reasoning at question time. Leave the overrides empty to use
+# `default_model` for everything.
+default_model = "{model}"
+ingest_model = ""
+query_model = ""
 max_tokens_per_operation = 8000
 monthly_budget_usd = {DEFAULT_MONTHLY_BUDGET_USD}
 
