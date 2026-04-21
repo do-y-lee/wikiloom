@@ -151,6 +151,43 @@ def _is_plural_of(short: str, long: str) -> bool:
     return False
 
 
+def _tokens(slug: str) -> list[str]:
+    """Split a slug on hyphens into its word tokens."""
+    return [t for t in slug.split("-") if t]
+
+
+def _is_token_drop_variant(
+    short_tokens: list[str], long_tokens: list[str]
+) -> bool:
+    """True if ``long`` has exactly one extra token inserted anywhere.
+
+    In other words, ``short`` is a subsequence of ``long`` that
+    skips exactly one element. Catches cases like
+    ``zelle-transfer-limits`` vs ``zelle-daily-transfer-limits`` and
+    ``transaction-reconciliation`` vs
+    ``transaction-history-reconciliation`` — the shorter slug is the
+    more general concept, the longer slug adds a qualifying word
+    (``daily``, ``history``) that narrows it.
+    """
+    if len(long_tokens) != len(short_tokens) + 1:
+        return False
+    i = 0
+    for t in long_tokens:
+        if i < len(short_tokens) and short_tokens[i] == t:
+            i += 1
+    return i == len(short_tokens)
+
+
+def _hyphen_collapsed(slug: str) -> str:
+    """Slug with all hyphens removed, for matching hyphenation variants.
+
+    ``jp-morgan-chase`` and ``j-p-morgan-chase`` both collapse to
+    ``jpmorganchase``. Catches pairs where the same entity was
+    written with different hyphenation conventions.
+    """
+    return slug.replace("-", "")
+
+
 def suggest_winner(pair: DuplicatePair) -> WinnerSuggestion:
     """Pick a winner for ``pair`` using ordered heuristics.
 
@@ -161,13 +198,20 @@ def suggest_winner(pair: DuplicatePair) -> WinnerSuggestion:
     2. **Prefix relationship** — if one slug is a strict prefix of the
        other (e.g. ``account-linking`` vs ``account-linking-banking``),
        the shorter one wins as the more general/canonical concept.
-    3. **More inbound links** — the more-linked page wins as the more
+    3. **Hyphenation variant** — same slug with different hyphenation
+       (e.g. ``jp-morgan-chase`` vs ``j-p-morgan-chase``). The version
+       with fewer hyphen-separated tokens wins as the cleaner form.
+    4. **Token-drop variant** — one slug has exactly one extra qualifier
+       token (e.g. ``zelle-transfer-limits`` vs
+       ``zelle-daily-transfer-limits``). The shorter, more general one
+       wins.
+    5. **More inbound links** — the more-linked page wins as the more
        established concept in the graph.
-    4. **Older created date** — earlier creation wins as more
+    6. **Older created date** — earlier creation wins as more
        established. Useful tiebreaker.
-    5. **Alphabetical** — last resort to make the decision deterministic.
+    7. **Alphabetical** — last resort to make the decision deterministic.
 
-    ``is_safe_to_auto`` is True only when rule 1 or 2 fires AND the
+    ``is_safe_to_auto`` is True only when rules 1–4 fire AND the
     embedding similarity is ≥ 0.90. Other rules require human review
     because the pages may be related-but-distinct concepts.
     """
@@ -206,7 +250,62 @@ def suggest_winner(pair: DuplicatePair) -> WinnerSuggestion:
             is_safe_to_auto=pair.embedding_score >= 0.90,
         )
 
-    # Rule 3: more inbound links
+    # Rule 3: hyphenation variant — same letters, different hyphenation.
+    # Winner is the slug with fewer tokens (simpler form). Ties broken
+    # alphabetically to stay deterministic.
+    tokens_a = _tokens(slug_a)
+    tokens_b = _tokens(slug_b)
+    if (
+        slug_a != slug_b
+        and _hyphen_collapsed(slug_a) == _hyphen_collapsed(slug_b)
+    ):
+        if len(tokens_a) != len(tokens_b):
+            if len(tokens_a) < len(tokens_b):
+                return WinnerSuggestion(
+                    winner_page_id=pair.page_a,
+                    loser_page_id=pair.page_b,
+                    reason="hyphenation variant (fewer tokens)",
+                    is_safe_to_auto=pair.embedding_score >= 0.90,
+                )
+            return WinnerSuggestion(
+                winner_page_id=pair.page_b,
+                loser_page_id=pair.page_a,
+                reason="hyphenation variant (fewer tokens)",
+                is_safe_to_auto=pair.embedding_score >= 0.90,
+            )
+        # Same token count → deterministic alphabetical winner.
+        if pair.page_a < pair.page_b:
+            return WinnerSuggestion(
+                winner_page_id=pair.page_a,
+                loser_page_id=pair.page_b,
+                reason="hyphenation variant (alphabetical)",
+                is_safe_to_auto=pair.embedding_score >= 0.90,
+            )
+        return WinnerSuggestion(
+            winner_page_id=pair.page_b,
+            loser_page_id=pair.page_a,
+            reason="hyphenation variant (alphabetical)",
+            is_safe_to_auto=pair.embedding_score >= 0.90,
+        )
+
+    # Rule 4: token-drop variant — one slug has exactly one extra
+    # qualifier token. Shorter (more general) concept wins.
+    if _is_token_drop_variant(tokens_a, tokens_b):
+        return WinnerSuggestion(
+            winner_page_id=pair.page_a,
+            loser_page_id=pair.page_b,
+            reason="shorter slug drops one qualifier token",
+            is_safe_to_auto=pair.embedding_score >= 0.90,
+        )
+    if _is_token_drop_variant(tokens_b, tokens_a):
+        return WinnerSuggestion(
+            winner_page_id=pair.page_b,
+            loser_page_id=pair.page_a,
+            reason="shorter slug drops one qualifier token",
+            is_safe_to_auto=pair.embedding_score >= 0.90,
+        )
+
+    # Rule 5: more inbound links
     if pair.inbound_a != pair.inbound_b:
         if pair.inbound_a > pair.inbound_b:
             return WinnerSuggestion(

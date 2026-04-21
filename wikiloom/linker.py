@@ -11,7 +11,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from rapidfuzz import fuzz, process
 
@@ -187,16 +187,28 @@ class LinkingEngine:
             unresolved=result.unresolved,
         )
 
-    def link_all(self, pages: list[Path]) -> list[Path]:
+    def link_all(
+        self,
+        pages: list[Path],
+        progress: Callable[[int, int], None] | None = None,
+    ) -> list[Path]:
         """Run linking across multiple pages.
+
+        ``progress`` is optional and, when provided, is called as
+        ``progress(completed, total)`` after each page so callers
+        (typically the CLI) can emit incremental progress on large
+        wikis without every call site having to drive the loop itself.
 
         Returns the list of pages that actually got at least one link.
         """
         modified: list[Path] = []
-        for page in pages:
+        total = len(pages)
+        for i, page in enumerate(pages, start=1):
             r = self.link_page(page)
             if r.high_confidence_links + r.medium_confidence_links > 0:
                 modified.append(r.page)
+            if progress is not None:
+                progress(i, total)
         return modified
 
     # ------------------------------------------------------------------

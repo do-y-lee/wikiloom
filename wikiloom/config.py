@@ -121,6 +121,23 @@ class IngestConfig:
     Prompt caching (enabled automatically for Anthropic) reduces ITPM
     pressure since cache reads don't count toward the limit, so
     effective headroom is larger than the raw number suggests.
+
+    ``post_merge`` controls whether a post-ingest auto-merge pass runs
+    against pairs touched by the ingest:
+
+    - ``"off"`` (default) — no post-ingest merge pass.
+    - ``"preview"`` — list pairs that would auto-merge, do not apply.
+    - ``"safe"`` — apply merges flagged ``is_safe_to_auto`` by
+      ``suggest_winner`` (plural, prefix, hyphenation, token-drop
+      rules). Produces a separate commit after the ingest commit so
+      ``git revert`` can undo the merge batch without touching the
+      ingest itself.
+
+    ``auto_relink`` runs ``wikiloom relink`` after a successful
+    post-ingest merge (only when at least one merge actually applied)
+    so pages that gained aliases from merged losers pick up new
+    inbound links. Ignored when ``post_merge`` is ``"off"`` or
+    ``"preview"``, or when no merges happened.
     """
 
     max_file_size_mb: int = 50
@@ -129,6 +146,8 @@ class IngestConfig:
     use_page_context: bool = True
     page_context_top_k: int = 10
     max_workers: int = 2
+    post_merge: str = "off"
+    auto_relink: bool = True
 
 
 @dataclass

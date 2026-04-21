@@ -9,6 +9,7 @@ from __future__ import annotations
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import click
 
@@ -590,7 +591,178 @@ def ingest(
                 f"ingest: log + catalog for {source_path.name}",
             )
 
+        # 17. Post-ingest auto-merge (opt-in). Runs after the tail
+        # commit so merges land in their own follow-up commit that
+        # ``git revert`` can undo selectively. Scoped to pages this
+        # ingest created or updated so we never merge far-field pairs
+        # the user may not want touched.
+        if full_cfg.ingest.post_merge != "off" and (
+            result.pages_created or result.pages_updated
+        ):
+            _run_post_ingest_merge(
+                project_root=project_root,
+                full_cfg=full_cfg,
+                result=result,
+                git_ops=git_ops,
+            )
+
         return result
+
+
+def _run_post_ingest_merge(
+    *,
+    project_root: Path,
+    full_cfg: Config,
+    result: IngestResult,
+    git_ops: GitOps,
+) -> None:
+    """Post-ingest merge pass (preview or safe mode).
+
+    Scoped to pairs where at least one side is in this ingest's
+    ``pages_created`` or ``pages_updated`` — avoids touching far-field
+    pairs the user may have intentionally kept distinct. In preview
+    mode, candidates are listed and the function returns. In safe
+    mode, candidates are merged in a single batched commit, and if
+    ``auto_relink`` is enabled and any merges applied, a follow-up
+    relink pass runs so winners pick up new inbound links from any
+    newly-unified aliases.
+    """
+    from wikiloom.duplicates import find_duplicates, suggest_winner
+
+    touched = set(result.pages_created) | set(result.pages_updated)
+    all_pairs = find_duplicates(project_root)
+    scoped = [
+        p for p in all_pairs if p.page_a in touched or p.page_b in touched
+    ]
+    plan: list[tuple[Any, Any]] = []
+    for pair in scoped:
+        sug = suggest_winner(pair)
+        if sug.is_safe_to_auto:
+            plan.append((pair, sug))
+
+    if not plan:
+        return
+
+    mode = full_cfg.ingest.post_merge
+    click.echo(f"\nPost-ingest merge candidates ({len(plan)} pair(s)):")
+    for pair, sug in plan:
+        emb = (
+            f"{pair.embedding_score:.2f}"
+            if pair.embedding_score >= 0
+            else "n/a"
+        )
+        click.echo(
+            f"  {sug.loser_page_id}  →  {sug.winner_page_id}  "
+            f"(slug {pair.slug_score:.0f}%, emb {emb}, {sug.reason})"
+        )
+
+    if mode == "preview":
+        click.echo(
+            'Preview mode. Set ingest.post_merge = "safe" in wikiloom.toml '
+            "to auto-merge these."
+        )
+        return
+
+    from wikiloom.merge import merge_pages
+
+    applied: list[tuple[str, str]] = []
+    for pair, sug in plan:
+        try:
+            merge_pages(project_root, sug.winner_page_id, sug.loser_page_id)
+            applied.append((sug.winner_page_id, sug.loser_page_id))
+        except ValueError as exc:
+            click.echo(f"  ✗ skipped {sug.loser_page_id}: {exc}")
+
+    if not applied:
+        return
+
+    # One cache sync + one commit for the whole batch.
+    registry_dir = project_root / "_registry"
+    from wikiloom.cache import SQLiteCache
+    from wikiloom.embeddings import load_embedder
+
+    SQLiteCache(registry_dir / "wiki.db").sync_from_files(
+        project_root, embedder=load_embedder(project_root)
+    )
+
+    body = "\n".join(f"  {loser} → {winner}" for winner, loser in applied)
+    message = (
+        f"merge: post-ingest auto-merged {len(applied)} pair(s)\n\n{body}"
+    )
+    for scope in ("wiki", "_registry"):
+        if (project_root / scope).exists():
+            git_ops.repo.git.add("-A", "--", scope)
+    git_ops.commit([], message)
+
+    click.echo(f"Merged {len(applied)} pair(s).")
+
+    if full_cfg.ingest.auto_relink:
+        _run_post_merge_relink(project_root, full_cfg, git_ops)
+
+
+def _run_post_merge_relink(
+    project_root: Path, full_cfg: Config, git_ops: GitOps
+) -> None:
+    """Full-wiki relink after post-ingest merges.
+
+    Merges can add aliases to winners (from losers' titles), and
+    other pages may now match those aliases. A relink re-scans
+    everything so the freshly-unified aliases produce new inbound
+    links where appropriate. Runs a single follow-up commit only if
+    any pages actually gained links.
+    """
+    import time as _time
+
+    from wikiloom.linker import LinkingEngine
+
+    wiki_dir = project_root / "wiki"
+    all_pages = sorted(
+        p for p in wiki_dir.rglob("*.md")
+        if p.name != "index.md"
+        and p.name != "log.md"
+        and "archive" not in p.parts
+    )
+    if not all_pages:
+        return
+
+    total = len(all_pages)
+    click.echo(f"Re-linking {total} page(s)...")
+    start = _time.monotonic()
+    step = max(25, max(1, total // 10))
+
+    def _progress(done: int, total_inner: int) -> None:
+        if done == total_inner or done % step == 0:
+            click.echo(f"  {done}/{total_inner} pages linked...")
+
+    registry = Registry(project_root / "_registry")
+    linker = LinkingEngine(registry, config=full_cfg.linking)
+    linked = linker.link_all(all_pages, progress=_progress)
+
+    backlinks = BacklinkRegistry(project_root / "_registry")
+    backlinks.rebuild()
+    backlinks.save()
+    IndexUpdater(wiki_dir, registry=registry).rebuild_all()
+
+    from wikiloom.cache import SQLiteCache
+    from wikiloom.embeddings import load_embedder
+
+    SQLiteCache(project_root / "_registry" / "wiki.db").sync_from_files(
+        project_root, embedder=load_embedder(project_root)
+    )
+
+    elapsed = _time.monotonic() - start
+    click.echo(
+        f"Re-linked {total} page(s) in {elapsed:.1f}s "
+        f"({len(linked)} updated). Backlinks rebuilt."
+    )
+
+    if linked:
+        for scope in ("wiki", "_registry"):
+            if (project_root / scope).exists():
+                git_ops.repo.git.add("-A", "--", scope)
+        git_ops.commit(
+            [], f"relink: updated wikilinks across {len(linked)} page(s)"
+        )
 
 
 def _already_ingested_result(

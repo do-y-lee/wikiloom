@@ -647,12 +647,24 @@ def relink(project: Path | None) -> None:
         return
 
     _require_clean_tree(project, "relink")
-    click.echo(f"Re-linking {len(all_pages)} page(s)...")
+    total_pages = len(all_pages)
+    click.echo(f"Re-linking {total_pages} page(s)...")
+
+    import time as _time
+    start = _time.monotonic()
+    # Report every ~25 pages, or every 10% for smaller wikis, whichever
+    # is coarser. Avoids flooding output on small wikis while keeping
+    # reassurance visible on 500+ page wikis.
+    step = max(25, max(1, total_pages // 10))
+
+    def _progress(done: int, total: int) -> None:
+        if done == total or done % step == 0:
+            click.echo(f"  {done}/{total} pages linked...")
 
     with FileLock(project):
         registry = Registry(project / "_registry")
         linker = LinkingEngine(registry, config=linking_cfg)
-        linked = linker.link_all(all_pages)
+        linked = linker.link_all(all_pages, progress=_progress)
 
         # Rebuild backlinks after re-linking
         backlinks = BacklinkRegistry(project / "_registry")
@@ -670,8 +682,11 @@ def relink(project: Path | None) -> None:
                 f"updated wikilinks across {len(linked)} page(s)",
             )
 
-    click.echo(f"Linked {len(linked)} page(s) with new wikilinks.")
-    click.echo(f"Backlinks rebuilt.")
+    elapsed = _time.monotonic() - start
+    click.echo(
+        f"Re-linked {total_pages} page(s) in {elapsed:.1f}s "
+        f"({len(linked)} updated). Backlinks rebuilt."
+    )
 
 
 @main.command("query")
@@ -2033,6 +2048,26 @@ def duplicates(
     )
 
 
+def _finalize_batch_merge(
+    project: Path,
+    applied: list[tuple[str, str]],
+    commit_subject: str,
+) -> None:
+    """Run _sync_cache once and _auto_commit once for a batch of merges.
+
+    ``applied`` is the list of (winner, loser) pairs whose merges
+    succeeded on disk. The commit body lists every pair so
+    ``git log`` and ``git show`` can be used to audit or revert the
+    batch as a whole. No-ops when ``applied`` is empty.
+    """
+    if not applied:
+        return
+    _sync_cache(project)
+    body = "\n".join(f"  {loser} → {winner}" for winner, loser in applied)
+    description = f"{commit_subject}\n\n{body}"
+    _auto_commit(project, "merge", description)
+
+
 def _run_review_mode(project: Path, pairs: list) -> None:
     """Interactive walkthrough: prompt y/s/n/q for each pair."""
     from wikiloom.duplicates import suggest_winner
@@ -2042,47 +2077,51 @@ def _run_review_mode(project: Path, pairs: list) -> None:
     merged = 0
     skipped = 0
     total = len(pairs)
+    applied: list[tuple[str, str]] = []
     click.echo(f"Reviewing {total} suspected duplicate pair(s).")
     click.echo("For each pair: [y]es merge / [s]wap winner-loser / [n]o skip / [q]uit\n")
 
-    for i, pair in enumerate(pairs, start=1):
-        suggestion = suggest_winner(pair)
-        emb = f"{pair.embedding_score:.2f}" if pair.embedding_score >= 0 else "n/a"
-        click.echo(f"--- Pair {i}/{total} (slug {pair.slug_score:.0f}%, emb {emb})")
-        click.echo(f"  WINNER (kept):    {suggestion.winner_page_id}  ({pair.title_a if suggestion.winner_page_id == pair.page_a else pair.title_b})")
-        click.echo(f"  LOSER (archived): {suggestion.loser_page_id}  ({pair.title_b if suggestion.winner_page_id == pair.page_a else pair.title_a})")
-        click.echo(f"  reason: {suggestion.reason}")
+    with FileLock(project):
+        for i, pair in enumerate(pairs, start=1):
+            suggestion = suggest_winner(pair)
+            emb = f"{pair.embedding_score:.2f}" if pair.embedding_score >= 0 else "n/a"
+            click.echo(f"--- Pair {i}/{total} (slug {pair.slug_score:.0f}%, emb {emb})")
+            click.echo(f"  WINNER (kept):    {suggestion.winner_page_id}  ({pair.title_a if suggestion.winner_page_id == pair.page_a else pair.title_b})")
+            click.echo(f"  LOSER (archived): {suggestion.loser_page_id}  ({pair.title_b if suggestion.winner_page_id == pair.page_a else pair.title_a})")
+            click.echo(f"  reason: {suggestion.reason}")
 
-        choice = click.prompt(
-            "Action",
-            type=click.Choice(["y", "s", "n", "q"], case_sensitive=False),
-            default="n",
-            show_choices=True,
-            show_default=True,
-        ).lower()
+            choice = click.prompt(
+                "Action",
+                type=click.Choice(["y", "s", "n", "q"], case_sensitive=False),
+                default="n",
+                show_choices=True,
+                show_default=True,
+            ).lower()
 
-        if choice == "q":
-            click.echo("Quit.")
-            break
-        if choice == "n":
-            skipped += 1
-            continue
+            if choice == "q":
+                click.echo("Quit.")
+                break
+            if choice == "n":
+                skipped += 1
+                continue
 
-        winner = suggestion.winner_page_id
-        loser = suggestion.loser_page_id
-        if choice == "s":
-            winner, loser = loser, winner
+            winner = suggestion.winner_page_id
+            loser = suggestion.loser_page_id
+            if choice == "s":
+                winner, loser = loser, winner
 
-        try:
-            with FileLock(project):
+            try:
                 merge_pages(project, winner, loser)
-                _sync_cache(project)
-                _auto_commit(project, "merge", f"{loser} into {winner}")
-            click.echo(f"  ✓ merged {loser} → {winner}\n")
-            merged += 1
-        except ValueError as exc:
-            click.echo(f"  ✗ skipped: {exc}\n")
-            skipped += 1
+                applied.append((winner, loser))
+                click.echo(f"  ✓ merged {loser} → {winner}\n")
+                merged += 1
+            except ValueError as exc:
+                click.echo(f"  ✗ skipped: {exc}\n")
+                skipped += 1
+
+        _finalize_batch_merge(
+            project, applied, f"reviewed {len(applied)} pair(s)"
+        )
 
     click.echo(f"\nDone. Merged: {merged}, skipped: {skipped}.")
 
@@ -2135,26 +2174,26 @@ def _run_auto_merge_mode(project: Path, pairs: list, dry_run: bool) -> None:
 
     merged = 0
     skipped = 0
-    for pair, suggestion in safe_plan:
-        try:
-            with FileLock(project):
+    applied: list[tuple[str, str]] = []
+    with FileLock(project):
+        for pair, suggestion in safe_plan:
+            try:
                 merge_pages(
                     project,
                     suggestion.winner_page_id,
                     suggestion.loser_page_id,
                 )
-                _sync_cache(project)
-                _auto_commit(
-                    project,
-                    "merge",
-                    f"{suggestion.loser_page_id} into {suggestion.winner_page_id}",
+                applied.append(
+                    (suggestion.winner_page_id, suggestion.loser_page_id)
                 )
-            merged += 1
-        except ValueError as exc:
-            click.echo(
-                f"  ✗ {suggestion.loser_page_id}: {exc}"
-            )
-            skipped += 1
+                merged += 1
+            except ValueError as exc:
+                click.echo(f"  ✗ {suggestion.loser_page_id}: {exc}")
+                skipped += 1
+
+        _finalize_batch_merge(
+            project, applied, f"auto-merged {len(applied)} pair(s)"
+        )
 
     click.echo(f"\nDone. Merged: {merged}, skipped: {skipped}.")
 
