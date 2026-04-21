@@ -50,10 +50,24 @@ def project(tmp_path: Path) -> Path:
 
 
 def _write_toml_ingest_section(project: Path, body: str) -> None:
-    """Append an ``[ingest]`` section to the project's wikiloom.toml."""
+    """Replace the project's ``[ingest]`` section with a fresh one.
+
+    The scaffold writes a commented ``[ingest]`` section to surface the
+    knobs; tomllib rejects two ``[ingest]`` headers in the same file, so
+    this strips the scaffolded block before appending a fresh one.
+    """
     toml_path = project / "wikiloom.toml"
+    existing = toml_path.read_text()
+    # Drop any existing [ingest] block (to end of file — the scaffold
+    # emits it last, and test cases don't need to preserve it).
+    idx = existing.find("[ingest]")
+    if idx != -1:
+        # Also strip the preceding comment block if present, so the
+        # result stays tidy.
+        prefix = existing[:idx].rstrip()
+        existing = prefix + "\n"
     toml_path.write_text(
-        toml_path.read_text() + "\n[ingest]\n" + body + "\n",
+        existing + "\n[ingest]\n" + body + "\n",
         encoding="utf-8",
     )
 
@@ -299,10 +313,10 @@ def test_preflight_budget_check_disabled_by_config(
     toml.write_text(
         toml.read_text().replace(
             'monthly_budget_usd = 50.0', 'monthly_budget_usd = 0.00000001'
-        )
-        + "\n[ingest]\nenable_budget_check = false\n",
+        ),
         encoding="utf-8",
     )
+    _write_toml_ingest_section(project, "enable_budget_check = false")
 
     sample = tmp_path / "doc.md"
     sample.write_text("# Doc\n\nNormal content.\n")

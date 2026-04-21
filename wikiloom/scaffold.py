@@ -206,6 +206,35 @@ provider = "fastembed"
 # provider = "sentence-transformers"   # heavier install, no API key
 # model = ""                           # empty = provider default
 enabled = true
+
+[ingest]
+# Post-ingest auto-merge behavior — "off" | "preview" | "safe".
+# Start with "off" on a new project. Once you've done a few ingests,
+# flip to "preview" to see what would merge on your content. When the
+# candidate list looks right, flip to "safe" so merges happen
+# automatically after every ingest, in their own follow-up commit.
+post_merge = "off"
+
+# Run `wikiloom relink` after a post-ingest merge — but only when at
+# least one merge actually applied. Catches new inbound links that
+# winners gained aliases for. No cost if nothing merged.
+auto_relink = true
+
+# Parallel synthesis concurrency. 2 is safe on Anthropic Tier 1 (the
+# 10k OTPM Haiku output cap). Bump to 4–6 on Tier 2+ accounts. Set
+# to 1 to run strictly sequentially if you see 429 rate-limit errors.
+max_workers = 2
+
+# Use semantic retrieval to show the LLM the pages most similar to
+# each chunk, so it can prefer UPDATE over CREATE on overlapping
+# content. Set to false to fall back to the simpler "most-recently-
+# modified" snapshot — cheaper, less targeted.
+use_page_context = true
+
+# How many similar pages to inject per chunk when use_page_context is
+# true. Raise to 20–25 on wikis with lots of topically similar pages
+# if you're still seeing duplicates. Lower to 5 to save tokens.
+page_context_top_k = 10
 """
 
 
