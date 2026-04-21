@@ -284,6 +284,7 @@ wikiloom cost                # token + spend breakdown
 wikiloom save                # commit your manual edits
 wikiloom review              # review pending link candidates
 wikiloom --help              # full command list
+wikiloom <cmd> --help        # flags for a specific command (e.g. wikiloom query --help)
 ```
 
 ## Editing workflow

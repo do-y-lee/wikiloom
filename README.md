@@ -184,7 +184,9 @@ Disable with `[ingest] enable_budget_check = false`.
 
 ## Commands
 
-23 commands grouped by purpose. All commands accept `--project <path>` (defaults to walking upward from the current directory to find `wikiloom.toml`).
+25 commands grouped by purpose. All commands accept `--project <path>` (defaults to walking upward from the current directory to find `wikiloom.toml`).
+
+Run `wikiloom --help` for the command list and `wikiloom <command> --help` for a specific command's flags (e.g. `wikiloom query --help`, `wikiloom ingest --help`).
 
 ### Project lifecycle
 
