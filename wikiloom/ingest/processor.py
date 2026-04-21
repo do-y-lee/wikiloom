@@ -738,8 +738,15 @@ def _run_post_ingest_merge(
     from wikiloom.cache import SQLiteCache
     from wikiloom.embeddings import load_embedder
 
+    wiki_dir = project_root / "wiki"
+    touched_paths: list[Path] = []
+    for winner, loser in applied:
+        touched_paths.append(wiki_dir / f"{winner}.md")
+        touched_paths.append(wiki_dir / f"{loser}.md")
     SQLiteCache(registry_dir / "wiki.db").sync_from_files(
-        project_root, embedder=load_embedder(project_root)
+        project_root,
+        changed_files=touched_paths,
+        embedder=load_embedder(project_root),
     )
 
     body = "\n".join(f"  {loser} → {winner}" for winner, loser in applied)

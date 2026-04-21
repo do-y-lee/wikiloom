@@ -10,7 +10,7 @@ from __future__ import annotations
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from wikiloom.backlinks import BacklinkRegistry
 from wikiloom.registry import Registry
@@ -156,6 +156,7 @@ class SQLiteCache:
         self,
         project_root: Path,
         embedder: Any | None = None,
+        progress: Callable[[int, int], None] | None = None,
     ) -> int:
         """Wipe and repopulate every table from on-disk state.
 
@@ -164,6 +165,11 @@ class SQLiteCache:
         and stores embeddings for each page (title + summary + body).
         Returns the number of pages loaded. Callers should hold the
         project FileLock.
+
+        ``progress`` is optional; when provided it is called as
+        ``progress(done, total)`` after each batch of embeddings so
+        the CLI can render incremental progress on large wikis. The
+        batch size is chosen internally — callers don't need to know.
         """
         project_root = Path(project_root)
         registry_dir = project_root / "_registry"
@@ -232,16 +238,29 @@ class SQLiteCache:
                 page_entries.append((page_id, entry, body_text, embed_text))
                 page_count += 1
 
-            # Batch-compute embeddings if an embedder was provided
+            # Batch-compute embeddings if an embedder was provided.
+            # Chunk into fixed-size groups so the progress callback
+            # can report incremental completion — embedders batch
+            # internally too, so this doesn't hurt throughput.
             embedding_blobs: list[bytes | None] = [None] * len(page_entries)
             if embedder is not None and page_entries:
                 from wikiloom.embeddings import serialize_embedding
+
+                batch_size = 32
                 try:
-                    texts = [e[3] for e in page_entries]
-                    vectors = embedder.embed_texts(texts)
-                    embedding_blobs = [
-                        serialize_embedding(v) for v in vectors
-                    ]
+                    total = len(page_entries)
+                    for start in range(0, total, batch_size):
+                        end = min(start + batch_size, total)
+                        batch_texts = [
+                            page_entries[i][3] for i in range(start, end)
+                        ]
+                        vectors = embedder.embed_texts(batch_texts)
+                        for offset, v in enumerate(vectors):
+                            embedding_blobs[start + offset] = (
+                                serialize_embedding(v)
+                            )
+                        if progress is not None:
+                            progress(end, total)
                 except Exception:
                     pass  # embedding failure is non-fatal; pages still get indexed
 
@@ -309,14 +328,177 @@ class SQLiteCache:
     ) -> None:
         """Refresh the cache after a write-side commit.
 
-        v1 delegates to ``full_rebuild`` — correct and cheap at current
-        scale. ``changed_files`` is accepted so callers don't need to
-        change when an incremental path lands later. ``embedder`` is
-        forwarded so auto-syncs preserve embeddings instead of wiping
-        them to NULL.
+        When ``changed_files`` is ``None``, falls back to a full
+        rebuild — the safe default for callers that don't know the
+        scope of their changes (e.g., ``wikiloom rebuild-cache``,
+        post-merge relink). When ``changed_files`` is a list of page
+        paths, only those rows are re-embedded and upserted; every
+        other row's embedding stays intact. An empty list is a
+        no-op.
+
+        ``embedder`` is forwarded so auto-syncs preserve embeddings
+        instead of wiping them to NULL. Non-page paths in
+        ``changed_files`` (e.g., ``_registry/manifest.json``) are
+        silently ignored — the backlinks table is always refreshed
+        from ``backlinks.json`` regardless, since that's cheap and
+        keeps graph queries correct after edits that rewrite edges.
         """
-        del changed_files  # unused in v1
-        self.full_rebuild(project_root, embedder=embedder)
+        if changed_files is None:
+            self.full_rebuild(project_root, embedder=embedder)
+            return
+        if not changed_files:
+            return
+        self._incremental_sync(
+            project_root, changed_files, embedder=embedder
+        )
+
+    def _incremental_sync(
+        self,
+        project_root: Path,
+        changed_files: list[Path],
+        embedder: Any | None = None,
+    ) -> None:
+        """Upsert only the rows for the given page files.
+
+        See ``sync_from_files`` for semantics. Keeps the page table
+        intact for every page not in ``changed_files`` so the 99%
+        of unchanged pages don't need re-embedding on a single-page
+        edit — the fix for the multi-second ``related``, ``merge``,
+        ``save`` tax on large wikis.
+        """
+        from wikiloom.frontmatter import read_page
+
+        project_root = Path(project_root)
+        registry_dir = project_root / "_registry"
+        wiki_dir = project_root / "wiki"
+
+        registry = Registry(registry_dir, wiki_dir=wiki_dir)
+        backlinks = BacklinkRegistry(registry_dir, wiki_dir=wiki_dir)
+
+        # Translate file paths → page_ids. Ignore non-page paths so
+        # callers can safely pass the whole staged list (manifest,
+        # backlinks.json, etc.) without special-casing.
+        changed_page_ids: list[str] = []
+        for raw_path in changed_files:
+            path = Path(raw_path)
+            try:
+                rel = path.relative_to(wiki_dir)
+            except ValueError:
+                continue
+            if rel.suffix != ".md":
+                continue
+            if rel.name in {"log.md", "index.md"}:
+                continue
+            changed_page_ids.append(str(rel.with_suffix("")))
+
+        # Split into rows we can refresh (file + manifest entry exist)
+        # vs rows we must drop (file gone and/or manifest entry gone —
+        # the deprecate/merge path lands here).
+        to_upsert: list[tuple[str, Any, str, str]] = []
+        to_delete: list[str] = []
+        for page_id in changed_page_ids:
+            entry = registry.pages.get(page_id)
+            page_path = wiki_dir / f"{page_id}.md"
+            if entry is None or not page_path.exists():
+                to_delete.append(page_id)
+                continue
+            _, body_text = read_page(page_path)
+            embed_text = f"{entry.title}\n{entry.summary or ''}\n{body_text}"
+            to_upsert.append((page_id, entry, body_text, embed_text))
+
+        # Batch-embed only the changed subset — this is where the
+        # incremental path earns back its cost over full_rebuild.
+        embedding_blobs: list[bytes | None] = [None] * len(to_upsert)
+        if embedder is not None and to_upsert:
+            from wikiloom.embeddings import serialize_embedding
+
+            try:
+                texts = [t[3] for t in to_upsert]
+                vectors = embedder.embed_texts(texts)
+                embedding_blobs = [
+                    serialize_embedding(v) for v in vectors
+                ]
+            except Exception:
+                pass  # embedding failure is non-fatal
+
+        with self._connect() as conn:
+            for page_id in to_delete:
+                conn.execute(
+                    "DELETE FROM pages WHERE page_id = ?", (page_id,)
+                )
+                conn.execute(
+                    "DELETE FROM aliases WHERE page_id = ?", (page_id,)
+                )
+                conn.execute(
+                    "DELETE FROM pages_fts WHERE page_id = ?", (page_id,)
+                )
+
+            for i, (page_id, entry, body_text, _) in enumerate(to_upsert):
+                conn.execute(
+                    "DELETE FROM pages WHERE page_id = ?", (page_id,)
+                )
+                conn.execute(
+                    "DELETE FROM aliases WHERE page_id = ?", (page_id,)
+                )
+                conn.execute(
+                    "DELETE FROM pages_fts WHERE page_id = ?", (page_id,)
+                )
+                conn.execute(
+                    """
+                    INSERT INTO pages (
+                        page_id, title, type, status, summary,
+                        created, modified, source_count,
+                        inbound_links, outbound_links,
+                        confidence, human_edited, content_hash,
+                        embedding
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        page_id,
+                        entry.title,
+                        entry.type,
+                        entry.status,
+                        entry.summary,
+                        entry.created,
+                        entry.modified,
+                        entry.source_count,
+                        entry.inbound_link_count,
+                        entry.outbound_link_count,
+                        entry.confidence,
+                        1 if entry.human_edited else 0,
+                        None,
+                        embedding_blobs[i],
+                    ),
+                )
+                conn.execute(
+                    "INSERT INTO pages_fts (page_id, title, summary, body) VALUES (?, ?, ?, ?)",
+                    (page_id, entry.title, entry.summary or "", body_text),
+                )
+                for alias in entry.aliases:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO aliases (alias, page_id) VALUES (?, ?)",
+                        (alias.lower(), page_id),
+                    )
+
+            # Refresh backlinks. Cheap — just a JSON read + row re-insert.
+            # Keeps graph-walking queries (backlinks, related, orphans)
+            # current after merge/rename/link edits.
+            conn.execute("DELETE FROM backlinks")
+            for edge in backlinks.edges:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO backlinks (
+                        source_page, target_page, context, confidence, linked_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        edge.source,
+                        edge.target,
+                        edge.context,
+                        edge.confidence,
+                        edge.linked_at,
+                    ),
+                )
 
     # ------------------------------------------------------------------
     # Reads

@@ -354,3 +354,140 @@ def test_sync_from_files_refreshes_after_manifest_change(project: Path) -> None:
     _add_page(project, "concepts/new", "New")
     cache.sync_from_files(project, [project / "wiki" / "concepts" / "new.md"])
     assert cache.get_stats()["total_pages"] == 1
+
+
+class _SpyEmbedder:
+    """Records which texts it embedded and returns a deterministic vector."""
+
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        self.calls.append(list(texts))
+        return [[float(len(t))] * 4 for t in texts]
+
+
+def test_incremental_sync_only_embeds_changed_pages(project: Path) -> None:
+    """Incremental sync must not re-embed the whole wiki on a single-page edit."""
+    cache = SQLiteCache(project / "_registry" / "wiki.db")
+    # Seed three pages with a full rebuild so they all start with embeddings.
+    for i in range(3):
+        _add_page(project, f"concepts/page-{i}", f"Page {i}")
+    seed_embedder = _SpyEmbedder()
+    cache.full_rebuild(project, embedder=seed_embedder)
+    assert cache.get_stats()["total_pages"] == 3
+    assert len(seed_embedder.calls[-1]) == 3  # all three embedded on rebuild
+
+    # Now change just one page's body and sync incrementally.
+    changed_path = _add_page(
+        project,
+        "concepts/page-1",
+        "Page 1 updated",
+        body="# Page 1\n\nFreshly edited body.\n",
+    )
+    embedder = _SpyEmbedder()
+    cache.sync_from_files(
+        project, changed_files=[changed_path], embedder=embedder
+    )
+
+    # Only the edited page should have been embedded, not all three.
+    assert len(embedder.calls) == 1
+    assert len(embedder.calls[0]) == 1
+
+    # The row exists with the new title.
+    row = cache.get_page("concepts/page-1")
+    assert row is not None
+    assert row["title"] == "Page 1 updated"
+
+
+def test_incremental_sync_leaves_unchanged_rows_embedding_intact(
+    project: Path,
+) -> None:
+    """Embeddings for pages not in changed_files must be preserved."""
+    cache = SQLiteCache(project / "_registry" / "wiki.db")
+    _add_page(project, "concepts/alpha", "Alpha")
+    _add_page(project, "concepts/beta", "Beta")
+    cache.full_rebuild(project, embedder=_SpyEmbedder())
+
+    # Capture the alpha row's embedding before the incremental sync.
+    conn = sqlite3.connect(str(project / "_registry" / "wiki.db"))
+    before = conn.execute(
+        "SELECT embedding FROM pages WHERE page_id = ?", ("concepts/alpha",)
+    ).fetchone()[0]
+    conn.close()
+
+    # Incremental sync that only touches beta.
+    beta_path = project / "wiki" / "concepts" / "beta.md"
+    cache.sync_from_files(
+        project, changed_files=[beta_path], embedder=_SpyEmbedder()
+    )
+
+    conn = sqlite3.connect(str(project / "_registry" / "wiki.db"))
+    after = conn.execute(
+        "SELECT embedding FROM pages WHERE page_id = ?", ("concepts/alpha",)
+    ).fetchone()[0]
+    conn.close()
+    assert before == after  # alpha's embedding untouched
+
+
+def test_incremental_sync_drops_row_for_missing_file(project: Path) -> None:
+    """A changed_files entry whose file no longer exists drops its row."""
+    cache = SQLiteCache(project / "_registry" / "wiki.db")
+    page_path = _add_page(project, "concepts/goner", "Goner")
+    cache.full_rebuild(project)
+    assert cache.get_page("concepts/goner") is not None
+
+    # Delete the file AND the manifest entry the way a purge would.
+    page_path.unlink()
+    registry = Registry(project / "_registry")
+    del registry._pages["concepts/goner"]  # noqa: SLF001
+    registry.save()
+
+    cache.sync_from_files(project, changed_files=[page_path])
+    assert cache.get_page("concepts/goner") is None
+
+
+def test_incremental_sync_empty_list_is_noop(project: Path) -> None:
+    """An empty changed_files must not touch the cache."""
+    cache = SQLiteCache(project / "_registry" / "wiki.db")
+    _add_page(project, "concepts/foo", "Foo")
+    cache.full_rebuild(project, embedder=_SpyEmbedder())
+
+    embedder = _SpyEmbedder()
+    cache.sync_from_files(project, changed_files=[], embedder=embedder)
+    # No embedding calls, no changes.
+    assert embedder.calls == []
+    assert cache.get_stats()["total_pages"] == 1
+
+
+def test_incremental_sync_ignores_non_page_paths(project: Path) -> None:
+    """Non-wiki paths in changed_files don't produce spurious deletes."""
+    cache = SQLiteCache(project / "_registry" / "wiki.db")
+    _add_page(project, "concepts/foo", "Foo")
+    cache.full_rebuild(project, embedder=_SpyEmbedder())
+
+    embedder = _SpyEmbedder()
+    # Pass paths outside wiki/ and non-.md files — both should be ignored.
+    cache.sync_from_files(
+        project,
+        changed_files=[
+            project / "_registry" / "manifest.json",
+            project / "wiki" / "log.md",
+        ],
+        embedder=embedder,
+    )
+    assert embedder.calls == []
+    assert cache.get_page("concepts/foo") is not None
+
+
+def test_none_changed_files_still_full_rebuilds(project: Path) -> None:
+    """Calling with changed_files=None must preserve the existing
+    full-rebuild fallback used by rebuild-cache and broad writers."""
+    cache = SQLiteCache(project / "_registry" / "wiki.db")
+    _add_page(project, "concepts/foo", "Foo")
+    _add_page(project, "concepts/bar", "Bar")
+    embedder = _SpyEmbedder()
+    cache.sync_from_files(project, changed_files=None, embedder=embedder)
+    # Full rebuild embeds every page.
+    assert len(embedder.calls) == 1
+    assert len(embedder.calls[0]) == 2

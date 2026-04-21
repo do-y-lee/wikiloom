@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Callable
 
 import click
 from dotenv import find_dotenv, load_dotenv
@@ -196,11 +197,20 @@ def _find_project_root(start: Path) -> Path | None:
     return None
 
 
-def _sync_cache(project: Path) -> None:
+def _sync_cache(
+    project: Path, changed_files: list[Path] | None = None
+) -> None:
     """Refresh the SQLite query cache (FTS + embeddings) from on-disk state.
 
     Every writer command calls this at the end so `wikiloom query` and
     `wikiloom related` see the new state without a manual rebuild-cache.
+
+    ``changed_files``, when known, restricts the re-embed to just
+    those page files — turning single-page writer commands from a
+    multi-second full-wiki rebuild into a sub-100ms upsert. Leave
+    as ``None`` when the change set is unknown or genuinely wiki-wide
+    (relink, merges that rewrite inbound links everywhere) — the
+    fallback is a full rebuild.
     """
     from wikiloom.cache import SQLiteCache
     from wikiloom.embeddings import load_embedder
@@ -209,7 +219,9 @@ def _sync_cache(project: Path) -> None:
     if not registry_dir.exists():
         return
     SQLiteCache(registry_dir / "wiki.db").sync_from_files(
-        project, embedder=load_embedder(project)
+        project,
+        changed_files=changed_files,
+        embedder=load_embedder(project),
     )
 
 
@@ -543,7 +555,13 @@ def protect(sync: bool, project: Path | None) -> None:
         with FileLock(project):
             drifted = pp.sync()
             if drifted:
-                _sync_cache(project)
+                wiki_dir = project / "wiki"
+                _sync_cache(
+                    project,
+                    changed_files=[
+                        wiki_dir / f"{d.page_id}.md" for d in drifted
+                    ],
+                )
                 _auto_commit(
                     project,
                     "protect",
@@ -908,7 +926,7 @@ def _save_query_as_page(data: dict, project: Path) -> None:
     )
     registry.register_page(page_id, entry)
     registry.save()
-    _sync_cache(project)
+    _sync_cache(project, changed_files=[page_path])
     title_snippet = question[:60]
     _auto_commit(project, "query", f'saved synthesis "{title_snippet}"')
 
@@ -1563,7 +1581,7 @@ def related(page_id: str, limit: int, save: bool, link: bool, project: Path | No
                 body += "\n".join(new_links) + "\n"
 
         write_page(page_path, fm, body)
-        _sync_cache(project)
+        _sync_cache(project, changed_files=[page_path])
         _auto_commit(
             project, "related", f"updated {page_id} with related pages"
         )
@@ -1837,7 +1855,7 @@ def _dormant_set_status(project: Path, page_id: str, mark: bool) -> None:
         entry.status = target_status
         registry.save()
 
-        _sync_cache(project)
+        _sync_cache(project, changed_files=[page_path])
         _auto_commit(project, "dormant", f"{verb} {page_id}")
 
     click.echo(f"{verb.capitalize()}ed {page_id}.")
@@ -1913,7 +1931,7 @@ def _dormant_review(project: Path) -> None:
             )
             entry.status = "dormant"
             registry.save()
-            _sync_cache(project)
+            _sync_cache(project, changed_files=[page_path])
             _auto_commit(project, "dormant", f"mark {candidate.page_id}")
         click.echo(f"  ✓ marked dormant\n")
         marked += 1
@@ -2059,10 +2077,20 @@ def _finalize_batch_merge(
     succeeded on disk. The commit body lists every pair so
     ``git log`` and ``git show`` can be used to audit or revert the
     batch as a whole. No-ops when ``applied`` is empty.
+
+    Passes only the winner/loser page paths to the cache sync so
+    the incremental path re-embeds just those rows. Losers are
+    handled via the "file gone" branch of the incremental sync —
+    their rows get dropped since the file has moved to archive/.
     """
     if not applied:
         return
-    _sync_cache(project)
+    wiki_dir = project / "wiki"
+    touched_paths: list[Path] = []
+    for winner, loser in applied:
+        touched_paths.append(wiki_dir / f"{winner}.md")
+        touched_paths.append(wiki_dir / f"{loser}.md")
+    _sync_cache(project, changed_files=touched_paths)
     body = "\n".join(f"  {loser} → {winner}" for winner, loser in applied)
     description = f"{commit_subject}\n\n{body}"
     _auto_commit(project, "merge", description)
@@ -2258,7 +2286,14 @@ def merge(winner: str, loser: str, yes: bool, project: Path | None) -> None:
     try:
         with FileLock(project):
             result = merge_pages(project, winner, loser)
-            _sync_cache(project)
+            wiki_dir = project / "wiki"
+            _sync_cache(
+                project,
+                changed_files=[
+                    wiki_dir / f"{winner}.md",
+                    wiki_dir / f"{loser}.md",
+                ],
+            )
             _auto_commit(
                 project,
                 "merge",
@@ -2356,6 +2391,7 @@ def deprecate(
             return
 
     with FileLock(project):
+        original_path = project / "wiki" / f"{page_id}.md"
         archive_path = registry.deprecate_page(
             page_id,
             superseded_by=superseded_by,
@@ -2363,7 +2399,13 @@ def deprecate(
             emit_event=True,
         )
         registry.save()
-        _sync_cache(project)
+        # Original path is gone (file moved) — incremental sync will
+        # drop the old row. The archive file is a new page_id so it
+        # gets upserted too.
+        touched = [original_path]
+        if archive_path is not None:
+            touched.append(archive_path)
+        _sync_cache(project, changed_files=touched)
         suffix = f" (superseded by {superseded_by})" if superseded_by else ""
         _auto_commit(project, "deprecate", f"{page_id}{suffix}")
 
@@ -2450,7 +2492,7 @@ def purge(page_id: str, yes: bool, project: Path | None) -> None:
         if page_id in registry._pages:  # noqa: SLF001
             del registry._pages[page_id]  # noqa: SLF001
             registry.save()
-        _sync_cache(project)
+        _sync_cache(project, changed_files=[archive_file])
         _auto_commit(project, "deprecate", f"purge {page_id}")
 
     click.echo(f"Purged {page_id}.")
@@ -2707,7 +2749,7 @@ def save(message: str | None, dry_run: bool, project: Path | None) -> None:
         # removed via their editor.
         git.repo.git.add("-A", "--", *[str(p) for p in dirty])
         git.commit([], commit_msg)
-        _sync_cache(project)
+        _sync_cache(project, changed_files=list(dirty))
 
     click.echo(f"Saved {len(dirty)} file(s).")
     if freshened:
@@ -2760,6 +2802,8 @@ def rebuild_cache(project: Path | None) -> None:
     The cache at ``_registry/wiki.db`` is a git-ignored derived index.
     Run this if it's missing, corrupt, or suspected to be out of sync.
     """
+    import time as _time
+
     from wikiloom.cache import SQLiteCache
     from wikiloom.embeddings import load_embedder
     from wikiloom.locking import FileLock
@@ -2772,17 +2816,42 @@ def rebuild_cache(project: Path | None) -> None:
             )
 
     embedder = load_embedder(project)
+
+    click.echo("Rebuilding cache...")
+    start = _time.monotonic()
+
+    progress_fn: Callable[[int, int], None] | None = None
     if embedder is not None:
+        click.echo("")
         click.echo("Computing embeddings...")
+        click.echo("")
+
+        def _progress(done: int, total: int) -> None:
+            step = max(32, max(1, total // 10))
+            if done == total or done % step == 0:
+                check = click.style("✓", fg="green")
+                click.echo(f"  {check} {done}/{total} pages embedded")
+
+        progress_fn = _progress
 
     with FileLock(project):
         cache = SQLiteCache(project / "_registry" / "wiki.db")
-        count = cache.full_rebuild(project, embedder=embedder)
+        count = cache.full_rebuild(
+            project, embedder=embedder, progress=progress_fn
+        )
     stats = cache.get_stats()
+
+    elapsed = _time.monotonic() - start
+    mins = int(elapsed // 60)
+    secs = int(elapsed % 60) if mins else 0
+    elapsed_fmt = f"{mins}m {secs}s" if mins else f"{elapsed:.1f}s"
+    sep = click.style("•", fg="bright_black")
+    done = click.style("Done.", fg="green", bold=True)
+    click.echo("")
     click.echo(
-        f"Cache rebuilt: {count} page(s), "
-        f"{stats['aliases']} alias(es), "
-        f"{stats['backlinks']} backlink(s)."
+        f"  {done} {count} pages  {sep}  "
+        f"{stats['aliases']} aliases  {sep}  "
+        f"{stats['backlinks']} backlinks  {sep}  {elapsed_fmt}"
     )
 
 
