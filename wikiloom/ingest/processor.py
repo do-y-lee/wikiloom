@@ -337,7 +337,13 @@ def ingest(
                     f"  chunk {n}/{total}: {tokens} tokens, ${cost:.4f}"
                 )
 
-            click.echo(f"Synthesizing {len(chunks)} chunk(s) via {ingest_model}...")
+            effective_workers = max(
+                1, min(full_cfg.ingest.max_workers, len(chunks))
+            )
+            click.echo(
+                f"Synthesizing {len(chunks)} chunk(s) via {ingest_model} "
+                f"(max_workers={effective_workers})..."
+            )
             effective_page_context = (
                 full_cfg.ingest.use_page_context
                 if use_page_context is None
@@ -358,6 +364,7 @@ def ingest(
                 use_page_context=effective_page_context,
                 page_context_top_k=full_cfg.ingest.page_context_top_k,
                 embedder=synthesis_embedder,
+                max_workers=full_cfg.ingest.max_workers,
             )
 
             result.total_tokens_in = synthesis.total_tokens_in

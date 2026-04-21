@@ -8,6 +8,7 @@ failures.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from importlib import resources as importlib_resources
 from pathlib import Path
@@ -15,7 +16,7 @@ from typing import Any, Callable
 
 from wikiloom.ingest.extractors.base import ExtractedContent
 from wikiloom.ingest.state import IngestState
-from wikiloom.llm import LLMClient
+from wikiloom.llm import LLMClient, SynthesizeResult
 from wikiloom.llm_errors import LLMProviderError, LLMResponseFormatError
 from wikiloom.registry import Registry
 
@@ -326,6 +327,59 @@ def _render_user_prompt(
     return "\n".join(parts)
 
 
+def _process_one_chunk(
+    *,
+    chunk: ExtractedContent,
+    chunk_id: str,
+    chunk_index: int,
+    chunk_total: int,
+    llm_client: LLMClient,
+    system_prompt: str,
+    fallback_manifest_context: str,
+    per_chunk_retrieval: bool,
+    project_root: Path,
+    embedder: Any | None,
+    page_context_top_k: int,
+) -> tuple[int, SynthesizeResult | None, Exception | None]:
+    """Worker body for a single chunk's synthesis call.
+
+    Runs in a ThreadPoolExecutor worker thread. Does prompt rendering
+    (including optional per-chunk retrieval) and the LLM call. Returns
+    errors rather than raising so the main thread can aggregate
+    results from every chunk deterministically without losing any to
+    an in-flight exception. The chunk_index is returned so the main
+    thread can sort results back into source order.
+    """
+    try:
+        if per_chunk_retrieval:
+            from wikiloom.page_context import (
+                render_candidates,
+                retrieve_candidates_for_chunk,
+            )
+
+            candidates = retrieve_candidates_for_chunk(
+                chunk_text=chunk.text,
+                project_root=project_root,
+                embedder=embedder,
+                top_k=page_context_top_k,
+            )
+            chunk_context = render_candidates(candidates)
+        else:
+            chunk_context = fallback_manifest_context
+
+        user_prompt = _render_user_prompt(
+            chunk_text=chunk.text,
+            chunk_id=chunk_id,
+            chunk_index=chunk_index,
+            chunk_total=chunk_total,
+            manifest_context=chunk_context,
+        )
+        llm_result = llm_client.synthesize(system_prompt, user_prompt)
+        return (chunk_index, llm_result, None)
+    except (LLMProviderError, LLMResponseFormatError) as exc:
+        return (chunk_index, None, exc)
+
+
 def run_synthesis(
     chunks: list[ExtractedContent],
     chunk_ids: list[str],
@@ -337,6 +391,7 @@ def run_synthesis(
     use_page_context: bool = True,
     page_context_top_k: int = 10,
     embedder: Any | None = None,
+    max_workers: int = 2,
 ) -> SynthesisResult:
     """Run LLM synthesis across every chunk and return aggregated results.
 
@@ -388,79 +443,109 @@ def run_synthesis(
     failed = 0
     notes: list[str] = []
     seen_slugs: set[tuple[str, str]] = set()
-    consecutive_provider_failures = 0
-    max_consecutive_failures = 3
 
+    # Circuit breaker: stop scheduling new work once this many provider
+    # errors have piled up. Cheaper than letting a dead provider burn
+    # through every chunk. With parallelism, "consecutive" no longer
+    # maps cleanly to wall-clock order, so we use a total-failure
+    # threshold instead — equivalent in intent, simpler in behavior.
+    max_provider_failures = 3
+
+    # Task inputs, indexed by chunk_index so the post-gather pass can
+    # walk results in source order regardless of completion order.
+    indexed_inputs: list[tuple[int, int, ExtractedContent, str]] = []
     for i, (chunk, chunk_id) in enumerate(zip(chunks, chunk_ids)):
-        chunk_index = int(chunk.metadata.get("chunk_index", i))
-        chunk_total = int(chunk.metadata.get("chunk_total", len(chunks)))
+        ci = int(chunk.metadata.get("chunk_index", i))
+        ct = int(chunk.metadata.get("chunk_total", len(chunks)))
+        indexed_inputs.append((ci, ct, chunk, chunk_id))
 
-        if per_chunk_retrieval:
-            from wikiloom.page_context import (
-                render_candidates,
-                retrieve_candidates_for_chunk,
-            )
+    results: dict[int, tuple[SynthesizeResult | None, Exception | None, str, int]] = {}
+    provider_failures = 0
+    abort_trigger: tuple[int, int, Exception] | None = None
+    completed_count = 0
+    effective_workers = max(1, min(max_workers, len(indexed_inputs)))
 
-            candidates = retrieve_candidates_for_chunk(
-                chunk_text=chunk.text,
+    with ThreadPoolExecutor(max_workers=effective_workers) as executor:
+        future_to_meta = {
+            executor.submit(
+                _process_one_chunk,
+                chunk=chunk,
+                chunk_id=chunk_id,
+                chunk_index=ci,
+                chunk_total=ct,
+                llm_client=llm_client,
+                system_prompt=system_prompt,
+                fallback_manifest_context=fallback_manifest_context,
+                per_chunk_retrieval=per_chunk_retrieval,
                 project_root=project_root,
                 embedder=embedder,
-                top_k=page_context_top_k,
-            )
-            chunk_context = render_candidates(candidates)
-        else:
-            chunk_context = fallback_manifest_context
+                page_context_top_k=page_context_top_k,
+            ): (ci, ct, chunk_id)
+            for (ci, ct, chunk, chunk_id) in indexed_inputs
+        }
 
-        user_prompt = _render_user_prompt(
-            chunk_text=chunk.text,
-            chunk_id=chunk_id,
-            chunk_index=chunk_index,
-            chunk_total=chunk_total,
-            manifest_context=chunk_context,
-        )
+        for future in as_completed(future_to_meta):
+            meta_ci, meta_ct, meta_chunk_id = future_to_meta[future]
+            try:
+                ci_returned, llm_result, err = future.result()
+            except Exception as exc:  # unexpected worker crash / cancellation
+                ci_returned, llm_result, err = meta_ci, None, exc
 
-        try:
-            llm_result = llm_client.synthesize(system_prompt, user_prompt)
-        except LLMProviderError as exc:
-            failed += 1
-            consecutive_provider_failures += 1
-            msg = f"chunk {chunk_index + 1}/{chunk_total}: {exc}"
-            notes.append(msg)
-            if state is not None:
-                state.mark_chunk_failed(chunk_index, str(exc))
-            if consecutive_provider_failures >= max_consecutive_failures:
-                notes.append(
-                    _format_abort_message(
-                        chunk_index=chunk_index,
-                        chunk_total=chunk_total,
-                        processed=processed,
-                        consecutive=consecutive_provider_failures,
-                        last_exc=exc,
-                    )
+            results[ci_returned] = (llm_result, err, meta_chunk_id, meta_ct)
+            completed_count += 1
+
+            # Live progress: fire callback as each future finishes, using
+            # the chunk's own (1-based) index and token/cost from its own
+            # metrics. Cadence matches the old sequential loop.
+            if progress_callback is not None and llm_result is not None:
+                chunk_total_tokens = (
+                    llm_result.metrics.tokens_in + llm_result.metrics.tokens_out
                 )
-                break
-            continue
-        except LLMResponseFormatError as exc:
-            failed += 1
-            consecutive_provider_failures += 1
-            msg = f"chunk {chunk_index + 1}/{chunk_total}: {exc}"
-            notes.append(msg)
-            if state is not None:
-                state.mark_chunk_failed(chunk_index, str(exc))
-            if consecutive_provider_failures >= max_consecutive_failures:
-                notes.append(
-                    _format_abort_message(
-                        chunk_index=chunk_index,
-                        chunk_total=chunk_total,
-                        processed=processed,
-                        consecutive=consecutive_provider_failures,
-                        last_exc=exc,
-                    )
+                progress_callback(
+                    ci_returned + 1,
+                    meta_ct,
+                    chunk_total_tokens,
+                    llm_result.metrics.cost_usd,
                 )
-                break
+
+            if isinstance(err, LLMProviderError):
+                provider_failures += 1
+                if (
+                    provider_failures >= max_provider_failures
+                    and abort_trigger is None
+                ):
+                    abort_trigger = (ci_returned, meta_ct, err)
+                    for f in future_to_meta:
+                        if not f.done():
+                            f.cancel()
+
+    # Post-gather: walk results in chunk_index order so seen_slugs
+    # dedup, state writes, and page-proposal ordering are deterministic
+    # regardless of which worker finished first.
+    for ci in sorted(results.keys()):
+        llm_result, err, chunk_id, ct = results[ci]
+
+        if isinstance(err, LLMProviderError) or isinstance(err, LLMResponseFormatError):
+            failed += 1
+            notes.append(f"chunk {ci + 1}/{ct}: {err}")
+            if state is not None:
+                state.mark_chunk_failed(ci, str(err))
             continue
 
-        consecutive_provider_failures = 0
+        if err is not None:
+            # Unexpected crash / cancellation — record and skip.
+            failed += 1
+            notes.append(f"chunk {ci + 1}/{ct}: unexpected worker error: {err}")
+            if state is not None:
+                state.mark_chunk_failed(ci, str(err))
+            continue
+
+        if llm_result is None:
+            failed += 1
+            notes.append(f"chunk {ci + 1}/{ct}: no result returned")
+            if state is not None:
+                state.mark_chunk_failed(ci, "no result returned")
+            continue
 
         total_in += llm_result.metrics.tokens_in
         total_out += llm_result.metrics.tokens_out
@@ -471,10 +556,10 @@ def run_synthesis(
             failed += 1
             short = "; ".join(validation_errors[:3])
             notes.append(
-                f"chunk {chunk_index + 1}/{chunk_total}: schema validation failed: {short}"
+                f"chunk {ci + 1}/{ct}: schema validation failed: {short}"
             )
             if state is not None:
-                state.mark_chunk_failed(chunk_index, short)
+                state.mark_chunk_failed(ci, short)
             continue
 
         data = llm_result.result
@@ -525,18 +610,19 @@ def run_synthesis(
 
         processed += 1
         if state is not None:
-            state.mark_chunk_done(chunk_index)
+            state.mark_chunk_done(ci)
 
-        if progress_callback is not None:
-            chunk_total_tokens = (
-                llm_result.metrics.tokens_in + llm_result.metrics.tokens_out
+    if abort_trigger is not None:
+        abort_ci, abort_ct, abort_exc = abort_trigger
+        notes.append(
+            _format_abort_message(
+                chunk_index=abort_ci,
+                chunk_total=abort_ct,
+                processed=processed,
+                consecutive=provider_failures,
+                last_exc=abort_exc,
             )
-            progress_callback(
-                chunk_index + 1,
-                chunk_total,
-                chunk_total_tokens,
-                llm_result.metrics.cost_usd,
-            )
+        )
 
     return SynthesisResult(
         source_summary=source_summary,

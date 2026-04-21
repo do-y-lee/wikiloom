@@ -192,8 +192,13 @@ def test_synthesize_sends_system_and_user_messages(
     _, kwargs = calls[0]
     msgs = kwargs["messages"]
     assert msgs[0]["role"] == "system"
-    assert msgs[0]["content"].startswith("SYS")
-    assert "JSON" in msgs[0]["content"]
+    # Anthropic path: system content is a structured list carrying a
+    # cache_control marker so the prompt cache kicks in across chunks.
+    assert isinstance(msgs[0]["content"], list)
+    assert msgs[0]["content"][0]["type"] == "text"
+    assert msgs[0]["content"][0]["text"].startswith("SYS")
+    assert "JSON" in msgs[0]["content"][0]["text"]
+    assert msgs[0]["content"][0]["cache_control"] == {"type": "ephemeral"}
     assert msgs[1] == {"role": "user", "content": "USER"}
     assert "response_format" not in kwargs
     assert kwargs["model"] == "claude-sonnet-4-20250514"

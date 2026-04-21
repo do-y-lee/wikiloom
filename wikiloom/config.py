@@ -18,6 +18,7 @@ class ConfigError(Exception):
     users see a friendly error instead of a tomllib stacktrace.
     """
 
+
 if sys.version_info >= (3, 11):
     import tomllib
 else:  # pragma: no cover - py3.10 fallback
@@ -104,6 +105,22 @@ class IngestConfig:
     CREATE when a chunk overlaps with existing content. Set to False
     to fall back to the simpler "most-recently-modified" snapshot.
     ``page_context_top_k`` caps how many retrieved pages are injected.
+
+    ``max_workers`` sets the concurrency of the synthesis loop. The
+    default of 2 is safe across most providers' entry tiers. Set to 1
+    to run strictly sequentially. Provider-specific guidance:
+
+    - Anthropic Tier 1 (Haiku): 2 is tight against the 10k OTPM cap.
+      Bump to 4–6 on Tier 2+.
+    - OpenAI Tier 1 (gpt-4o-mini / gpt-4o): headroom for 4+ on
+      gpt-4o-mini; gpt-4o is ITPM-bound on large chunks.
+    - Gemini free tier: keep at 1–2 (15 RPM ceiling). Paid tiers
+      handle 4–6 easily.
+    - Mistral / other low free tiers: start at 1 and tune up.
+
+    Prompt caching (enabled automatically for Anthropic) reduces ITPM
+    pressure since cache reads don't count toward the limit, so
+    effective headroom is larger than the raw number suggests.
     """
 
     max_file_size_mb: int = 50
@@ -111,6 +128,7 @@ class IngestConfig:
     enable_budget_check: bool = True
     use_page_context: bool = True
     page_context_top_k: int = 10
+    max_workers: int = 2
 
 
 @dataclass
@@ -162,19 +180,23 @@ class Config:
 
         cfg = cls(project_root=project_root)
         if "project" in data:
-            cfg.project = ProjectConfig(**_filter(ProjectConfig, data["project"]))
+            cfg.project = ProjectConfig(
+                **_filter(ProjectConfig, data["project"]))
         if "llm" in data:
             cfg.llm = LLMConfig(**_filter(LLMConfig, data["llm"]))
         if "linking" in data:
-            cfg.linking = LinkingConfig(**_filter(LinkingConfig, data["linking"]))
+            cfg.linking = LinkingConfig(
+                **_filter(LinkingConfig, data["linking"]))
         if "dormant" in data:
-            cfg.dormant = DormantConfig(**_filter(DormantConfig, data["dormant"]))
+            cfg.dormant = DormantConfig(
+                **_filter(DormantConfig, data["dormant"]))
         if "search" in data:
             cfg.search = SearchConfig(**_filter(SearchConfig, data["search"]))
         if "ingest" in data:
             cfg.ingest = IngestConfig(**_filter(IngestConfig, data["ingest"]))
         if "embeddings" in data:
-            cfg.embeddings = EmbeddingsConfig(**_filter(EmbeddingsConfig, data["embeddings"]))
+            cfg.embeddings = EmbeddingsConfig(
+                **_filter(EmbeddingsConfig, data["embeddings"]))
         return cfg
 
 
@@ -183,5 +205,6 @@ def _filter(cls: type, data: dict[str, Any]) -> dict[str, Any]:
 
     Lets the TOML have extra fields without crashing the loader.
     """
-    valid = {f.name for f in cls.__dataclass_fields__.values()}  # type: ignore[attr-defined]
+    valid = {f.name for f in cls.__dataclass_fields__.values()
+             }  # type: ignore[attr-defined]
     return {k: v for k, v in data.items() if k in valid}

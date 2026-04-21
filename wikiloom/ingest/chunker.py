@@ -17,7 +17,7 @@ from wikiloom.utils import estimate_tokens
 class BudgetPlan:
     """Token budget for an ingest operation.
 
-    Produced by the context budget manager (Component 14) ahead of chunking.
+    Produced by the context budget manager ahead of chunking.
     For now we use a simple structure with the two fields the chunker needs.
     """
 
@@ -43,7 +43,8 @@ class Chunker:
 
         # Strategy 2: PDF page boundaries
         if content.content_type == "pdf" and content.metadata.get("pages"):
-            page_groups = self._group_pages(content.metadata["pages"], max_tokens)
+            page_groups = self._group_pages(
+                content.metadata["pages"], max_tokens)
             if page_groups:
                 return self._to_chunks(page_groups, content)
 
@@ -116,7 +117,8 @@ class Chunker:
                         break
                     overlap_blocks.insert(0, b)
                 current_blocks = overlap_blocks
-                current_tokens = sum(estimate_tokens(b) for b in current_blocks)
+                current_tokens = sum(estimate_tokens(b)
+                                     for b in current_blocks)
             current_blocks.append(block)
             current_tokens += block_tokens
 
@@ -165,7 +167,7 @@ def plan_budget(
 ) -> BudgetPlan:
     """Produce a simple BudgetPlan for the given content.
 
-    This is a placeholder for the full Context Budget Manager (Component 14).
+    This is a placeholder for the full Context Budget Manager.
     It reserves space for the manifest and prompt overhead and decides
     whether the source needs chunking based on the remaining budget.
     """

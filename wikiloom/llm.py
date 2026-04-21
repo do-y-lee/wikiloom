@@ -66,6 +66,39 @@ def _is_quota_exhausted(exc: Exception) -> bool:
     return any(marker in msg for marker in _QUOTA_MARKERS)
 
 
+def _is_anthropic_model(model: str) -> bool:
+    """True if the model routes to Anthropic (and supports cache_control)."""
+    m = model.lower()
+    return m.startswith("anthropic/") or m.startswith("claude-") or "/claude-" in m
+
+
+def _system_prompt_messages(system_prompt: str, model: str) -> list[dict[str, Any]]:
+    """Build the system message, adding an Anthropic cache marker when safe.
+
+    For Anthropic models, send the system prompt as a structured content
+    list with ``cache_control={"type": "ephemeral"}`` so the 5-minute
+    prompt cache kicks in — subsequent calls within the window pay ~10%
+    of the input-token cost for this prefix (and cached reads don't
+    count against the input-tokens-per-minute rate limit). For other
+    providers, send a plain string — OpenAI caches automatically when
+    the prefix is stable, and providers without caching ignore it.
+    """
+    if _is_anthropic_model(model):
+        return [
+            {
+                "role": "system",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": system_prompt,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+            }
+        ]
+    return [{"role": "system", "content": system_prompt}]
+
+
 def _completion_with_retry(**completion_kwargs: Any) -> Any:
     """``litellm.completion`` wrapper with retry-with-backoff.
 
@@ -221,10 +254,9 @@ class LLMClient:
             "No markdown code fences, no explanation, no commentary. "
             "Just the JSON object."
         )
-        messages = [
-            {"role": "system", "content": system_prompt + json_instruction},
-            {"role": "user", "content": user_prompt},
-        ]
+        messages = _system_prompt_messages(
+            system_prompt + json_instruction, self.model
+        ) + [{"role": "user", "content": user_prompt}]
         try:
             response = _completion_with_retry(
                 model=self.model,
