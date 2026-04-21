@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 from importlib import resources as importlib_resources
 from pathlib import Path
 
@@ -289,16 +288,26 @@ wikiloom --help              # full command list
 
 ## Editing workflow
 
-Edit any page under `wiki/` in your editor, or tweak `wikiloom.toml`
-or the prompts under `.wikiloom/prompts/`. When done, run:
+**Rule of thumb:** edit *content* in your editor, but go through the
+CLI for anything that changes *structure*. WikiLoom keeps the
+manifest, backlinks, indexes, and cache in sync — direct file
+operations (renaming, deleting, moving pages) bypass that and leave
+the wiki in an inconsistent state.
 
-```
-wikiloom save
-```
+| Action                                | How                         |
+|---------------------------------------|-----------------------------|
+| Edit content (prose, typos, sections) | Edit file → `wikiloom save` |
+| Create a new page                     | Create file → `wikiloom save` + `wikiloom reindex` |
+| Delete / retire a page                | `wikiloom deprecate <page>` (never `rm`) |
+| Permanently remove archived pages     | `wikiloom purge`            |
+| Merge duplicate pages                 | `wikiloom merge`            |
+| Add a source document                 | `wikiloom ingest <file\\|url>` |
+| Rebuild wikilinks                     | `wikiloom relink`           |
+| Tweak config or prompts               | Edit file → `wikiloom save` |
 
-This commits your changes with a `human-edit:` prefix so auto-tools
-(`lint --fix`, re-ingest) leave them alone. Most wikiloom commands
-will also print a reminder if you have uncommitted edits.
+`wikiloom save` commits your manual changes with a `human-edit:`
+prefix so auto-tools (`lint --fix`, re-ingest) leave them alone. Most
+wikiloom commands will print a reminder if you have uncommitted edits.
 
 ## Configuration
 
