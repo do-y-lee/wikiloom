@@ -523,6 +523,17 @@ wikiloom relink                       # re-run linker across all pages
 
 ## Tips
 
+**Ask specific, well-scoped queries.** Retrieval is strongest when your
+question shares concrete terms with page content. "What's the overdraft
+fee cap?" pulls the right page cleanly; "tell me about banking" returns
+a noisy mix and comes back with `low` confidence. Before querying, skim
+`wiki/concepts/index.md` and `wiki/sources/index.md` to see what's
+actually covered — you'll write sharper questions and know when a gap
+is a real coverage issue vs. a retrieval miss. If confidence is `low`,
+run `--detail` to see which sources were consulted: tangential sources
+mean retrieval didn't find the right pages; relevant-but-thin sources
+mean the wiki genuinely doesn't cover the topic yet.
+
 **Use `wikiloom show` for inspection.** Faster than opening files:
 
 ```bash
