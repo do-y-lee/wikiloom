@@ -7,11 +7,38 @@ under FileLock in one atomic pipeline.
 from __future__ import annotations
 
 import shutil
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import click
+
+
+def _format_elapsed(seconds: float) -> str:
+    """Format a duration for the end-of-synthesis summary line.
+
+    Uses a compact ``Xm Ys`` form for >= 1 minute and plain
+    ``Ys`` otherwise — short enough to sit in a one-line summary
+    without dominating it.
+    """
+    if seconds >= 60:
+        mins = int(seconds // 60)
+        secs = int(seconds % 60)
+        return f"{mins}m {secs}s"
+    return f"{seconds:.1f}s"
+
+
+def _format_tokens(n: int) -> str:
+    """Human-readable token count. 1234 -> '1,234', 33800 -> '33.8k'."""
+    if n >= 1000:
+        return f"{n / 1000:.1f}k"
+    return f"{n:,}"
+
+
+def _dim(text: str) -> str:
+    """Gray/dim accent for separators and secondary info."""
+    return click.style(text, fg="bright_black")
 
 from wikiloom.backlinks import BacklinkRegistry
 from wikiloom.chunk_store import ChunkStore
@@ -250,14 +277,14 @@ def ingest(
         _guard_empty_extraction(content, ingest_cfg)
 
         click.echo(
-            f"Extracted: {content.content_type} "
-            f"({content.token_estimate:,} tokens estimated)"
+            f"  {content.content_type}, "
+            f"{content.token_estimate:,} tokens estimated"
         )
 
         # 2. Copy to raw/
         raw_path = copy_to_raw(source_path, content, project_root)
         if raw_path is not None:
-            click.echo(f"Copied to: {raw_path.relative_to(project_root)}")
+            click.echo(f"  {raw_path.relative_to(project_root)}")
 
         # 3. Plan budget
         budget = plan_budget(content, max_tokens_per_operation)
@@ -267,7 +294,7 @@ def ingest(
             chunks = Chunker().split(content, budget)
         else:
             chunks = [content]
-        click.echo(f"Chunks: {len(chunks)}")
+        click.echo(f"  {len(chunks)} chunk(s)")
 
         # 4b. Write the resume checkpoint. Records the chunk plan so a
         # crash mid-synthesis (once Component 20 lands) can pick up
@@ -316,12 +343,11 @@ def ingest(
 
             # 5a. Pre-flight budget check — refuse before the LLM loop
             # if the estimated cost would breach the monthly budget.
-            click.echo("Running budget pre-flight check...")
+            # Silent on the happy path; raises if the estimate exceeds.
             _preflight_budget_check(chunks, full_cfg)
 
             # 5b. Persist chunks so their text is queryable via
             # `wikiloom source <chunk_id>` after the ingest commits.
-            click.echo("Persisting chunks...")
             chunk_store = ChunkStore(registry_dir / "wiki.db")
             stored_chunks = chunk_store.persist_chunks(content_hash, chunks)
             chunk_ids = [s.chunk_id for s in stored_chunks]
@@ -333,18 +359,25 @@ def ingest(
             ingest_model = full_cfg.llm.for_ingest()
             llm_client = LLMClient(full_cfg, model=ingest_model)
 
+            check_mark = click.style("✓", fg="green")
+
             def _on_chunk_done(n: int, total: int, tokens: int, cost: float) -> None:
+                # Columns: ✓  N/TOTAL   NN,NNN tok   $0.0045
                 click.echo(
-                    f"  chunk {n}/{total}: {tokens} tokens, ${cost:.4f}"
+                    f"  {check_mark} {n}/{total}   "
+                    f"{tokens:,} tok   ${cost:.4f}"
                 )
 
             effective_workers = max(
                 1, min(full_cfg.ingest.max_workers, len(chunks))
             )
+            click.echo("")
             click.echo(
-                f"Synthesizing {len(chunks)} chunk(s) via {ingest_model} "
-                f"(max_workers={effective_workers})..."
+                f"Synthesizing via {click.style(ingest_model, fg='cyan')}  "
+                f"{_dim(f'(max_workers={effective_workers})')}"
             )
+            click.echo("")
+            _synth_start = time.monotonic()
             effective_page_context = (
                 full_cfg.ingest.use_page_context
                 if use_page_context is None
@@ -372,6 +405,20 @@ def ingest(
             result.total_tokens_out = synthesis.total_tokens_out
             result.total_cost_usd = synthesis.total_cost_usd
             result.notes.extend(synthesis.notes)
+
+            # End-of-synthesis summary: one line, totals rolled up.
+            _elapsed = _format_elapsed(time.monotonic() - _synth_start)
+            _total_tok = synthesis.total_tokens_in + synthesis.total_tokens_out
+            _sep = _dim("•")
+            _done = click.style("Done.", fg="green", bold=True)
+            click.echo("")
+            click.echo(
+                f"  {_done} {synthesis.chunks_processed}/{len(chunks)} chunks  "
+                f"{_sep}  {_format_tokens(_total_tok)} tok  "
+                f"{_sep}  ${synthesis.total_cost_usd:.3f}  "
+                f"{_sep}  {_elapsed}"
+            )
+            click.echo("")
 
             # 5d. Write pages. Builds a source_entry on the fly so the
             # writer can emit the source summary page even on the very
@@ -408,6 +455,10 @@ def ingest(
             synthesis_written = (
                 list(write_result.created_paths) + list(write_result.updated_paths)
             )
+            click.echo(
+                f"  {len(write_result.created_page_ids)} created, "
+                f"{len(write_result.updated_page_ids)} updated"
+            )
 
             # 6. Deterministic linking. Runs spaCy NER + rapidfuzz on
             # every just-written page, inserts [[wikilinks]], writes
@@ -417,13 +468,13 @@ def ingest(
             # rebuild. The linker modifies page files in-place — the
             # paths in synthesis_written are updated on disk.
             if synthesis_written:
-                click.echo("Linking pages...")
+                click.echo("")
+                click.echo("Linking...")
                 from wikiloom.linker import LinkingEngine
 
                 linker = LinkingEngine(registry, config=full_cfg.linking)
                 linked_pages = linker.link_all(synthesis_written)
-                if linked_pages:
-                    click.echo(f"Linked {len(linked_pages)} page(s)")
+                click.echo(f"  {len(linked_pages)} page(s) linked")
 
                 # Stubs created by the linker are new files that need
                 # to be staged in the commit. Scan the wiki dir for
@@ -477,6 +528,7 @@ def ingest(
 
         # 11. Git commit. Empty staging no-ops to HEAD so this is safe
         # when synthesis produced no pages (e.g., every chunk failed).
+        click.echo("")
         click.echo("Committing...")
         git_ops = GitOps(project_root)
         staged: list[Path] = []
@@ -501,6 +553,11 @@ def ingest(
                 "pages_updated": result.pages_updated,
             },
         ) or None
+        if commit_hash:
+            click.echo(
+                f"  ingest: {source_path.name} "
+                f"{_dim(f'({commit_hash[:7]})')}"
+            )
 
         # 12b. Record / update the source catalog so future ingests of
         # the same content are cheap no-ops. URL sources skip this —
