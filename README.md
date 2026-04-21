@@ -47,6 +47,8 @@ The LLM handles judgment (reading sources, extracting claims, assessing confiden
 
 ## Installation
 
+Requires Python 3.10+.
+
 ```bash
 git clone <repo-url> && cd wikiloom
 pip install -e ".[dev]"
@@ -55,19 +57,17 @@ pip install -e ".[dev]"
 python -m spacy download en_core_web_sm
 ```
 
-Set your LLM provider key (Anthropic by default):
-
-```bash
-export ANTHROPIC_API_KEY=sk-...
-# or for OpenAI:
-export OPENAI_API_KEY=sk-...
-```
+API keys are managed per-project via a `.env` file created during
+`wikiloom init` (see Quick start). If you prefer shell exports, those
+still work and take precedence over `.env`.
 
 ## Quick start
 
 ```bash
-# 1. Create a project (initializes git, commits the scaffold)
-wikiloom init my-wiki --domain "AI research"
+# 1. Create a project with your preferred LLM provider.
+#    Presets: anthropic (default), openai, google, ollama.
+#    Init prompts you to paste your API key into .env (skippable).
+wikiloom init my-wiki --domain "AI research" --provider anthropic
 cd my-wiki
 
 # 2. Ingest a source
@@ -88,6 +88,17 @@ wikiloom show concepts/transformer
 ```
 
 That's it. Every step above auto-commits to git.
+
+**Tip on cost:** ingest is the token-heavy operation. For a significant
+saving, configure a cheap model for ingest and a stronger model for
+query reasoning in `wikiloom.toml` (see [Configuration](#configuration)):
+
+```toml
+[llm]
+default_model = "claude-sonnet-4-6"
+ingest_model  = "claude-haiku-4-5-20251001"
+query_model   = "claude-sonnet-4-6"
+```
 
 ## Concepts you should know
 
@@ -144,9 +155,9 @@ Every command that modifies wiki content auto-commits with a classifying prefix:
 | `relink:` / `review:` / `related:` | linker workflow commands |
 | `merge:` / `deprecate:` | page lifecycle commands |
 | `dormant:` | `wikiloom dormant` mark/unmark |
-| `human-edit:` | **you**, via `wikiloom save` after editing pages by hand |
+| `human-edit:` | **you**, via `wikiloom save` after editing pages, `wikiloom.toml`, or prompts by hand |
 
-Writer commands also **block** if you have uncommitted edits, telling you to run `wikiloom save` first — so manual edits never accidentally land inside an `ingest:` commit.
+Writer commands also **block** if you have uncommitted edits under `wiki/`, telling you to run `wikiloom save` first — so manual page edits never accidentally land inside an `ingest:` commit. Dirty `wikiloom.toml` or prompt edits produce a passive nudge but don't block, since they can't collide with an auto-commit's output.
 
 ### Tiered linking confidence
 
@@ -179,8 +190,8 @@ Disable with `[ingest] enable_budget_check = false`.
 
 | Command | Description |
 |---|---|
-| `wikiloom init <name> [--domain <text>]` | Create a new project: directory tree, config, scaffolded indexes, init git repo, commit the scaffold |
-| `wikiloom save [-m "msg"] [--dry-run]` | Commit your manual edits with a `human-edit:` prefix (auto-bumps `frontmatter.modified`, freshens dormant → active) |
+| `wikiloom init <name> [--domain <text>] [--provider <id>] [--model <id>] [--no-interactive]` | Create a new project: directory tree, config, scaffolded indexes, git repo, and per-project README. `--provider` picks from `anthropic` (default), `openai`, `google`, `ollama`. An interactive prompt offers to paste your API key into `.env`; `--no-interactive` skips it (CI-friendly) |
+| `wikiloom save [-m "msg"] [--dry-run]` | Commit your manual edits with a `human-edit:` prefix. Covers pages under `wiki/`, `wikiloom.toml`, and prompts under `.wikiloom/prompts/` — one command for every human-editable file. Auto-bumps `frontmatter.modified`, freshens dormant → active |
 | `wikiloom rebuild-cache` | Regenerate the SQLite query cache from manifest + frontmatter (recovery tool; not normally needed) |
 
 ### Ingestion
@@ -236,14 +247,18 @@ Supports markdown, PDF (text + scanned via OCR), code files, common office docs,
 | Command | Description |
 |---|---|
 | `wikiloom status` | Project overview: page counts by type/status, human-edited count, backlinks, chunks, sources, last event, total tokens + cost |
-| `wikiloom log [-n N]` | Recent events from `wiki/log.md`, newest first |
+| `wikiloom log [-n N]` | Recent LLM / system events from `wiki/log.md`, newest first |
+| `wikiloom edits [-n N]` | Recent human edits committed via `wikiloom save` (date, author, subject, hash). Complements `wikiloom log` for multi-user audit |
 | `wikiloom cost` | Token usage and spend breakdown by event type, with monthly budget percentage |
 
 ## Project structure
 
 ```
 my-wiki/
+  README.md               # Per-project orientation (domain, commands, workflow)
   wikiloom.toml           # Project config (LLM, budget, thresholds, dormant windows)
+  .env                    # Your API key (gitignored, created via init prompt)
+  .env.example            # Committed template showing the env var for your provider
   .wikiloom/              # Customizable templates
     schema.md             # Page schema reference
     prompts/
@@ -287,9 +302,11 @@ schema_version = 1
 
 [llm]
 provider = "anthropic"
-model = "claude-sonnet-4-6"
+default_model = "claude-sonnet-4-6"   # Fallback for any LLM-backed command
+ingest_model  = ""                    # Optional override for `wikiloom ingest`
+query_model   = ""                    # Optional override for `wikiloom query`
 max_tokens_per_operation = 8000
-monthly_budget_usd = 50.0       # Pre-flight refuses runs that exceed this
+monthly_budget_usd = 50.0             # Pre-flight refuses runs that exceed this
 
 [linking]
 ner_model = "en_core_web_sm"
@@ -329,59 +346,70 @@ WikiLoom uses two providers at runtime: an **LLM provider** for synthesis and qu
 
 ### LLM providers
 
-| Provider | Where it runs | Requirements |
-|---|---|---|
-| `anthropic` | Anthropic API | `ANTHROPIC_API_KEY` |
-| `openai` | OpenAI API | `OPENAI_API_KEY` |
-| `gemini` | Google API | `GEMINI_API_KEY` |
-| `ollama` | Local machine | Ollama installed + model pulled locally |
+`wikiloom init` accepts `--provider` with any of the four presets below.
+Each preset writes the right provider + default model to `wikiloom.toml`
+and generates a matching `.env.example`. Behind the scenes WikiLoom
+delegates to litellm, so the model naming convention follows litellm's
+and other providers litellm supports may also work via manual config.
 
-WikiLoom delegates to litellm under the hood, so the model naming convention follows litellm's. Other providers litellm supports may also work.
+| Provider preset | Where it runs | Requirements | Default model |
+|---|---|---|---|
+| `anthropic` (default) | Anthropic API | `ANTHROPIC_API_KEY` | `claude-sonnet-4-6` |
+| `openai` | OpenAI API | `OPENAI_API_KEY` | `gpt-5` |
+| `google` | Google AI Studio API (Gemini) | `GEMINI_API_KEY` | `gemini/gemini-2.5-pro` |
+| `ollama` | Local machine | Ollama installed + model pulled locally | `llama3` |
 
 **Anthropic (default):**
+```bash
+wikiloom init my-wiki --provider anthropic
+```
 ```toml
 [llm]
 provider = "anthropic"
-model = "claude-sonnet-4-6"
-```
-```bash
-export ANTHROPIC_API_KEY=sk-...
+default_model = "claude-sonnet-4-6"
 ```
 
 **OpenAI:**
+```bash
+wikiloom init my-wiki --provider openai
+```
 ```toml
 [llm]
 provider = "openai"
-model = "gpt-4o"
-```
-```bash
-export OPENAI_API_KEY=sk-...
+default_model = "gpt-5"
 ```
 
 **Google (Gemini):**
+```bash
+wikiloom init my-wiki --provider google
+```
 ```toml
 [llm]
-provider = "gemini"
-model = "gemini/gemini-1.5-pro"
-```
-```bash
-export GEMINI_API_KEY=...
+provider = "google"
+default_model = "gemini/gemini-2.5-pro"
 ```
 
-**Ollama (local, no API key):**
+**Ollama (local, no API key, no cost):**
+```bash
+# 1. Install Ollama from https://ollama.com and pull a model
+ollama pull llama3
+ollama serve
+# 2. Init with the ollama preset
+wikiloom init my-wiki --provider ollama
+# 3. Override model if you want something other than llama3
+wikiloom init my-wiki --provider ollama --model gemma3
+```
 ```toml
 [llm]
 provider = "ollama"
-model = "ollama/llama3.1"
+default_model = "llama3"
 ```
-Setup steps:
-```bash
-# 1. Install Ollama from https://ollama.com
-# 2. Pull a model
-ollama pull llama3.1
-# 3. WikiLoom will talk to Ollama at the default localhost endpoint
-wikiloom ingest path/to/file.pdf
-```
+
+**Split-model setup (recommended for cost):** configure `ingest_model`
+to a cheap model and `query_model` to a stronger one. `wikiloom ingest`
+does bulk text-to-JSON synthesis that Haiku / Flash / mini-class
+models handle fine; `wikiloom query` is low-volume and benefits from
+the frontier reasoning of Sonnet / 2.5-pro / gpt-5.
 
 ### Embedding providers
 
@@ -513,7 +541,7 @@ wikiloom show concepts/foo --json | jq .source_count
 
 **Read `wiki/log.md` to see what happened.** Every operation appends a structured event with timestamps, token usage, and cost. Useful for cost reviews and auditing.
 
-**Switching LLM providers.** Update `[llm] provider` and `model` in `wikiloom.toml`. WikiLoom uses litellm under the hood, so any provider it supports works (Anthropic, OpenAI, Google, local Ollama, etc.). The model name follows litellm's naming convention.
+**Switching LLM providers.** Either re-init in a fresh directory with `--provider` / `--model`, or edit `[llm] provider` + `default_model` (and optionally `ingest_model` / `query_model`) in `wikiloom.toml` directly. WikiLoom uses litellm under the hood, so any provider it supports works. The model name follows litellm's naming convention.
 
 **Backup is just `git push`.** The whole project — wiki, manifest, source catalog, configuration — is in git. Push to any remote and you have a full backup.
 
@@ -527,7 +555,7 @@ pytest -m live               # Run live-API tests (requires ANTHROPIC_API_KEY)
 pytest tests/test_llm.py     # Just the LLM client unit tests
 ```
 
-358 tests across 24 test modules. All deterministic in the default suite; live API tests live in `test_llm_live.py` and are skipped unless explicitly requested.
+359 tests across 24 test modules. All deterministic in the default suite; live API tests live in `test_llm_live.py` and are skipped unless explicitly requested.
 
 ### Customizing prompts
 
