@@ -9,6 +9,14 @@ from typing import Callable
 import click
 from dotenv import find_dotenv, load_dotenv
 
+from wikiloom.cli_output import (
+    check as _check,
+    cross as _cross,
+    dim as _dim,
+    done_summary,
+    skip_mark as _skip_mark,
+)
+
 
 @click.group()
 @click.version_option(version="0.1.0", prog_name="wikiloom")
@@ -485,7 +493,10 @@ def lint(fix: bool, check_only: bool, project: Path | None) -> None:
     linter = WikiLinter(project, dormant=dormant_cfg)
 
     if fix:
+        import time as _time
+
         _require_clean_tree(project, "lint --fix")
+        start = _time.monotonic()
         with FileLock(project):
             report = linter.run_all()
             fixes = linter.fix_all(report)
@@ -504,13 +515,18 @@ def lint(fix: bool, check_only: bool, project: Path | None) -> None:
                 )
         _print_report(report)
         click.echo("")
-        click.echo(
-            f"Fixed: {fixes.total_fixed} "
-            f"(broken links: {fixes.broken_links_fixed}, "
-            f"frontmatter: {fixes.frontmatter_repaired})"
-        )
+        summary_parts = [f"{fixes.total_fixed} fixed"]
+        if fixes.broken_links_fixed:
+            summary_parts.append(f"{fixes.broken_links_fixed} broken links")
+        if fixes.frontmatter_repaired:
+            summary_parts.append(f"{fixes.frontmatter_repaired} frontmatter")
         if fixes.skipped_human_edited:
-            click.echo(f"Skipped {fixes.skipped_human_edited} human-edited page(s).")
+            summary_parts.append(
+                f"{fixes.skipped_human_edited} human-edited skipped"
+            )
+        click.echo(
+            done_summary(summary_parts, elapsed=_time.monotonic() - start)
+        )
         return
 
     report = linter.run_all()
@@ -667,6 +683,7 @@ def relink(project: Path | None) -> None:
     _require_clean_tree(project, "relink")
     total_pages = len(all_pages)
     click.echo(f"Re-linking {total_pages} page(s)...")
+    click.echo("")
 
     import time as _time
     start = _time.monotonic()
@@ -677,7 +694,7 @@ def relink(project: Path | None) -> None:
 
     def _progress(done: int, total: int) -> None:
         if done == total or done % step == 0:
-            click.echo(f"  {done}/{total} pages linked...")
+            click.echo(f"  {_check()} {done}/{total} pages linked")
 
     with FileLock(project):
         registry = Registry(project / "_registry")
@@ -700,10 +717,12 @@ def relink(project: Path | None) -> None:
                 f"updated wikilinks across {len(linked)} page(s)",
             )
 
-    elapsed = _time.monotonic() - start
+    click.echo("")
     click.echo(
-        f"Re-linked {total_pages} page(s) in {elapsed:.1f}s "
-        f"({len(linked)} updated). Backlinks rebuilt."
+        done_summary(
+            [f"{total_pages} pages", f"{len(linked)} updated"],
+            elapsed=_time.monotonic() - start,
+        )
     )
 
 
@@ -1877,11 +1896,18 @@ def _dormant_review(project: Path) -> None:
         click.echo("No dormant candidates to review.")
         return
 
+    import time as _time
+
     total = len(candidates)
     marked = 0
     skipped = 0
+    check_mark = _check()
+    cross_mark = _cross()
+    skip_glyph = _skip_mark()
     click.echo(f"Reviewing {total} candidate(s).")
-    click.echo("For each: [m]ark dormant / [n]ext (skip) / [q]uit\n")
+    click.echo("For each: [m]ark dormant / [n]ext (skip) / [q]uit")
+    click.echo("")
+    start = _time.monotonic()
 
     for i, candidate in enumerate(sorted(candidates, key=lambda x: -x.age_days), start=1):
         registry = Registry(project / "_registry")
@@ -1889,17 +1915,19 @@ def _dormant_review(project: Path) -> None:
         if entry is None:
             continue
         click.echo(
-            f"--- {i}/{total}: {candidate.page_id} ({entry.type})"
+            f"  {_dim(f'--- {i}/{total}')}  {candidate.page_id}  "
+            f"{_dim(f'({entry.type})')}"
         )
-        click.echo(f"  title: {entry.title}")
+        click.echo(f"    title:   {entry.title}")
         click.echo(
-            f"  age:   {candidate.age_days}d (window {candidate.window_days}d)"
+            f"    age:     {candidate.age_days}d "
+            f"{_dim(f'(window {candidate.window_days}d)')}"
         )
         if entry.summary:
-            click.echo(f"  summary: {entry.summary[:100]}")
+            click.echo(f"    summary: {entry.summary[:100]}")
 
         choice = click.prompt(
-            "Action",
+            "  Action",
             type=click.Choice(["m", "n", "q"], case_sensitive=False),
             default="n",
             show_choices=True,
@@ -1907,22 +1935,23 @@ def _dormant_review(project: Path) -> None:
         ).lower()
 
         if choice == "q":
-            click.echo("Quit.")
+            click.echo("  Quit.")
             break
         if choice == "n":
+            click.echo(f"  {skip_glyph} skipped\n")
             skipped += 1
             continue
 
         page_path = project / "wiki" / f"{candidate.page_id}.md"
         if not page_path.exists():
-            click.echo(f"  ✗ skipped: file missing")
+            click.echo(f"  {cross_mark} file missing\n")
             skipped += 1
             continue
         with FileLock(project):
             text = page_path.read_text(encoding="utf-8")
             fm, body = parse_frontmatter(text)
             if fm is None:
-                click.echo(f"  ✗ skipped: no frontmatter")
+                click.echo(f"  {cross_mark} no frontmatter\n")
                 skipped += 1
                 continue
             fm.status = "dormant"
@@ -1933,10 +1962,15 @@ def _dormant_review(project: Path) -> None:
             registry.save()
             _sync_cache(project, changed_files=[page_path])
             _auto_commit(project, "dormant", f"mark {candidate.page_id}")
-        click.echo(f"  ✓ marked dormant\n")
+        click.echo(f"  {check_mark} marked dormant\n")
         marked += 1
 
-    click.echo(f"\nDone. Marked: {marked}, skipped: {skipped}.")
+    click.echo(
+        done_summary(
+            [f"{marked} marked", f"{skipped} skipped"],
+            elapsed=_time.monotonic() - start,
+        )
+    )
 
 
 @main.command("duplicates")
@@ -2098,6 +2132,8 @@ def _finalize_batch_merge(
 
 def _run_review_mode(project: Path, pairs: list) -> None:
     """Interactive walkthrough: prompt y/s/n/q for each pair."""
+    import time as _time
+
     from wikiloom.duplicates import suggest_winner
     from wikiloom.locking import FileLock
     from wikiloom.merge import merge_pages
@@ -2106,20 +2142,45 @@ def _run_review_mode(project: Path, pairs: list) -> None:
     skipped = 0
     total = len(pairs)
     applied: list[tuple[str, str]] = []
+    check_mark = _check()
+    cross_mark = _cross()
+    skip_glyph = _skip_mark()
+
     click.echo(f"Reviewing {total} suspected duplicate pair(s).")
-    click.echo("For each pair: [y]es merge / [s]wap winner-loser / [n]o skip / [q]uit\n")
+    click.echo("For each pair: [y]es merge / [s]wap winner-loser / [n]o skip / [q]uit")
+    click.echo("")
+    start = _time.monotonic()
 
     with FileLock(project):
         for i, pair in enumerate(pairs, start=1):
             suggestion = suggest_winner(pair)
             emb = f"{pair.embedding_score:.2f}" if pair.embedding_score >= 0 else "n/a"
-            click.echo(f"--- Pair {i}/{total} (slug {pair.slug_score:.0f}%, emb {emb})")
-            click.echo(f"  WINNER (kept):    {suggestion.winner_page_id}  ({pair.title_a if suggestion.winner_page_id == pair.page_a else pair.title_b})")
-            click.echo(f"  LOSER (archived): {suggestion.loser_page_id}  ({pair.title_b if suggestion.winner_page_id == pair.page_a else pair.title_a})")
-            click.echo(f"  reason: {suggestion.reason}")
+            winner_title = (
+                pair.title_a
+                if suggestion.winner_page_id == pair.page_a
+                else pair.title_b
+            )
+            loser_title = (
+                pair.title_b
+                if suggestion.winner_page_id == pair.page_a
+                else pair.title_a
+            )
+            click.echo(
+                f"  {_dim(f'--- {i}/{total}')}  "
+                f"{_dim(f'(slug {pair.slug_score:.0f}%, emb {emb})')}"
+            )
+            click.echo(
+                f"    winner: {suggestion.winner_page_id}  "
+                f"{_dim(f'({winner_title})')}"
+            )
+            click.echo(
+                f"    loser:  {suggestion.loser_page_id}  "
+                f"{_dim(f'({loser_title})')}"
+            )
+            click.echo(f"    reason: {suggestion.reason}")
 
             choice = click.prompt(
-                "Action",
+                "  Action",
                 type=click.Choice(["y", "s", "n", "q"], case_sensitive=False),
                 default="n",
                 show_choices=True,
@@ -2127,9 +2188,10 @@ def _run_review_mode(project: Path, pairs: list) -> None:
             ).lower()
 
             if choice == "q":
-                click.echo("Quit.")
+                click.echo("  Quit.")
                 break
             if choice == "n":
+                click.echo(f"  {skip_glyph} skipped\n")
                 skipped += 1
                 continue
 
@@ -2141,21 +2203,28 @@ def _run_review_mode(project: Path, pairs: list) -> None:
             try:
                 merge_pages(project, winner, loser)
                 applied.append((winner, loser))
-                click.echo(f"  ✓ merged {loser} → {winner}\n")
+                click.echo(f"  {check_mark} merged {loser} → {winner}\n")
                 merged += 1
             except ValueError as exc:
-                click.echo(f"  ✗ skipped: {exc}\n")
+                click.echo(f"  {cross_mark} failed: {exc}\n")
                 skipped += 1
 
         _finalize_batch_merge(
             project, applied, f"reviewed {len(applied)} pair(s)"
         )
 
-    click.echo(f"\nDone. Merged: {merged}, skipped: {skipped}.")
+    click.echo(
+        done_summary(
+            [f"{merged} merged", f"{skipped} skipped"],
+            elapsed=_time.monotonic() - start,
+        )
+    )
 
 
 def _run_auto_merge_mode(project: Path, pairs: list, dry_run: bool) -> None:
     """Batch-merge only pairs flagged is_safe_to_auto by suggest_winner."""
+    import time as _time
+
     from wikiloom.duplicates import suggest_winner
     from wikiloom.locking import FileLock
     from wikiloom.merge import merge_pages
@@ -2178,12 +2247,13 @@ def _run_auto_merge_mode(project: Path, pairs: list, dry_run: bool) -> None:
             )
         return
 
-    click.echo(f"Plan ({len(safe_plan)} safe merge(s)):\n")
+    click.echo(f"Plan ({len(safe_plan)} safe merge(s)):")
+    click.echo("")
     for pair, suggestion in safe_plan:
         emb = f"{pair.embedding_score:.2f}" if pair.embedding_score >= 0 else "n/a"
         click.echo(
             f"  {suggestion.loser_page_id}  →  {suggestion.winner_page_id}"
-            f"  (slug {pair.slug_score:.0f}%, emb {emb}, {suggestion.reason})"
+            f"  {_dim(f'(slug {pair.slug_score:.0f}%, emb {emb}, {suggestion.reason})')}"
         )
 
     if unsafe:
@@ -2200,9 +2270,17 @@ def _run_auto_merge_mode(project: Path, pairs: list, dry_run: bool) -> None:
         click.echo("Aborted.")
         return
 
+    click.echo("")
+    click.echo("Merging...")
+    click.echo("")
+
     merged = 0
     skipped = 0
     applied: list[tuple[str, str]] = []
+    start = _time.monotonic()
+    check_mark = _check()
+    cross_mark = _cross()
+
     with FileLock(project):
         for pair, suggestion in safe_plan:
             try:
@@ -2214,16 +2292,28 @@ def _run_auto_merge_mode(project: Path, pairs: list, dry_run: bool) -> None:
                 applied.append(
                     (suggestion.winner_page_id, suggestion.loser_page_id)
                 )
+                click.echo(
+                    f"  {check_mark} {suggestion.loser_page_id}  →  "
+                    f"{suggestion.winner_page_id}"
+                )
                 merged += 1
             except ValueError as exc:
-                click.echo(f"  ✗ {suggestion.loser_page_id}: {exc}")
+                click.echo(
+                    f"  {cross_mark} {suggestion.loser_page_id}: {exc}"
+                )
                 skipped += 1
 
         _finalize_batch_merge(
             project, applied, f"auto-merged {len(applied)} pair(s)"
         )
 
-    click.echo(f"\nDone. Merged: {merged}, skipped: {skipped}.")
+    click.echo("")
+    click.echo(
+        done_summary(
+            [f"{merged} merged", f"{skipped} skipped"],
+            elapsed=_time.monotonic() - start,
+        )
+    )
 
 
 @main.command("merge")
@@ -2825,12 +2915,12 @@ def rebuild_cache(project: Path | None) -> None:
         click.echo("")
         click.echo("Computing embeddings...")
         click.echo("")
+        check_mark = _check()
 
         def _progress(done: int, total: int) -> None:
             step = max(32, max(1, total // 10))
             if done == total or done % step == 0:
-                check = click.style("✓", fg="green")
-                click.echo(f"  {check} {done}/{total} pages embedded")
+                click.echo(f"  {check_mark} {done}/{total} pages embedded")
 
         progress_fn = _progress
 
@@ -2841,17 +2931,16 @@ def rebuild_cache(project: Path | None) -> None:
         )
     stats = cache.get_stats()
 
-    elapsed = _time.monotonic() - start
-    mins = int(elapsed // 60)
-    secs = int(elapsed % 60) if mins else 0
-    elapsed_fmt = f"{mins}m {secs}s" if mins else f"{elapsed:.1f}s"
-    sep = click.style("•", fg="bright_black")
-    done = click.style("Done.", fg="green", bold=True)
     click.echo("")
     click.echo(
-        f"  {done} {count} pages  {sep}  "
-        f"{stats['aliases']} aliases  {sep}  "
-        f"{stats['backlinks']} backlinks  {sep}  {elapsed_fmt}"
+        done_summary(
+            [
+                f"{count} pages",
+                f"{stats['aliases']} aliases",
+                f"{stats['backlinks']} backlinks",
+            ],
+            elapsed=_time.monotonic() - start,
+        )
     )
 
 

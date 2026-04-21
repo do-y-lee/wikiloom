@@ -14,31 +14,12 @@ from typing import Any
 
 import click
 
-
-def _format_elapsed(seconds: float) -> str:
-    """Format a duration for the end-of-synthesis summary line.
-
-    Uses a compact ``Xm Ys`` form for >= 1 minute and plain
-    ``Ys`` otherwise — short enough to sit in a one-line summary
-    without dominating it.
-    """
-    if seconds >= 60:
-        mins = int(seconds // 60)
-        secs = int(seconds % 60)
-        return f"{mins}m {secs}s"
-    return f"{seconds:.1f}s"
-
-
-def _format_tokens(n: int) -> str:
-    """Human-readable token count. 1234 -> '1,234', 33800 -> '33.8k'."""
-    if n >= 1000:
-        return f"{n / 1000:.1f}k"
-    return f"{n:,}"
-
-
-def _dim(text: str) -> str:
-    """Gray/dim accent for separators and secondary info."""
-    return click.style(text, fg="bright_black")
+from wikiloom.cli_output import (
+    check as _check,
+    dim as _dim,
+    done_summary,
+    format_tokens as _format_tokens,
+)
 
 from wikiloom.backlinks import BacklinkRegistry
 from wikiloom.chunk_store import ChunkStore
@@ -359,7 +340,7 @@ def ingest(
             ingest_model = full_cfg.llm.for_ingest()
             llm_client = LLMClient(full_cfg, model=ingest_model)
 
-            check_mark = click.style("✓", fg="green")
+            check_mark = _check()
 
             def _on_chunk_done(n: int, total: int, tokens: int, cost: float) -> None:
                 # Columns: ✓  N/TOTAL   NN,NNN tok   $0.0045
@@ -407,16 +388,17 @@ def ingest(
             result.notes.extend(synthesis.notes)
 
             # End-of-synthesis summary: one line, totals rolled up.
-            _elapsed = _format_elapsed(time.monotonic() - _synth_start)
             _total_tok = synthesis.total_tokens_in + synthesis.total_tokens_out
-            _sep = _dim("•")
-            _done = click.style("Done.", fg="green", bold=True)
             click.echo("")
             click.echo(
-                f"  {_done} {synthesis.chunks_processed}/{len(chunks)} chunks  "
-                f"{_sep}  {_format_tokens(_total_tok)} tok  "
-                f"{_sep}  ${synthesis.total_cost_usd:.3f}  "
-                f"{_sep}  {_elapsed}"
+                done_summary(
+                    [
+                        f"{synthesis.chunks_processed}/{len(chunks)} chunks",
+                        f"{_format_tokens(_total_tok)} tok",
+                        f"${synthesis.total_cost_usd:.3f}",
+                    ],
+                    elapsed=time.monotonic() - _synth_start,
+                )
             )
             click.echo("")
 
