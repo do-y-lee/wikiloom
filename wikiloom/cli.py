@@ -522,31 +522,20 @@ def ingest(
     help="Apply auto-fixes for broken links and missing frontmatter.",
 )
 @click.option(
-    "--check-only",
-    is_flag=True,
-    default=False,
-    help="Report issues and exit non-zero if any are found (CI-friendly).",
-)
-@click.option(
     "--project",
     type=click.Path(path_type=Path),
     default=None,
     help="Project root. Defaults to walking upward from the current directory.",
 )
-def lint(fix: bool, check_only: bool, project: Path | None) -> None:
+def lint(fix: bool, project: Path | None) -> None:
     """Run health checks over a WikiLoom project.
 
     Default behavior prints a report and exits 1 if issues are found.
-    ``--fix`` applies mechanical repairs (respecting human-edit
-    protection). ``--check-only`` is the default behavior with an
-    explicit name.
+    Pass ``--fix`` to apply mechanical repairs (respecting human-edit
+    protection).
     """
     from wikiloom.lint import WikiLinter
     from wikiloom.locking import FileLock
-
-    if fix and check_only:
-        raise click.UsageError(
-            "--fix and --check-only are mutually exclusive.")
 
     if project is None:
         project = _find_project_root(Path.cwd())
