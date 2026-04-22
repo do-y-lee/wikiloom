@@ -119,15 +119,9 @@ def merge_pages(
     backlinks.rebuild()
     backlinks.save()
 
-    log_path = wiki_dir / "log.md"
-    if log_path.parent.exists():
-        event = create_event(
-            EventType.MERGE,
-            description=f"{loser_page_id} → {winner_page_id}",
-            pages_updated=[winner_page_id] + rewrote,
-            pages_deprecated=[loser_page_id],
-        )
-        append_event(log_path, event)
+    # Event emission moved to callers so the ``git_commit_hash``
+    # field can be populated (the commit happens *after* this returns).
+    # Callers should use ``emit_merge_event`` below.
 
     return MergeResult(
         winner_page_id=winner_page_id,
@@ -135,6 +129,33 @@ def merge_pages(
         rewrote_links_in=rewrote,
         archive_path=archive_path,
     )
+
+
+def emit_merge_event(
+    project_root: Path,
+    result: MergeResult,
+    commit_hash: str | None,
+) -> None:
+    """Append a MERGE event to log.md with the commit hash attached.
+
+    Called by every merge path (single cli.merge, the batched
+    review/auto-merge paths, and the post-ingest merge) after the
+    commit has landed so ``git_commit_hash`` is populated on the
+    event — matching how INGEST events work. Previously the event
+    was emitted inside ``merge_pages`` before the commit existed, so
+    the hash was always empty in the log.
+    """
+    log_path = project_root / "wiki" / "log.md"
+    if not log_path.parent.exists():
+        return
+    event = create_event(
+        EventType.MERGE,
+        description=f"{result.loser_page_id} → {result.winner_page_id}",
+        pages_updated=[result.winner_page_id] + result.rewrote_links_in,
+        pages_deprecated=[result.loser_page_id],
+        git_commit_hash=commit_hash,
+    )
+    append_event(log_path, event)
 
 
 def _combine_bodies(winner_body: str, loser_body: str, loser_title: str) -> str:

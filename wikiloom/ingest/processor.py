@@ -786,7 +786,23 @@ def _run_post_ingest_merge(
     for scope in ("wiki", "_registry"):
         if (project_root / scope).exists():
             git_ops.repo.git.add("-A", "--", scope)
-    git_ops.commit([], message)
+    commit_hash = git_ops.commit([], message) or None
+
+    # Emit one MERGE event per pair with this batch's commit hash
+    # attached so wikiloom log can show them alongside ingest events.
+    from wikiloom.merge import MergeResult, emit_merge_event
+
+    for winner, loser in applied:
+        emit_merge_event(
+            project_root,
+            MergeResult(
+                winner_page_id=winner,
+                loser_page_id=loser,
+                rewrote_links_in=[],
+                archive_path=None,
+            ),
+            commit_hash,
+        )
 
     click.echo("")
     click.echo(

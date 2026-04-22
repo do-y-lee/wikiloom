@@ -353,6 +353,24 @@ def _post_flight_budget_warning(project: Path) -> None:
     )
 
 
+def _format_event_timestamp(iso_str: str) -> str:
+    """Render ISO timestamps from the event log as ``YYYY-MM-DD HH:MM``.
+
+    log.md stores ISO-UTC strings like ``2026-04-22T22:07:16Z`` via
+    ``now_iso()``. Display them in the same format ``wikiloom edits``
+    uses so timestamps are consistent across read-side commands.
+    Falls back to the raw string if parsing fails.
+    """
+    try:
+        from datetime import datetime
+
+        s = iso_str.rstrip("Z")
+        dt = datetime.fromisoformat(s)
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return iso_str
+
+
 def _page_not_found_message(page_id: str) -> str:
     """Shared error text for commands that take a page_id argument.
 
@@ -367,7 +385,7 @@ def _page_not_found_message(page_id: str) -> str:
     )
 
 
-def _auto_commit(project: Path, commit_type: str, description: str) -> None:
+def _auto_commit(project: Path, commit_type: str, description: str) -> str | None:
     """Stage every dirty file under ``wiki/`` + ``_registry/`` and commit.
 
     Callers inside writer commands invoke this at the end, after the
@@ -380,14 +398,14 @@ def _auto_commit(project: Path, commit_type: str, description: str) -> None:
     try:
         git = GitOps(project)
     except ValueError:
-        return
+        return None
     # Stage modified + untracked files under the wiki-managed dirs.
     # `git add` on a directory path picks up both; deleted files are
     # captured via the -A flag so renames/removals also land.
     for scope in ("wiki", "_registry"):
         if (project / scope).exists():
             git.repo.git.add("-A", "--", scope)
-    git.commit([], f"{commit_type}: {description}")
+    return git.commit([], f"{commit_type}: {description}") or None
 
 
 @main.command()
@@ -1277,7 +1295,7 @@ def log_cmd(limit: int, project: Path | None) -> None:
     click.echo(click.style(f"Recent events ({len(shown)})", bold=True))
     click.echo("")
     for event in shown:
-        ts = event.get("timestamp", "?")
+        ts = _format_event_timestamp(str(event.get("timestamp", "?")))
         etype = str(event.get("event_type", "?"))
         desc = event.get("description", "")
         tokens = event.get("tokens_used", 0)
@@ -1359,7 +1377,7 @@ def edits(limit: int, project: Path | None) -> None:
     )
     click.echo("")
     for c in shown:
-        when = c.authored_datetime.strftime("%Y-%m-%d")
+        when = c.authored_datetime.strftime("%Y-%m-%d %H:%M:%S")
         author = (c.author.name or "?").ljust(author_width)
         subject = c.message.splitlines()[0]
         short = c.hexsha[:8]
@@ -2400,7 +2418,23 @@ def _finalize_batch_merge(
     _sync_cache(project, changed_files=touched_paths + list(index_paths))
     body = "\n".join(f"  {loser} → {winner}" for winner, loser in applied)
     description = f"{commit_subject}\n\n{body}"
-    _auto_commit(project, "merge", description)
+    commit_hash = _auto_commit(project, "merge", description)
+
+    # Emit a MERGE event per pair, all carrying this batch's commit
+    # hash so `wikiloom log` can show them alongside ingest events.
+    from wikiloom.merge import MergeResult, emit_merge_event
+
+    for winner, loser in applied:
+        emit_merge_event(
+            project,
+            MergeResult(
+                winner_page_id=winner,
+                loser_page_id=loser,
+                rewrote_links_in=[],
+                archive_path=None,
+            ),
+            commit_hash,
+        )
 
 
 def _run_review_mode(project: Path, pairs: list) -> None:
@@ -2652,6 +2686,7 @@ def merge(winner: str, loser: str, yes: bool, project: Path | None) -> None:
             result = merge_pages(project, winner, loser)
             wiki_dir = project / "wiki"
             # Rebuild indexes so the archived loser disappears.
+            from wikiloom.merge import emit_merge_event
             from wikiloom.registry import Registry
             from wikiloom.search import IndexUpdater
 
@@ -2667,11 +2702,12 @@ def merge(winner: str, loser: str, yes: bool, project: Path | None) -> None:
                     *index_paths,
                 ],
             )
-            _auto_commit(
+            commit_hash = _auto_commit(
                 project,
                 "merge",
                 f"{loser} into {winner}",
             )
+            emit_merge_event(project, result, commit_hash)
     except ValueError as exc:
         msg = str(exc)
         # Surface a recovery hint when the ValueError is a missing-
