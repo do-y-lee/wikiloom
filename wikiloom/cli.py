@@ -702,7 +702,10 @@ def reindex(project: Path | None) -> None:
                 "reindex",
                 f"rebuilt {len(written)} index file(s)",
             )
-    click.echo(f"Rebuilt {len(written)} index file(s).")
+    click.echo(
+        f"{_check()} Rebuilt {len(written)} index file(s)."
+    )
+    click.echo("")
 
 
 @main.command("relink")
@@ -969,14 +972,14 @@ def query(
 
     if not detail:
         click.echo("")
-        click.echo("Next:")
+        click.echo(_dim("Next:"))
         click.echo(
-            f'  wikiloom query --detail "{question}"   # re-run with sources + metadata')
-        click.echo(
-            "  wikiloom query --last-detail            # show sources + metadata for this answer without re-running")
+            _dim("  --last-detail  show sources and metadata for this answer")
+        )
         if answer.suggest_synthesis:
             click.echo(
-                "  wikiloom query --save-last              # save this answer as a wiki synthesis page")
+                _dim("  --save-last    save this answer as a synthesis page")
+            )
 
 
 def _save_query_as_page(data: dict, project: Path) -> None:
@@ -1032,23 +1035,33 @@ def _save_query_as_page(data: dict, project: Path) -> None:
     title_snippet = question[:60]
     _auto_commit(project, "query", f'saved synthesis "{title_snippet}"')
 
-    click.echo(f"Saved to {page_path.relative_to(project)}")
+    rel_path = page_path.relative_to(project)
+    click.echo(
+        f"{_check()} Saved synthesis  "
+        f"{click.style(str(rel_path), fg='cyan')}"
+    )
 
 
 def _print_query_detail(data: dict, project: Path) -> None:
     """Print the detail view for a query result."""
+    from wikiloom.cli_output import (
+        check as _qcheck,
+        dim as _qdim,
+        done_summary as _qdone,
+        format_tokens as _qfmt,
+    )
     from wikiloom.frontmatter import read_page
     from wikiloom.registry import Registry
 
     sources = data.get("sources_consulted", [])
     if sources:
         registry = Registry(project / "_registry")
-        click.echo("Sources:")
+        click.echo(click.style("Sources", bold=True))
+        click.echo("")
         for src in sources:
             page_path = src.get("page_path", "")
             relevance = src.get("relevance", "")
 
-            # Resolve friendly name: page title + original source file
             title = page_path
             source_file = ""
             modified = ""
@@ -1056,7 +1069,7 @@ def _print_query_detail(data: dict, project: Path) -> None:
             entry = registry.get_page(page_path) if page_path else None
             if entry:
                 title = entry.title
-                modified = (entry.modified or "")[:10]  # YYYY-MM-DD
+                modified = (entry.modified or "")[:10]
                 if entry.status and entry.status != "active":
                     page_status = entry.status
             page_file = project / "wiki" / f"{page_path}.md"
@@ -1068,22 +1081,41 @@ def _print_query_detail(data: dict, project: Path) -> None:
                             source_file = s["name"]
                             break
 
-            line = f"  [{relevance}] {title}"
+            rel_tag = _qdim(f"[{relevance:>6}]")
+            headline = f"  {_qcheck()} {rel_tag}  {title}"
+            bits: list[str] = []
             if source_file:
-                line += f" (from {source_file})"
+                bits.append(f"from {source_file}")
             if modified:
-                line += f" — modified {modified}"
+                bits.append(modified)
             if page_status:
-                line += f" [{page_status}]"
-            click.echo(line)
-            click.echo(f"            → {page_path}.md")
+                bits.append(page_status)
+            if bits:
+                headline += f"  {_qdim('• ' + ' • '.join(bits))}"
+            click.echo(headline)
+            click.echo(f"      {_qdim('→ ' + page_path + '.md')}")
+        click.echo("")
 
     confidence = data.get("confidence", "")
     tokens_in = data.get("tokens_in", 0)
     tokens_out = data.get("tokens_out", 0)
     cost = data.get("cost_usd", 0.0)
-    click.echo(f"\nConfidence: {confidence}")
-    click.echo(f"Tokens: {tokens_in + tokens_out} (${cost:.4f})")
+    total_tok = tokens_in + tokens_out
+    conf_color = {"high": "green", "medium": "yellow", "low": "red"}.get(
+        confidence, None
+    )
+    conf_display = (
+        click.style(confidence, fg=conf_color) if conf_color else confidence
+    )
+    click.echo(
+        _qdone(
+            [
+                f"{_qfmt(total_tok)} tok",
+                f"${cost:.4f}",
+                f"confidence: {conf_display}",
+            ]
+        )
+    )
 
     followups = data.get("suggested_followups", [])
     if followups:
@@ -1247,16 +1279,21 @@ def log_cmd(limit: int, project: Path | None) -> None:
         return
 
     shown = events[:limit]
+    click.echo(click.style(f"Recent events ({len(shown)})", bold=True))
+    click.echo("")
     for event in shown:
         ts = event.get("timestamp", "?")
-        etype = event.get("event_type", "?")
+        etype = str(event.get("event_type", "?"))
         desc = event.get("description", "")
         tokens = event.get("tokens_used", 0)
         cost = event.get("cost_usd", 0.0)
         commit = event.get("commit", "")
 
-        line = f"[{ts}] {etype} | {desc}"
-        extras = []
+        line = (
+            f"  {_dim(ts)}  {click.style(etype, fg='cyan')}  "
+            f"{_dim('•')}  {desc}"
+        )
+        extras: list[str] = []
         if tokens:
             extras.append(f"{int(tokens):,}t")
         if cost:
@@ -1264,12 +1301,16 @@ def log_cmd(limit: int, project: Path | None) -> None:
         if commit:
             extras.append(str(commit)[:8])
         if extras:
-            line += f"  ({', '.join(extras)})"
+            line += f"  {_dim('(' + ', '.join(extras) + ')')}"
         click.echo(line)
 
     if len(events) > limit:
+        click.echo("")
         click.echo(
-            f"\n... {len(events) - limit} more event(s). Use -n to see more.")
+            _dim(f"... {len(events) - limit} more event(s). "
+                 f"Use -n to see more.")
+        )
+    click.echo("")
 
 
 @main.command("edits")
@@ -1316,15 +1357,26 @@ def edits(limit: int, project: Path | None) -> None:
 
     shown = commits[:limit]
     author_width = max((len(c.author.name or "") for c in shown), default=6)
+    click.echo(
+        click.style("Recent human edits", bold=True)
+        + f"  {_dim('(' + str(len(shown)) + ')')}"
+    )
+    click.echo("")
     for c in shown:
         when = c.authored_datetime.strftime("%Y-%m-%d")
         author = (c.author.name or "?").ljust(author_width)
         subject = c.message.splitlines()[0]
         short = c.hexsha[:8]
-        click.echo(f"{when}  {author}  {subject}  ({short})")
+        click.echo(
+            f"  {_dim(when)}  "
+            f"{click.style(author, fg='cyan')}  "
+            f"{subject}  {_dim('(' + short + ')')}"
+        )
 
     if len(commits) > limit:
-        click.echo(f"\n... more edits exist. Use -n to see more.")
+        click.echo("")
+        click.echo(_dim("... more edits exist. Use -n to see more."))
+    click.echo("")
 
 
 @main.command("cost")
@@ -1367,8 +1419,10 @@ def cost(project: Path | None) -> None:
     total_cost = 0.0
     total_events = 0
 
-    click.echo("Event type       Count    Tokens       Cost")
-    click.echo("---------------- -------- ------------ --------")
+    click.echo(click.style("Usage by event type", bold=True))
+    click.echo("")
+    header = f"  {'Event':<16} {'Count':>8} {'Tokens':>12} {'Cost':>10}"
+    click.echo(_dim(header))
     for etype in sorted(by_type):
         b = by_type[etype]
         t = int(b["tokens"])
@@ -1377,16 +1431,35 @@ def cost(project: Path | None) -> None:
         total_tokens += t
         total_cost += c
         total_events += n
-        click.echo(f"{etype:<16} {n:>8} {t:>12,} ${c:>7.2f}")
-    click.echo("---------------- -------- ------------ --------")
+        click.echo(
+            f"  {click.style(etype, fg='cyan'):<25} "
+            f"{n:>8} {t:>12,} {_dim(f'${c:>7.2f}')}"
+        )
+
+    click.echo("")
     click.echo(
-        f"{'Total':<16} {total_events:>8} {total_tokens:>12,} ${total_cost:>7.2f}")
+        done_summary(
+            [
+                f"{total_events} events",
+                f"{total_tokens:,} tokens",
+                f"${total_cost:.2f}",
+            ]
+        )
+    )
 
     cfg = _load_config(project)
     if cfg is not None:
         budget = cfg.llm.monthly_budget_usd
         pct = (total_cost / budget * 100) if budget > 0 else 0
-        click.echo(f"\nMonthly budget: ${budget:.2f} ({pct:.1f}% used)")
+        bar_color = "green" if pct < 50 else "yellow" if pct < 90 else "red"
+        click.echo("")
+        click.echo(click.style("Monthly budget", bold=True))
+        click.echo(
+            f"  ${total_cost:.2f} of ${budget:.2f}  "
+            f"{_dim('•')}  "
+            f"{click.style(f'{pct:.1f}% used', fg=bar_color)}"
+        )
+    click.echo("")
 
 
 @main.command("show")
@@ -1665,12 +1738,21 @@ def related(page_id: str, limit: int, save: bool, link: bool, project: Path | No
 
     if not related_pages:
         click.echo(f"No related pages found for {page_id}.")
+        click.echo("")
         return
 
-    click.echo(f"Related to: {page['title']} ({page_id})\n")
+    click.echo(
+        click.style("Related to", bold=True)
+        + f" {click.style(page['title'], fg='cyan')}  "
+        + _dim(f"({page_id})")
+    )
+    click.echo("")
     for pid, title, sim in related_pages:
-        click.echo(f"  {sim:.0%}  {title}")
-        click.echo(f"       → {pid}.md")
+        click.echo(
+            f"  {_dim(f'{sim:.0%}')}  "
+            f"{click.style(title, fg='cyan')}"
+        )
+        click.echo(f"      {_dim('→ ' + pid + '.md')}")
 
     if save or link:
         _require_clean_tree(project, "related")
@@ -1728,13 +1810,19 @@ def related(page_id: str, limit: int, save: bool, link: bool, project: Path | No
                 f"{len(related_pages)} related page(s) to frontmatter")
         if link:
             actions.append(f"{len(new_links)} wikilink(s) to page body")
-        click.echo(f"\nSaved: {', '.join(actions)}.")
+        click.echo("")
+        click.echo(f"{_check()} Saved: {', '.join(actions)}.")
+        click.echo("")
 
     if not save and not link and related_pages:
+        click.echo("")
         click.echo(
-            "\nRun with --save to record these in frontmatter, --link to append"
-            "\nwikilinks in the page body, or both flags together to do both."
+            _dim(
+                "Tip: --save records these in frontmatter, --link appends "
+                "wikilinks in the page body, or pass both."
+            )
         )
+        click.echo("")
 
 
 @main.command("orphans")
@@ -1771,6 +1859,7 @@ def orphans(project: Path | None) -> None:
 
     if not orphan_ids:
         click.echo("No orphan pages found.")
+        click.echo("")
         return
 
     # Hydrate display info (title + type) from the manifest.
@@ -1779,17 +1868,27 @@ def orphans(project: Path | None) -> None:
         for pid in orphan_ids
     ]
 
-    click.echo(f"Orphan pages ({len(orphan_list)}):\n")
+    click.echo(
+        click.style("Orphan pages", bold=True)
+        + f"  {_dim('(' + str(len(orphan_list)) + ')')}"
+    )
+    click.echo("")
     for pid, title, ptype in orphan_list:
-        click.echo(f"  [{ptype}] {title}")
-        click.echo(f"          {pid}.md")
+        click.echo(
+            f"  {_dim('[' + ptype + ']')} "
+            f"{click.style(title, fg='cyan')}"
+        )
+        click.echo(f"      {_dim('→ ' + pid + '.md')}")
 
     example_pid = orphan_list[0][0]
+    click.echo("")
     click.echo(
-        f"\nTo find connections for a page, pass its path (without .md). Example:"
-        f"\n  wikiloom related {example_pid}"
-        f"\n\nOr run `wikiloom relink` to re-run the linker on all pages."
+        _dim(
+            f"Tip: `wikiloom related {example_pid}` to find connections, "
+            f"or `wikiloom relink` to re-run the linker."
+        )
     )
+    click.echo("")
 
 
 @main.command("dormant")
@@ -2534,15 +2633,23 @@ def merge(winner: str, loser: str, yes: bool, project: Path | None) -> None:
             )
         raise click.ClickException(msg) from exc
 
-    click.echo(f"Merged {loser} into {winner}.")
+    click.echo(
+        f"{_check()} Merged  "
+        f"{click.style(loser, fg='cyan')}  →  "
+        f"{click.style(winner, fg='cyan')}"
+    )
+    detail_bits: list[str] = []
     if result.rewrote_links_in:
-        click.echo(
-            f"Rewrote wikilinks in {len(result.rewrote_links_in)} page(s)."
+        detail_bits.append(
+            f"wikilinks rewritten in {len(result.rewrote_links_in)} page(s)"
         )
     if result.archive_path is not None:
-        click.echo(
-            f"Archived {loser} → {result.archive_path.relative_to(project)}"
+        detail_bits.append(
+            f"archived to {result.archive_path.relative_to(project)}"
         )
+    for bit in detail_bits:
+        click.echo(_dim(f"  {bit}"))
+    click.echo("")
 
 
 @main.command("deprecate")
@@ -2651,12 +2758,15 @@ def deprecate(
         suffix = f" (superseded by {superseded_by})" if superseded_by else ""
         _auto_commit(project, "deprecate", f"{page_id}{suffix}")
 
-    click.echo(f"Deprecated {page_id}.")
-    if archive_path is not None:
-        click.echo(f"Archived to {archive_path.relative_to(project)}")
     click.echo(
-        "To undo: run `git revert HEAD` to restore the previous state."
+        f"{_check()} Deprecated  {click.style(page_id, fg='cyan')}"
     )
+    if archive_path is not None:
+        click.echo(
+            _dim(f"  archived to {archive_path.relative_to(project)}")
+        )
+    click.echo(_dim("  to undo: `git revert HEAD`"))
+    click.echo("")
 
 
 @main.command("purge")
@@ -2746,7 +2856,10 @@ def purge(page_id: str, yes: bool, project: Path | None) -> None:
         )
         _auto_commit(project, "deprecate", f"purge {page_id}")
 
-    click.echo(f"Purged {page_id}.")
+    click.echo(
+        f"{_check()} Purged  {click.style(page_id, fg='cyan')}"
+    )
+    click.echo("")
 
 
 @main.command("review")
@@ -3013,9 +3126,11 @@ def save(message: str | None, dry_run: bool, project: Path | None) -> None:
         git.commit([], commit_msg)
         _sync_cache(project, changed_files=staged)
 
-    click.echo(f"Saved {len(dirty)} file(s).")
+    parts = [f"{len(dirty)} file(s) saved"]
     if freshened:
-        click.echo(f"Freshened {freshened} dormant page(s) back to active.")
+        parts.append(f"{freshened} freshened from dormant")
+    click.echo(done_summary(parts))
+    click.echo("")
 
 
 def _bump_modified_and_freshen(project: Path, paths: list[Path]) -> int:
