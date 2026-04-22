@@ -143,10 +143,24 @@ def find_duplicates(
 
 
 def _is_plural_of(short: str, long: str) -> bool:
-    """True if ``long`` is just ``short`` with a trailing 's' (or 'es')."""
+    """True if ``long`` is the standard English plural of ``short``.
+
+    Covers the three regular transformations that show up most often
+    in wiki slugs:
+
+    - trailing -s       (account → accounts)
+    - trailing -es      (box → boxes, process → processes)
+    - y → ies           (penalty → penalties, policy → policies)
+
+    Irregular plurals (child/children, life/lives) are not handled —
+    they're rare enough in concept slugs that the added surface
+    area isn't worth it. They still surface via the review path.
+    """
     if long == short + "s":
         return True
     if long == short + "es":
+        return True
+    if short.endswith("y") and long == short[:-1] + "ies":
         return True
     return False
 

@@ -47,8 +47,8 @@ class DormantPage:
 @dataclass(frozen=True)
 class DuplicateSet:
     pages: tuple[str, ...]
-    reason: str          # "title" | "alias"
-    score: int           # rapidfuzz similarity 0-100
+    slug_score: int         # rapidfuzz token_sort_ratio 0-100
+    embedding_score: float  # cosine 0.0-1.0; -1.0 if no embedding
 
 
 @dataclass(frozen=True)
@@ -65,6 +65,10 @@ class LintReport:
     orphans: list[str] = field(default_factory=list)
     dormant: list[DormantPage] = field(default_factory=list)
     duplicates: list[DuplicateSet] = field(default_factory=list)
+    # How many of ``duplicates`` would be handled by
+    # ``wikiloom duplicates --auto-merge`` (structural rule match +
+    # embedding >= 0.90). The rest need ``--review``.
+    duplicates_auto_safe: int = 0
     frontmatter_issues: list[str] = field(default_factory=list)
     index_drift: list[str] = field(default_factory=list)
     contradictions: list[Contradiction] = field(default_factory=list)
@@ -192,17 +196,49 @@ class WikiLinter:
 
     def run_all(self) -> LintReport:
         """Run every health check and return an aggregate report."""
+        duplicates = self.check_duplicates()
+        auto_safe = self._count_auto_mergeable(duplicates)
         return LintReport(
             broken_links=self.check_broken_links(),
             orphans=self.check_orphans(),
             dormant=self.check_dormant(),
-            duplicates=self.check_duplicates(),
+            duplicates=duplicates,
+            duplicates_auto_safe=auto_safe,
             frontmatter_issues=self.check_frontmatter(),
             index_drift=self.check_index_consistency(),
             contradictions=self.check_contradictions(),
             stubs=self.check_stubs(),
             promoted_from_update=self.check_promoted_from_update(),
         )
+
+    def _count_auto_mergeable(
+        self, duplicates: list[DuplicateSet]
+    ) -> int:
+        """Count pairs that ``wikiloom duplicates --auto-merge`` would act on.
+
+        Re-runs ``find_duplicates`` + ``suggest_winner`` to avoid
+        changing ``DuplicateSet``'s shape. Called once per lint run
+        over a small set (typically < 200 pairs), so the duplicate
+        work is fine at this scale.
+        """
+        if not duplicates:
+            return 0
+        from wikiloom.duplicates import find_duplicates, suggest_winner
+
+        try:
+            pairs = find_duplicates(
+                self.project_root,
+                slug_threshold=80.0,
+                embedding_threshold=0.85,
+                same_type_only=True,
+            )
+        except Exception:
+            return 0
+        safe = 0
+        for p in pairs:
+            if suggest_winner(p).is_safe_to_auto:
+                safe += 1
+        return safe
 
     def fix_all(self, report: LintReport) -> FixReport:
         """Apply mechanical fixes from a report.
@@ -330,74 +366,39 @@ class WikiLinter:
         return dormant_candidates
 
     def check_duplicates(self) -> list[DuplicateSet]:
-        """Fuzzy-match titles, aliases, slugs, and embeddings for near-duplicates.
+        """Delegate to find_duplicates so lint and wikiloom duplicates agree.
 
-        Title/alias signal catches LLM output where the page name is
-        similar. Slug/embedding signal catches LLM output where the
-        slug got a disambiguating suffix (``pending-transactions`` vs
-        ``pending-transactions-banking``) or where titles diverged but
-        the bodies describe the same concept. Only runs on active pages
-        and only within the same type.
+        Uses the same thresholds as the CLI default (slug 80% OR
+        embedding 0.85) and the same same-type-only scoping. Previous
+        versions used stricter thresholds (slug 85, emb 0.88) plus a
+        separate title-similarity pass, causing lint and duplicates to
+        disagree on the same wiki. The title pass was also redundant:
+        slugs are hyphenated lowercased titles, so a 92% title match
+        virtually always had a ≥80% slug match too.
         """
         from wikiloom.duplicates import find_duplicates
 
-        pages = [
-            (pid, entry)
-            for pid, entry in self.registry.pages.items()
-            if entry.status != "deprecated"
-        ]
-        duplicates: list[DuplicateSet] = []
-        seen_pairs: set[tuple[str, str]] = set()
-
-        for i, (pid_a, entry_a) in enumerate(pages):
-            for pid_b, entry_b in pages[i + 1 :]:
-                if entry_a.type != entry_b.type:
-                    continue  # only flag within a category
-                pair = tuple(sorted((pid_a, pid_b)))
-                if pair in seen_pairs:
-                    continue
-                score = int(fuzz.ratio(entry_a.title.lower(), entry_b.title.lower()))
-                reason = "title"
-                if score < _DUPLICATE_THRESHOLD:
-                    alias_score = self._best_alias_score(entry_a.aliases, entry_b.aliases)
-                    if alias_score >= _DUPLICATE_THRESHOLD:
-                        score = alias_score
-                        reason = "alias"
-                    else:
-                        continue
-                seen_pairs.add(pair)
-                duplicates.append(
-                    DuplicateSet(pages=pair, reason=reason, score=score)
-                )
-
-        # Slug + embedding signal — catches duplicates the title check
-        # misses (different titles, same concept; slug-suffix variants).
-        # Cache may not exist yet on a fresh project; find_duplicates
-        # returns [] in that case.
         try:
-            slug_pairs = find_duplicates(
+            pairs = find_duplicates(
                 self.project_root,
-                slug_threshold=85.0,
-                embedding_threshold=0.88,
+                slug_threshold=80.0,
+                embedding_threshold=0.85,
                 same_type_only=True,
             )
         except Exception:
-            slug_pairs = []
-        for sp in slug_pairs:
-            pair = tuple(sorted((sp.page_a, sp.page_b)))
-            if pair in seen_pairs:
-                continue
-            seen_pairs.add(pair)
-            if sp.embedding_score >= 0.88:
-                reason = "embedding"
-                score = int(sp.embedding_score * 100)
-            else:
-                reason = "slug"
-                score = int(sp.slug_score)
-            duplicates.append(
-                DuplicateSet(pages=pair, reason=reason, score=score)
+            return []
+
+        out: list[DuplicateSet] = []
+        for p in pairs:
+            ordered = tuple(sorted((p.page_a, p.page_b)))
+            out.append(
+                DuplicateSet(
+                    pages=ordered,
+                    slug_score=int(p.slug_score),
+                    embedding_score=float(p.embedding_score),
+                )
             )
-        return duplicates
+        return out
 
     def check_frontmatter(self) -> list[str]:
         """Pages missing required frontmatter fields or with no frontmatter."""

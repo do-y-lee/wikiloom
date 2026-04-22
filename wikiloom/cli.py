@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import click
 from dotenv import find_dotenv, load_dotenv
@@ -2288,14 +2288,19 @@ def duplicates(
         _run_auto_merge_mode(project, pairs, dry_run=dry_run)
         return
 
-    shown = pairs[:limit]
-    click.echo("")
-    click.echo(
-        click.style("Suspected duplicate pairs", bold=True)
-        + f"  {_dim('(' + str(len(pairs)) + ')')}"
-    )
-    click.echo("")
-    for pair in shown:
+    # Split by what the user can act on: safe-to-auto pairs go through
+    # `--auto-merge`, the rest need `--review`. Two sections in one
+    # view means the user doesn't have to mentally partition the list.
+    safe_pairs: list[tuple] = []
+    review_pairs: list[tuple] = []
+    for pair in pairs:
+        sug = suggest_winner(pair)
+        if sug.is_safe_to_auto:
+            safe_pairs.append((pair, sug))
+        else:
+            review_pairs.append((pair, sug))
+
+    def _render_pair(pair: Any, sug: Any) -> None:
         emb_display = (
             f"emb {pair.embedding_score:.2f}"
             if pair.embedding_score >= 0
@@ -2311,29 +2316,53 @@ def duplicates(
             f"    {click.style(pair.page_b, fg='cyan')}  "
             f"{_dim('(' + pair.title_b + ')')}"
         )
-        suggestion = suggest_winner(pair)
         click.echo(
-            f"    {_dim('→')} wikiloom merge "
-            f"{click.style(suggestion.winner_page_id, fg='cyan')} "
-            f"{click.style(suggestion.loser_page_id, fg='cyan')}  "
-            f"{_dim('(' + suggestion.reason + ')')}"
+            f"    {_dim('→')} "
+            f"{click.style(sug.loser_page_id, fg='cyan')}  →  "
+            f"{click.style(sug.winner_page_id, fg='cyan')}  "
+            f"{_dim('(' + sug.reason + ')')}"
         )
         click.echo("")
 
-    if len(pairs) > limit:
+    click.echo("")
+    click.echo(
+        click.style("Suspected duplicate pairs", bold=True)
+        + f"  {_dim('(' + str(len(pairs)) + ')')}"
+    )
+    click.echo("")
+
+    if safe_pairs:
         click.echo(
-            _dim(
-                f"… and {len(pairs) - limit} more. "
-                f"Pass --limit N to see more."
-            )
+            click.style("Safe to auto-merge", bold=True)
+            + f"  {_dim('(' + str(len(safe_pairs)) + ')')}  "
+            + _dim("— run `wikiloom duplicates --auto-merge`")
         )
         click.echo("")
-    click.echo(
-        _dim(
-            "Tip: `wikiloom duplicates --review` to walk through them "
-            "interactively, or `--auto-merge` for safe variants."
+        for pair, sug in safe_pairs[:limit]:
+            _render_pair(pair, sug)
+        if len(safe_pairs) > limit:
+            click.echo(_dim(f"  … and {len(safe_pairs) - limit} more"))
+            click.echo("")
+
+    if review_pairs:
+        remaining_limit = max(0, limit - len(safe_pairs[:limit]))
+        click.echo(
+            click.style("Needs review", bold=True)
+            + f"  {_dim('(' + str(len(review_pairs)) + ')')}  "
+            + _dim("— run `wikiloom duplicates --review`")
         )
-    )
+        click.echo("")
+        shown_review = review_pairs[:remaining_limit] if remaining_limit else review_pairs
+        for pair, sug in shown_review:
+            _render_pair(pair, sug)
+        if len(review_pairs) > len(shown_review):
+            click.echo(
+                _dim(
+                    f"  … and {len(review_pairs) - len(shown_review)} more. "
+                    f"Pass --limit N to see more."
+                )
+            )
+            click.echo("")
     click.echo("")
 
 
@@ -3323,11 +3352,30 @@ def _print_report(report) -> None:
         click.echo("")
 
     if report.duplicates:
-        _section("Duplicates", len(report.duplicates))
+        total = len(report.duplicates)
+        safe = getattr(report, "duplicates_auto_safe", 0)
+        review = total - safe
+        split_note_parts = []
+        if safe:
+            split_note_parts.append(f"{safe} safe to auto-merge")
+        if review:
+            split_note_parts.append(f"{review} need review")
+        split_note = (
+            ", ".join(split_note_parts) if split_note_parts else None
+        )
+        _section("Duplicates", total, note=split_note)
         for d in report.duplicates[:_CAP]:
             pages = " ~ ".join(click.style(p, fg="cyan") for p in d.pages)
-            _item(f"{pages}  {_dim(f'({d.reason}, {d.score}%)')}")
-        _more(len(report.duplicates))
+            emb_display = (
+                f"emb {d.embedding_score:.2f}"
+                if d.embedding_score >= 0
+                else "emb n/a"
+            )
+            _item(
+                f"{pages}  "
+                f"{_dim(f'(slug {d.slug_score}%  •  {emb_display})')}"
+            )
+        _more(total)
         click.echo("")
 
     if report.frontmatter_issues:

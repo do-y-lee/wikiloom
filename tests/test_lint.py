@@ -333,6 +333,11 @@ def test_check_dormant_skips_deprecated(project: Path) -> None:
 
 
 def test_check_duplicates_flags_near_identical_titles(project: Path) -> None:
+    """Near-identical slugs get flagged via find_duplicates's slug match."""
+    from wikiloom.cache import SQLiteCache
+
+    _write_page(project, "concepts/flash-attention.md", title="Flash Attention")
+    _write_page(project, "concepts/flash-attentions.md", title="Flash Attentions")
     reg = Registry(project / "_registry", project / "wiki")
     reg.register_page(
         "concepts/flash-attention",
@@ -343,15 +348,29 @@ def test_check_duplicates_flags_near_identical_titles(project: Path) -> None:
         PageEntry(title="Flash Attentions", type="concept"),
     )
     reg.save()
+    # lint.check_duplicates now delegates to find_duplicates, which
+    # reads from the cache. Sync it to match real-world usage (lint
+    # typically runs after ingest, which syncs automatically).
+    SQLiteCache(project / "_registry" / "wiki.db").full_rebuild(project)
 
     linter = WikiLinter(project)
     dups = linter.check_duplicates()
     assert len(dups) == 1
-    assert set(dups[0].pages) == {"concepts/flash-attention", "concepts/flash-attentions"}
-    assert dups[0].reason == "title"
+    assert set(dups[0].pages) == {
+        "concepts/flash-attention",
+        "concepts/flash-attentions",
+    }
+    # Both signals populated on the shared DuplicateSet shape.
+    assert dups[0].slug_score >= 80
+    assert dups[0].embedding_score >= -1.0  # may be n/a if no cache
 
 
-def test_check_duplicates_flags_alias_overlap(project: Path) -> None:
+def test_check_duplicates_flags_near_identical_slugs(project: Path) -> None:
+    """Two pages with slug variants (openai / open-ai) are flagged."""
+    from wikiloom.cache import SQLiteCache
+
+    _write_page(project, "entities/openai.md", title="OpenAI", type_="entity")
+    _write_page(project, "entities/open-ai.md", title="Open-AI", type_="entity")
     reg = Registry(project / "_registry", project / "wiki")
     reg.register_page(
         "entities/openai",
@@ -362,6 +381,7 @@ def test_check_duplicates_flags_alias_overlap(project: Path) -> None:
         PageEntry(title="Open-AI", type="entity", aliases=["open ai inc"]),
     )
     reg.save()
+    SQLiteCache(project / "_registry" / "wiki.db").full_rebuild(project)
 
     linter = WikiLinter(project)
     dups = linter.check_duplicates()
@@ -658,7 +678,9 @@ def test_lint_report_total_issues_sums_all_categories() -> None:
         broken_links=[BrokenLink("a", "b", "")],
         orphans=["c"],
         dormant=[DormantPage("d", 100, 90)],  # informational, not counted
-        duplicates=[DuplicateSet(pages=("e", "f"), reason="title", score=95)],
+        duplicates=[
+            DuplicateSet(pages=("e", "f"), slug_score=95, embedding_score=-1.0)
+        ],
         frontmatter_issues=["g"],
         index_drift=["concepts"],
         contradictions=[],
