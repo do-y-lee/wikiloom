@@ -353,6 +353,20 @@ def _post_flight_budget_warning(project: Path) -> None:
     )
 
 
+def _page_not_found_message(page_id: str) -> str:
+    """Shared error text for commands that take a page_id argument.
+
+    Adds a consistent recovery hint so users aren't left guessing
+    how to find the right page_id. Used by related, show, links,
+    dormant, deprecate, purge, and similar commands.
+    """
+    return (
+        f"Page not found: {page_id}\n"
+        f"Tip: run `wikiloom search <keyword>` to find the right "
+        f"page_id, or `wikiloom orphans` to list candidates."
+    )
+
+
 def _auto_commit(project: Path, commit_type: str, description: str) -> None:
     """Stage every dirty file under ``wiki/`` + ``_registry/`` and commit.
 
@@ -417,6 +431,26 @@ def ingest(
                 "Run inside a project directory or pass --project."
             )
 
+    # Pre-flight: for local sources, fail fast with a friendly message
+    # when the path is wrong. URLs are resolved at fetch time by the
+    # extractor; we don't try to validate them here.
+    is_url = source.startswith(("http://", "https://"))
+    if not is_url:
+        src_path = Path(source).expanduser()
+        if not src_path.exists():
+            raise click.ClickException(
+                f"No such file: {source}\n"
+                f"Check the path and try again. Tip: drag the file into "
+                f"your terminal to get the exact path."
+            )
+        if src_path.is_dir():
+            raise click.ClickException(
+                f"Path is a directory, not a file: {source}\n"
+                f"Ingest takes one file at a time. To process a folder, "
+                f"loop over its files in your shell."
+            )
+        source = str(src_path)
+
     _require_clean_tree(project, "ingest")
     _warn_if_dirty(project)
     # CLI flag is a one-way opt-out. None leaves the config value in
@@ -433,6 +467,19 @@ def ingest(
         raise click.ClickException(str(exc)) from exc
     except ConfigError as exc:
         raise click.ClickException(str(exc)) from exc
+    except FileNotFoundError as exc:
+        # Backstop — the pre-flight check above covers the common case,
+        # but an extractor could still hit a missing path (e.g. for a
+        # nested resource). Keep the error friendly rather than leaking
+        # the extractor's backend exception.
+        raise click.ClickException(
+            f"File not found during ingest: {exc}\nCheck the path and try again."
+        ) from exc
+    except PermissionError as exc:
+        raise click.ClickException(
+            f"Permission denied reading source: {exc}\n"
+            f"Check file permissions (chmod / sudo)."
+        ) from exc
 
     # Summary
     created = len(result.pages_created)
@@ -1394,7 +1441,7 @@ def show(
         page_id = page_id[len("wiki/"):]
     page_path = project / "wiki" / f"{page_id}.md"
     if not page_path.exists():
-        raise click.ClickException(f"Page not found: {page_id}")
+        raise click.ClickException(_page_not_found_message(page_id))
 
     fm, _ = read_page(page_path)
     if fm is None:
@@ -1488,7 +1535,7 @@ def links(page_id: str, project: Path | None) -> None:
     registry = Registry(project / "_registry")
     page = registry.get_page(page_id)
     if page is None:
-        raise click.ClickException(f"Page not found: {page_id}")
+        raise click.ClickException(_page_not_found_message(page_id))
 
     bl = BacklinkRegistry(project / "_registry")
 
@@ -1569,7 +1616,7 @@ def related(page_id: str, limit: int, save: bool, link: bool, project: Path | No
     cache = SQLiteCache(project / "_registry" / "wiki.db")
     page = cache.get_page(page_id)
     if page is None:
-        raise click.ClickException(f"Page not found: {page_id}")
+        raise click.ClickException(_page_not_found_message(page_id))
 
     # Get this page's embedding
     import sqlite3
@@ -1921,7 +1968,7 @@ def _dormant_set_status(project: Path, page_id: str, mark: bool) -> None:
 
     page_path = project / "wiki" / f"{page_id}.md"
     if not page_path.exists():
-        raise click.ClickException(f"Page not found: {page_id}")
+        raise click.ClickException(_page_not_found_message(page_id))
 
     with FileLock(project):
         registry = Registry(project / "_registry")
@@ -2480,7 +2527,16 @@ def merge(winner: str, loser: str, yes: bool, project: Path | None) -> None:
                 f"{loser} into {winner}",
             )
     except ValueError as exc:
-        raise click.ClickException(str(exc)) from exc
+        msg = str(exc)
+        # Surface a recovery hint when the ValueError is a missing-
+        # page lookup — the most common merge failure in practice.
+        if "not found" in msg.lower():
+            msg = (
+                f"{msg}\n"
+                f"Tip: run `wikiloom search <keyword>` to find the right "
+                f"page_id, or `wikiloom duplicates` to see candidate pairs."
+            )
+        raise click.ClickException(msg) from exc
 
     click.echo(f"Merged {loser} into {winner}.")
     if result.rewrote_links_in:
@@ -2553,12 +2609,14 @@ def deprecate(
     registry = Registry(project / "_registry", wiki_dir=project / "wiki")
     entry = registry.get_page(page_id)
     if entry is None:
-        raise click.ClickException(f"Page not found in manifest: {page_id}")
+        raise click.ClickException(_page_not_found_message(page_id))
     if entry.status == "deprecated":
         raise click.ClickException(f"{page_id} is already deprecated.")
     if superseded_by and registry.get_page(superseded_by) is None:
         raise click.ClickException(
-            f"--superseded-by target not found: {superseded_by}"
+            f"--superseded-by target not found: {superseded_by}\n"
+            f"Tip: run `wikiloom search <keyword>` to find the right "
+            f"page_id for the replacement page."
         )
 
     if not yes:
@@ -2648,7 +2706,7 @@ def purge(page_id: str, yes: bool, project: Path | None) -> None:
     registry = Registry(project / "_registry", wiki_dir=project / "wiki")
     entry = registry.get_page(page_id)
     if entry is None:
-        raise click.ClickException(f"Page not found in manifest: {page_id}")
+        raise click.ClickException(_page_not_found_message(page_id))
     if entry.status != "deprecated":
         raise click.ClickException(
             f"{page_id} is not deprecated (status: {entry.status}). "
