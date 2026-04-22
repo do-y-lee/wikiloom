@@ -601,8 +601,22 @@ def ingest(
             from wikiloom.cache import SQLiteCache
             from wikiloom.embeddings import load_embedder
 
+            _embedder = load_embedder(project_root)
+            if _embedder is None and full_cfg.embeddings.enabled:
+                click.echo(
+                    click.style(
+                        "Warning: embeddings enabled in config but the "
+                        "embedder failed to load. Rows will carry NULL "
+                        "embeddings. Run `wikiloom rebuild-cache` after "
+                        "this ingest, or check that your embedding "
+                        "backend is installed (e.g. `pip install "
+                        "fastembed`).",
+                        fg="yellow",
+                    ),
+                    err=True,
+                )
             SQLiteCache(registry_dir / "wiki.db").sync_from_files(
-                project_root, staged, embedder=load_embedder(project_root)
+                project_root, staged, embedder=_embedder
             )
 
         # 15. Clear the resume checkpoint. Reaching this line means the

@@ -491,3 +491,52 @@ def test_none_changed_files_still_full_rebuilds(project: Path) -> None:
     # Full rebuild embeds every page.
     assert len(embedder.calls) == 1
     assert len(embedder.calls[0]) == 2
+
+
+def test_incremental_sync_batches_embed_calls(project: Path) -> None:
+    """A single _incremental_sync over many changed files must call
+    embed_texts in fixed-size batches (32) rather than one giant call.
+
+    Regression guard: a previous implementation passed every text in
+    one call, which caused the whole batch to fail silently when a
+    single over-length page body exceeded the backend's max sequence
+    length."""
+    cache = SQLiteCache(project / "_registry" / "wiki.db")
+    # Seed 70 pages — should produce 3 batches (32 + 32 + 6).
+    paths: list[Path] = []
+    for i in range(70):
+        p = _add_page(project, f"concepts/p{i:03d}", f"Page {i}")
+        paths.append(p)
+
+    embedder = _SpyEmbedder()
+    cache.sync_from_files(project, changed_files=paths, embedder=embedder)
+
+    assert len(embedder.calls) == 3
+    assert [len(c) for c in embedder.calls] == [32, 32, 6]
+
+
+class _FailingEmbedder:
+    """Always raises on embed_texts — simulates model-input overflow."""
+
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        raise RuntimeError("synthetic failure: input too long")
+
+
+def test_incremental_sync_surfaces_embedder_failure(
+    project: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """When embed_texts raises, the previous behavior silently produced
+    NULL embeddings with no feedback. Now we write a warning to stderr
+    so users can diagnose without digging into the cache."""
+    cache = SQLiteCache(project / "_registry" / "wiki.db")
+    path = _add_page(project, "concepts/foo", "Foo")
+
+    cache.sync_from_files(
+        project, changed_files=[path], embedder=_FailingEmbedder()
+    )
+
+    captured = capsys.readouterr()
+    assert "embed_texts failed" in captured.err
+    assert "NULL embeddings" in captured.err
+    # Page row still upserted; just with NULL embedding.
+    assert cache.get_page("concepts/foo") is not None

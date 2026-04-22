@@ -8,9 +8,60 @@ similarity queries. Regenerable via wikiloom rebuild-cache.
 from __future__ import annotations
 
 import sqlite3
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator
+
+# Batch size for embedding-model calls. Small enough that no single
+# call exceeds fastembed/sentence-transformer backend limits on
+# long-body pages; large enough that the per-call overhead amortizes.
+# Used by both full_rebuild and _incremental_sync.
+_EMBED_BATCH_SIZE = 32
+
+
+def _embed_in_batches(
+    embedder: Any,
+    texts: list[str],
+    progress: "Callable[[int, int], None] | None" = None,
+) -> list[bytes | None]:
+    """Compute embeddings in fixed-size batches, one batch at a time.
+
+    Serializes successful batches and returns one entry per input (None
+    for batches that raised). Surfaces any batch failure to stderr so
+    the user knows embeddings silently degraded — previous silent-
+    catch behavior meant a single long page could cause the entire
+    wiki to end up with NULL embeddings with no feedback.
+
+    ``progress`` is optional; when provided it's called as
+    ``progress(done, total)`` after each batch so the CLI can render
+    incremental status on large wikis.
+    """
+    from wikiloom.embeddings import serialize_embedding
+
+    total = len(texts)
+    out: list[bytes | None] = [None] * total
+    for start in range(0, total, _EMBED_BATCH_SIZE):
+        end = min(start + _EMBED_BATCH_SIZE, total)
+        batch = texts[start:end]
+        try:
+            vectors = embedder.embed_texts(batch)
+        except Exception as exc:
+            sys.stderr.write(
+                f"Warning: embedder.embed_texts failed on batch "
+                f"{start}–{end - 1} ({type(exc).__name__}: {exc}). "
+                f"Those pages will have NULL embeddings. Run "
+                f"`wikiloom rebuild-cache` to retry.\n"
+            )
+            sys.stderr.flush()
+            if progress is not None:
+                progress(end, total)
+            continue
+        for offset, v in enumerate(vectors):
+            out[start + offset] = serialize_embedding(v)
+        if progress is not None:
+            progress(end, total)
+    return out
 
 from wikiloom.backlinks import BacklinkRegistry
 from wikiloom.registry import Registry
@@ -239,30 +290,14 @@ class SQLiteCache:
                 page_count += 1
 
             # Batch-compute embeddings if an embedder was provided.
-            # Chunk into fixed-size groups so the progress callback
-            # can report incremental completion — embedders batch
-            # internally too, so this doesn't hurt throughput.
+            # Delegates to _embed_in_batches so full_rebuild and the
+            # incremental sync path share batching and error handling.
             embedding_blobs: list[bytes | None] = [None] * len(page_entries)
             if embedder is not None and page_entries:
-                from wikiloom.embeddings import serialize_embedding
-
-                batch_size = 32
-                try:
-                    total = len(page_entries)
-                    for start in range(0, total, batch_size):
-                        end = min(start + batch_size, total)
-                        batch_texts = [
-                            page_entries[i][3] for i in range(start, end)
-                        ]
-                        vectors = embedder.embed_texts(batch_texts)
-                        for offset, v in enumerate(vectors):
-                            embedding_blobs[start + offset] = (
-                                serialize_embedding(v)
-                            )
-                        if progress is not None:
-                            progress(end, total)
-                except Exception:
-                    pass  # embedding failure is non-fatal; pages still get indexed
+                texts = [e[3] for e in page_entries]
+                embedding_blobs = _embed_in_batches(
+                    embedder, texts, progress=progress
+                )
 
             for i, (page_id, entry, body_text, _) in enumerate(page_entries):
                 conn.execute(
@@ -408,18 +443,12 @@ class SQLiteCache:
 
         # Batch-embed only the changed subset — this is where the
         # incremental path earns back its cost over full_rebuild.
+        # Batched in _EMBED_BATCH_SIZE chunks so a single over-length
+        # page body doesn't poison the whole call.
         embedding_blobs: list[bytes | None] = [None] * len(to_upsert)
         if embedder is not None and to_upsert:
-            from wikiloom.embeddings import serialize_embedding
-
-            try:
-                texts = [t[3] for t in to_upsert]
-                vectors = embedder.embed_texts(texts)
-                embedding_blobs = [
-                    serialize_embedding(v) for v in vectors
-                ]
-            except Exception:
-                pass  # embedding failure is non-fatal
+            texts = [t[3] for t in to_upsert]
+            embedding_blobs = _embed_in_batches(embedder, texts)
 
         with self._connect() as conn:
             for page_id in to_delete:
