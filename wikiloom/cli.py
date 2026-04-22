@@ -1745,8 +1745,15 @@ def related(page_id: str, limit: int, save: bool, link: bool, project: Path | No
     help="Project root.",
 )
 def orphans(project: Path | None) -> None:
-    """List pages with no inbound or outbound wikilinks."""
+    """List pages with zero inbound wikilinks.
+
+    An orphan is a page nothing in the wiki links to — outbound links
+    don't count. Excludes sources (provenance, not meant to be linked
+    to), index pages (derived), and deprecated pages (out of flow).
+    Shares the same definition with ``wikiloom lint``.
+    """
     from wikiloom.backlinks import BacklinkRegistry
+    from wikiloom.lint import find_orphan_page_ids
     from wikiloom.registry import Registry
 
     if project is None:
@@ -1760,35 +1767,24 @@ def orphans(project: Path | None) -> None:
 
     registry = Registry(project / "_registry")
     bl = BacklinkRegistry(project / "_registry")
+    orphan_ids = find_orphan_page_ids(registry, bl)
 
-    # Build set of all pages that have any link (inbound or outbound)
-    linked_pages: set[str] = set()
-    for edge in bl.edges:
-        linked_pages.add(edge.source)
-        linked_pages.add(edge.target)
-
-    # Find pages in manifest that aren't in the linked set. Dormant
-    # pages count as orphans the same as active ones — being old
-    # doesn't change whether anything links to them.
-    orphan_list = []
-    for page_id, entry in registry.pages.items():
-        if entry.status == "deprecated":
-            continue
-        if entry.type == "index":
-            continue
-        if page_id not in linked_pages:
-            orphan_list.append((page_id, entry.title, entry.type))
-
-    if not orphan_list:
+    if not orphan_ids:
         click.echo("No orphan pages found.")
         return
 
+    # Hydrate display info (title + type) from the manifest.
+    orphan_list = [
+        (pid, registry.pages[pid].title, registry.pages[pid].type)
+        for pid in orphan_ids
+    ]
+
     click.echo(f"Orphan pages ({len(orphan_list)}):\n")
-    for pid, title, ptype in sorted(orphan_list):
+    for pid, title, ptype in orphan_list:
         click.echo(f"  [{ptype}] {title}")
         click.echo(f"          {pid}.md")
 
-    example_pid = sorted(orphan_list)[0][0]
+    example_pid = orphan_list[0][0]
     click.echo(
         f"\nTo find connections for a page, pass its path (without .md). Example:"
         f"\n  wikiloom related {example_pid}"

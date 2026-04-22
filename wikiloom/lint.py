@@ -133,6 +133,39 @@ _WIKILINK_RE = re.compile(r"\[\[([^\]|\n]+)(?:\|([^\]\n]+))?\]\]")
 _INDEX_TABLE_ROW_RE = re.compile(r"^\|\s*\[([^\]]+)\]\(([^)]+)\)", re.MULTILINE)
 
 
+def find_orphan_page_ids(
+    registry: Registry, backlinks: BacklinkRegistry
+) -> list[str]:
+    """Shared orphan definition for ``lint`` and ``wikiloom orphans``.
+
+    A page is an orphan when **nothing in the wiki links to it**
+    (zero inbound wikilinks) — outbound links don't count. Excludes
+    deprecated pages (out of normal flow), sources (provenance, not
+    expected to be linked to), and index pages (derived, not
+    content). Dormant pages are included if they have no inbound
+    links: dormant is about freshness, orphan is about graph
+    reachability; they're orthogonal.
+
+    Before this helper, ``cli.orphans`` defined orphan as zero edges
+    in *either* direction and ``lint.check_orphans`` defined it as
+    zero inbound with leaky filters — two commands disagreed on the
+    same project, which was confusing.
+    """
+    inbound: dict[str, int] = {}
+    for edge in backlinks._edges:  # noqa: SLF001 — intentional graph access
+        inbound[edge.target] = inbound.get(edge.target, 0) + 1
+
+    orphans: list[str] = []
+    for page_id, entry in registry.pages.items():
+        if entry.status == "deprecated":
+            continue
+        if entry.type in ("source", "index"):
+            continue
+        if inbound.get(page_id, 0) == 0:
+            orphans.append(page_id)
+    return sorted(orphans)
+
+
 class WikiLinter:
     """Runs the full lint pass and (optionally) applies auto-fixes."""
 
@@ -262,29 +295,13 @@ class WikiLinter:
         return broken
 
     def check_orphans(self) -> list[str]:
-        """Active manifest pages with zero inbound links.
+        """Manifest pages with zero inbound wikilinks.
 
-        Combines the backlink view (pages with edges but zero inbound)
-        with manifest pages that never showed up in ``backlinks.json``
-        at all — both count as orphans the linter should surface.
-        Excludes index pages and sources, which aren't expected to be
-        linked *to* from wiki prose.
+        Delegates to ``find_orphan_page_ids`` so ``wikiloom lint`` and
+        ``wikiloom orphans`` share one definition of orphan. See that
+        helper's docstring for the full rules.
         """
-        backlink_orphans = set(self.backlinks.get_orphans())
-        seen_in_backlinks: set[str] = set()
-        for edge in self.backlinks._edges:
-            seen_in_backlinks.add(edge.source)
-            seen_in_backlinks.add(edge.target)
-
-        orphans: set[str] = set(backlink_orphans)
-        for page_id, entry in self.registry.pages.items():
-            if entry.status != "active":
-                continue
-            if entry.type in ("source", "index"):
-                continue
-            if page_id not in seen_in_backlinks:
-                orphans.add(page_id)
-        return sorted(orphans)
+        return find_orphan_page_ids(self.registry, self.backlinks)
 
     def check_dormant(self) -> list[DormantPage]:
         """Active pages whose ``modified`` date exceeds the dormant window.
@@ -419,12 +436,21 @@ class WikiLinter:
             on_disk = {
                 p.stem for p in subdir.glob("*.md") if p.name != "index.md"
             }
-            listed = {
-                match.group(1)
-                for match in _INDEX_TABLE_ROW_RE.finditer(
-                    index_path.read_text(encoding="utf-8")
-                )
-            }
+            # Row format is ``| [Title](slug.md) | ... |`` — extract
+            # the URL (group 2) and strip ``.md`` to get the slug, so
+            # we compare slugs-against-file-stems. Previously we
+            # compared titles against stems, which never matched and
+            # made every project report drift on every lint run.
+            listed = set()
+            for match in _INDEX_TABLE_ROW_RE.finditer(
+                index_path.read_text(encoding="utf-8")
+            ):
+                url = match.group(2).strip()
+                if url.endswith(".md"):
+                    url = url[:-3]
+                # Strip any directory prefix (rare — rows typically
+                # reference sibling pages by bare filename).
+                listed.add(url.rsplit("/", 1)[-1])
             if on_disk != listed:
                 drifted.append(subdir.name)
         return drifted

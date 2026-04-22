@@ -204,6 +204,73 @@ def test_check_orphans_skips_source_pages(project: Path) -> None:
     assert "sources/paper" not in linter.check_orphans()
 
 
+def test_check_orphans_excludes_deprecated_source_and_index(
+    project: Path,
+) -> None:
+    """Regression guard: the old ``check_orphans`` leaked source pages
+    through because the type filter was only applied in one of two
+    code branches. Now the shared ``find_orphan_page_ids`` helper
+    filters consistently — deprecated, source, and index pages never
+    appear in the orphan list regardless of backlink state."""
+    # A source page with zero inbound — previously leaked.
+    _write_page(project, "sources/paper.md", type_="source")
+    _register(project, "sources/paper", type_="source")
+    # A deprecated page — should not appear.
+    _write_page(project, "concepts/old.md", status="deprecated")
+    _register(project, "concepts/old", status="deprecated")
+    # A genuine orphan to prove the function still finds real cases.
+    _write_page(project, "concepts/lonely.md")
+    _register(project, "concepts/lonely")
+    _rebuild_backlinks(project)
+
+    orphans = WikiLinter(project).check_orphans()
+    assert orphans == ["concepts/lonely"]
+
+
+def test_lint_and_cli_orphans_agree_on_same_project(project: Path) -> None:
+    """``wikiloom orphans`` and ``wikiloom lint`` must report the same
+    set of page_ids. Previous versions had two different definitions
+    (zero-edges vs zero-inbound) that disagreed on the same wiki."""
+    from click.testing import CliRunner
+
+    from wikiloom.cli import main
+    from wikiloom.lint import find_orphan_page_ids
+
+    # Seed a realistic mix: linked, orphan-by-inbound, deprecated,
+    # source — so any filter bug would show up as a divergence.
+    _write_page(project, "concepts/hub.md", body="[[concepts/leaf]]")
+    _write_page(project, "concepts/leaf.md")
+    _write_page(project, "concepts/island.md")  # orphan
+    _write_page(project, "sources/paper.md", type_="source")  # excluded
+    _register(project, "concepts/hub")
+    _register(project, "concepts/leaf")
+    _register(project, "concepts/island")
+    _register(project, "sources/paper", type_="source")
+    _rebuild_backlinks(project)
+
+    # Shared helper — the single source of truth for both commands.
+    expected = set(
+        find_orphan_page_ids(
+            Registry(project / "_registry"),
+            BacklinkRegistry(project / "_registry"),
+        )
+    )
+
+    # lint.check_orphans and cli.orphans must both match.
+    lint_result = set(WikiLinter(project).check_orphans())
+    assert lint_result == expected
+
+    runner = CliRunner()
+    cli_result = runner.invoke(
+        main, ["orphans", "--project", str(project)]
+    )
+    assert cli_result.exit_code == 0
+    for page_id in expected:
+        assert page_id in cli_result.output, (
+            f"{page_id} missing from cli orphans: {cli_result.output}"
+        )
+
+
 # ----------------------------------------------------------------------
 # check_dormant
 # ----------------------------------------------------------------------
@@ -368,6 +435,23 @@ def test_check_index_consistency_flags_missing_index(project: Path) -> None:
     # No index.md
     linter = WikiLinter(project)
     assert "concepts" in linter.check_index_consistency()
+
+
+def test_check_index_consistency_compares_slugs_not_titles(project: Path) -> None:
+    """Regression guard: the index rows use ``[Human Title](slug.md)``,
+    where the link text is a human-readable title and the URL is the
+    slug. The check must compare slugs (from the URL) against file
+    stems on disk — not the title text — or every real-world index
+    falsely reports drift because ``"Human Title" != "slug"``."""
+    _write_page(project, "concepts/consent-withdrawal.md")
+    (project / "wiki" / "concepts" / "index.md").write_text(
+        "# Concepts\n\n"
+        "| Page | Summary |\n"
+        "|------|---------|\n"
+        "| [Consent Withdrawal](consent-withdrawal.md) | s |\n"
+    )
+    linter = WikiLinter(project)
+    assert "concepts" not in linter.check_index_consistency()
 
 
 # ----------------------------------------------------------------------
