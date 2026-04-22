@@ -159,6 +159,10 @@ def _generate_config(
     name: str, domain: str, provider: str, model: str
 ) -> str:
     """Generate wikiloom.toml content."""
+    # Default ingest_model to the provider's cheap tier so bulk
+    # synthesis doesn't pay top-model prices by default. Users can
+    # flip it back to the default_model if they want uniformity.
+    cheap_model = PROVIDER_PRESETS.get(provider, {}).get("cheap_model") or ""
     return f"""\
 [project]
 name = "{name}"
@@ -169,12 +173,13 @@ schema_version = {SCHEMA_VERSION}
 [llm]
 provider = "{provider}"
 # `default_model` is used by any LLM-backed command that doesn't
-# have a per-command override below. Common split setup: cheap
-# `ingest_model` for bulk synthesis, stronger `query_model` for
-# reasoning at question time. Leave the overrides empty to use
-# `default_model` for everything.
+# have a per-command override below. `ingest_model` defaults to the
+# provider's cheap tier (Haiku, gpt-5-mini, gemini-flash) because
+# ingest synthesis is the bulk-token hotspot — the stronger
+# `default_model` is reserved for `query` and other reasoning tasks.
+# Leave an override empty to fall back to `default_model`.
 default_model = "{model}"
-ingest_model = ""
+ingest_model = "{cheap_model}"
 query_model = ""
 max_tokens_per_operation = 8000
 monthly_budget_usd = {DEFAULT_MONTHLY_BUDGET_USD}
