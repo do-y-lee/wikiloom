@@ -582,7 +582,6 @@ def lint(fix: bool, check_only: bool, project: Path | None) -> None:
                     f"repaired {fixes.total_fixed} page(s){detail}",
                 )
         _print_report(report)
-        click.echo("")
         summary_parts = [f"{fixes.total_fixed} fixed"]
         if fixes.broken_links_fixed:
             summary_parts.append(f"{fixes.broken_links_fixed} broken links")
@@ -595,6 +594,7 @@ def lint(fix: bool, check_only: bool, project: Path | None) -> None:
         click.echo(
             done_summary(summary_parts, elapsed=_time.monotonic() - start)
         )
+        click.echo("")
         return
 
     report = linter.run_all()
@@ -3255,56 +3255,120 @@ def rebuild_cache(project: Path | None) -> None:
 
 
 def _print_report(report) -> None:
-    """Render a ``LintReport`` to stdout."""
+    """Render a ``LintReport`` to stdout with the shared CLI style."""
+    click.echo("")
     if report.is_healthy and not report.promoted_from_update:
-        click.echo("Wiki is healthy.")
+        click.echo(f"{_check()} Wiki is healthy.")
+        click.echo("")
         return
 
-    click.echo(f"Issues found: {report.total_issues}")
+    _CAP = 10  # how many items to show per category before the trailing note.
+
+    def _section(name: str, count: int, note: str | None = None) -> None:
+        header = (
+            click.style(name, bold=True)
+            + f"  {_dim('(' + str(count) + ')')}"
+        )
+        if note:
+            header += f"  {_dim('— ' + note)}"
+        click.echo(header)
+
+    def _item(text: str) -> None:
+        click.echo(f"  {_dim('•')} {text}")
+
+    def _more(total: int, cap: int = _CAP) -> None:
+        if total > cap:
+            click.echo(f"  {_dim(f'… and {total - cap} more')}")
+
+    click.echo(
+        click.style("Lint report", bold=True)
+        + f"  {_dim(f'({report.total_issues} issue(s))')}"
+    )
+    click.echo("")
+
     if report.broken_links:
-        click.echo(f"  Broken links ({len(report.broken_links)}):")
-        for b in report.broken_links[:10]:
-            click.echo(f"    {b.source} → {b.target} ({b.reason})")
+        _section("Broken links", len(report.broken_links))
+        for b in report.broken_links[:_CAP]:
+            _item(
+                f"{click.style(b.source, fg='cyan')} → {b.target}  "
+                f"{_dim('(' + b.reason + ')')}"
+            )
+        _more(len(report.broken_links))
+        click.echo("")
+
     if report.orphans:
-        click.echo(
-            f"  Orphans ({len(report.orphans)}): {', '.join(report.orphans[:10])}")
+        _section("Orphans", len(report.orphans))
+        for pid in report.orphans[:_CAP]:
+            _item(click.style(pid, fg="cyan"))
+        _more(len(report.orphans))
+        click.echo("")
+
     if report.dormant:
-        click.echo(
-            f"  Dormant candidates ({len(report.dormant)}, informational — "
-            f"use `wikiloom dormant <page>` to mark):"
+        _section(
+            "Dormant candidates",
+            len(report.dormant),
+            note="informational — `wikiloom dormant <page>` to mark",
         )
-        for d in report.dormant[:10]:
-            click.echo(f"    {d.page_id} ({d.age_days}d > {d.window_days}d)")
+        for d in report.dormant[:_CAP]:
+            _item(
+                f"{click.style(d.page_id, fg='cyan')}  "
+                f"{_dim(f'({d.age_days}d > {d.window_days}d)')}"
+            )
+        _more(len(report.dormant))
+        click.echo("")
+
     if report.duplicates:
-        click.echo(f"  Duplicates ({len(report.duplicates)}):")
-        for d in report.duplicates[:10]:
-            click.echo(f"    {' ~ '.join(d.pages)} ({d.reason}, {d.score}%)")
+        _section("Duplicates", len(report.duplicates))
+        for d in report.duplicates[:_CAP]:
+            pages = " ~ ".join(click.style(p, fg="cyan") for p in d.pages)
+            _item(f"{pages}  {_dim(f'({d.reason}, {d.score}%)')}")
+        _more(len(report.duplicates))
+        click.echo("")
+
     if report.frontmatter_issues:
-        click.echo(
-            f"  Frontmatter issues ({len(report.frontmatter_issues)}): "
-            f"{', '.join(report.frontmatter_issues[:10])}"
-        )
+        _section("Frontmatter issues", len(report.frontmatter_issues))
+        for pid in report.frontmatter_issues[:_CAP]:
+            _item(click.style(pid, fg="cyan"))
+        _more(len(report.frontmatter_issues))
+        click.echo("")
+
     if report.index_drift:
-        click.echo(
-            f"  Index drift ({len(report.index_drift)}): "
-            f"{', '.join(report.index_drift)}"
-        )
+        _section("Index drift", len(report.index_drift))
+        for name in report.index_drift[:_CAP]:
+            _item(click.style(name, fg="cyan"))
+        _more(len(report.index_drift))
+        click.echo("")
+
     if report.contradictions:
-        click.echo(f"  Contradictions ({len(report.contradictions)}):")
-        for c in report.contradictions[:10]:
-            click.echo(f"    {c.page_id}: {c.existing[:40]} vs {c.new[:40]}")
+        _section("Contradictions", len(report.contradictions))
+        for c in report.contradictions[:_CAP]:
+            _item(
+                f"{click.style(c.page_id, fg='cyan')}  "
+                f"{_dim(f'{c.existing[:40]} vs {c.new[:40]}')}"
+            )
+        _more(len(report.contradictions))
+        click.echo("")
+
     if report.stubs:
-        click.echo(
-            f"  Stubs ({len(report.stubs)}): {', '.join(report.stubs[:10])}")
+        _section("Stubs", len(report.stubs))
+        for pid in report.stubs[:_CAP]:
+            _item(click.style(pid, fg="cyan"))
+        _more(len(report.stubs))
+        click.echo("")
+
     if report.promoted_from_update:
-        click.echo(
-            f"  Promoted from update "
-            f"({len(report.promoted_from_update)}, informational — "
-            f"review; the content was preserved from an LLM update "
-            f"that targeted a nonexistent page):"
+        _section(
+            "Promoted from update",
+            len(report.promoted_from_update),
+            note=(
+                "informational — LLM proposed an update for a nonexistent "
+                "page; content preserved as a new page for review"
+            ),
         )
-        for pid in report.promoted_from_update[:10]:
-            click.echo(f"    {pid}")
+        for pid in report.promoted_from_update[:_CAP]:
+            _item(click.style(pid, fg="cyan"))
+        _more(len(report.promoted_from_update))
+        click.echo("")
 
 
 if __name__ == "__main__":
