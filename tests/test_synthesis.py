@@ -20,6 +20,7 @@ from wikiloom.synthesis import (
     SynthesisResult,
     load_prompt,
     render_manifest_context,
+    render_namespace_list,
     run_synthesis,
     validate_ingest_response,
 )
@@ -200,6 +201,73 @@ def test_render_manifest_context_caps_at_max_pages(
     ctx = render_manifest_context(registry, max_pages=5)
     # header + separator + 5 rows
     assert ctx.count("\n") == 6
+
+
+# ----------------------------------------------------------------------
+# render_namespace_list
+# ----------------------------------------------------------------------
+
+
+def test_render_namespace_list_empty(project: Path, registry: Registry) -> None:
+    rendered = render_namespace_list(registry)
+    assert "no existing pages" in rendered.lower()
+
+
+def test_render_namespace_list_covers_every_active_page(
+    project: Path, registry: Registry
+) -> None:
+    registry.register_page(
+        "concepts/alpha",
+        PageEntry(title="Alpha", type="concept"),
+    )
+    registry.register_page(
+        "entities/zeta-corp",
+        PageEntry(title="Zeta Corp", type="entity"),
+    )
+    # Deprecated pages must be skipped — they're not valid targets.
+    registry.register_page(
+        "concepts/gone",
+        PageEntry(title="Gone", type="concept", status="deprecated"),
+    )
+    registry.save()
+
+    rendered = render_namespace_list(registry)
+
+    assert "concepts/alpha | Alpha" in rendered
+    assert "entities/zeta-corp | Zeta Corp" in rendered
+    assert "concepts/gone" not in rendered
+    # Sorted by page_id for cache stability.
+    assert rendered.index("concepts/alpha") < rendered.index("entities/zeta-corp")
+
+
+def test_run_synthesis_embeds_namespace_in_system_prompt(
+    project: Path, registry: Registry
+) -> None:
+    """The namespace list reaches the LLM as part of the (cached)
+    system prompt so every chunk's synthesis call sees every
+    existing page without paying per-chunk token cost."""
+    registry.register_page(
+        "concepts/alpha",
+        PageEntry(title="Alpha", type="concept"),
+    )
+    registry.save()
+
+    chunks = [_chunk("text", 0, 1)]
+    chunk_ids = ["c1"]
+    llm = _mock_llm_client([_ok_response()])
+
+    run_synthesis(
+        chunks=chunks,
+        chunk_ids=chunk_ids,
+        registry=registry,
+        llm_client=llm,
+        project_root=project,
+    )
+
+    call = llm.synthesize.call_args_list[0]
+    system_prompt_arg = call.args[0] if call.args else call.kwargs["system_prompt"]
+    assert "## NAMESPACE" in system_prompt_arg
+    assert "concepts/alpha | Alpha" in system_prompt_arg
 
 
 # ----------------------------------------------------------------------

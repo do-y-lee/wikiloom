@@ -105,7 +105,12 @@ If a chunk only briefly touches a topic, prefer the mentions arrays over creatin
 
 ## Handling existing pages (UPDATE vs CREATE)
 
-The user prompt includes an "Existing pages in the wiki" table of pages semantically related to the current chunk. **Use this table as your primary reference** when deciding between UPDATE and CREATE.
+Two references to cross-check before proposing a CREATE:
+
+1. **The NAMESPACE section appended to this prompt.** It lists *every* active page in the wiki as `page_id | title`. Scan it for any page whose title looks like the concept you're about to create — even if the wording differs slightly. Singular/plural variants, hyphenation differences, or a missing qualifier word (`X-service` vs `X`) all mean the concept already exists; emit an UPDATE, not a new CREATE.
+2. **The "Existing pages in the wiki" table in the user prompt.** This is a semantically-retrieved shortlist of pages similar to the current chunk. Rich context (summaries included) — use it to decide the exact UPDATE target and what to say.
+
+**Use the NAMESPACE as a duplicate-prevention checklist and the semantic table as the primary reference for UPDATE content.**
 
 For each page in the list, ask yourself:
 

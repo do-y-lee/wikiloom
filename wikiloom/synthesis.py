@@ -142,6 +142,29 @@ def load_prompt(project_root: Path) -> str:
 # ----------------------------------------------------------------------
 
 
+def render_namespace_list(registry: Registry) -> str:
+    """Render every active page as ``page_id | title`` lines.
+
+    Used as a compact "don't create duplicates of these" checklist
+    injected into the cached system prompt. Output is sorted by
+    page_id for stability so the Anthropic prompt cache treats
+    it as identical across chunks of the same ingest. Deprecated
+    pages are excluded — they're not valid update targets and
+    shouldn't block new creates.
+    """
+    live = [p for p in registry.pages.values() if p.status != "deprecated"]
+    if not live:
+        return "(the wiki has no existing pages yet)"
+    lines: list[str] = []
+    for page_id in sorted(registry.pages.keys()):
+        entry = registry.pages[page_id]
+        if entry.status == "deprecated":
+            continue
+        title = (entry.title or "").replace("\n", " ").replace("|", "\\|")
+        lines.append(f"{page_id} | {title}")
+    return "\n".join(lines)
+
+
 def render_manifest_context(
     registry: Registry,
     max_pages: int = MAX_MANIFEST_PAGES_IN_CONTEXT,
@@ -482,7 +505,22 @@ def run_synthesis(
             f"{len(chunks)} vs {len(chunk_ids)}"
         )
 
-    system_prompt = load_prompt(project_root)
+    # Append the full page-namespace to the system prompt so the LLM
+    # can avoid creating near-duplicates of pages that per-chunk
+    # retrieval didn't surface. The namespace is stable across every
+    # chunk of this ingest, so it rides on the existing system-prompt
+    # cache marker (Phase 1) at ~10% input cost for chunks 2..N.
+    system_prompt = (
+        load_prompt(project_root)
+        + "\n\n## NAMESPACE — every active page in this wiki\n\n"
+        + "Each line below is `page_id | title`. BEFORE emitting "
+        + "`pages_to_create`, compare each proposed `type/slug` and "
+        + "title against this list. If an existing page covers the "
+        + "same concept — even under a slightly different name — emit "
+        + "`pages_to_update` targeting that `page_id` instead. Do not "
+        + "create variants like `X-service` when `X` already exists.\n\n"
+        + render_namespace_list(registry)
+    )
     fallback_manifest_context = render_manifest_context(registry)
     per_chunk_retrieval = use_page_context and embedder is not None
 
