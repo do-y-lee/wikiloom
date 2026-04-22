@@ -361,6 +361,108 @@ def test_run_synthesis_dedupes_create_proposals_by_slug(
     assert result.pages_to_create[0].chunk_id == "c1"
 
 
+def test_run_synthesis_redirects_near_duplicate_create_to_update(
+    project: Path, registry: Registry
+) -> None:
+    """A proposed create whose page_id fuzzy-matches an existing manifest
+    entry gets converted to an update of that entry — prevents duplicate
+    pages like ``account-closure-procedure`` / ``account-closure-procedures``
+    from coexisting just because the LLM emitted a slight slug variant."""
+    # Seed an existing page in the manifest.
+    registry.register_page(
+        "concepts/account-closure-procedures",
+        PageEntry(
+            title="Account Closure Procedures",
+            type="concept",
+            status="active",
+            created="2026-01-01T00:00:00Z",
+            modified="2026-01-01T00:00:00Z",
+            summary="Procedures for closing an account.",
+        ),
+    )
+    registry.save()
+
+    chunks = [_chunk("text 1", 0, 1)]
+    chunk_ids = ["c1"]
+    llm = _mock_llm_client(
+        [
+            _ok_response(
+                creates=[
+                    _create_page(
+                        "account-closure-procedure",
+                        title="Account Closure Procedure",
+                    )
+                ]
+            ),
+        ]
+    )
+
+    result = run_synthesis(
+        chunks=chunks,
+        chunk_ids=chunk_ids,
+        registry=registry,
+        llm_client=llm,
+        project_root=project,
+    )
+
+    assert result.pages_to_create == []  # create was diverted
+    assert len(result.pages_to_update) == 1
+    update = result.pages_to_update[0]
+    assert update.intent == "update"
+    assert update.existing_path == "concepts/account-closure-procedures"
+    assert "Synthesized body for account-closure-procedure" in update.additions_markdown
+    # Note records the redirect so users can see it in ingest output.
+    assert any("slug collision redirected" in n for n in result.notes)
+
+
+def test_run_synthesis_does_not_redirect_distinct_concepts(
+    project: Path, registry: Registry
+) -> None:
+    """Pages that share a prefix but are genuinely different concepts
+    stay as creates — the 95% threshold is tight enough that e.g.
+    ``card-liability-limits`` doesn't collide with ``bank-liability-limits``.
+    """
+    registry.register_page(
+        "concepts/bank-liability-limits",
+        PageEntry(
+            title="Bank Liability Limits",
+            type="concept",
+            status="active",
+            created="2026-01-01T00:00:00Z",
+            modified="2026-01-01T00:00:00Z",
+            summary="Limits on bank liability.",
+        ),
+    )
+    registry.save()
+
+    chunks = [_chunk("text 1", 0, 1)]
+    chunk_ids = ["c1"]
+    llm = _mock_llm_client(
+        [
+            _ok_response(
+                creates=[
+                    _create_page(
+                        "card-liability-limits",
+                        title="Card Liability Limits",
+                    )
+                ]
+            ),
+        ]
+    )
+
+    result = run_synthesis(
+        chunks=chunks,
+        chunk_ids=chunk_ids,
+        registry=registry,
+        llm_client=llm,
+        project_root=project,
+    )
+
+    assert len(result.pages_to_create) == 1
+    assert result.pages_to_create[0].suggested_slug == "card-liability-limits"
+    assert result.pages_to_update == []
+
+
 def test_run_synthesis_update_proposals_accumulate(
     project: Path, registry: Registry
 ) -> None:

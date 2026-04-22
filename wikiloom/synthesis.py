@@ -14,6 +14,8 @@ from importlib import resources as importlib_resources
 from pathlib import Path
 from typing import Any, Callable
 
+from rapidfuzz import fuzz, process
+
 from wikiloom.ingest.extractors.base import ExtractedContent
 from wikiloom.ingest.state import IngestState
 from wikiloom.llm import LLMClient, SynthesizeResult
@@ -22,6 +24,12 @@ from wikiloom.registry import Registry
 
 PROMPT_FILENAME = "ingest.md"
 MAX_MANIFEST_PAGES_IN_CONTEXT = 100
+# Threshold for flagging a proposed new page as a near-duplicate of an
+# existing page. rapidfuzz token_sort_ratio, 0–100. Tight by design:
+# we want near-identical slug variants (plural/singular, hyphen drift,
+# token-drop) to convert to updates, but genuinely distinct concepts
+# that happen to share a prefix should still get their own page.
+SLUG_COLLISION_THRESHOLD = 95
 _VALID_PAGE_TYPES = frozenset({"entity", "concept", "synthesis", "decision"})
 _VALID_CONFIDENCES = frozenset({"high", "medium", "low"})
 
@@ -255,6 +263,54 @@ def validate_ingest_response(data: Any) -> list[str]:
 # ----------------------------------------------------------------------
 # Main loop
 # ----------------------------------------------------------------------
+
+
+# LLM emits singular type names ("concept", "entity"); manifest stores
+# plural directory names ("concepts/", "entities/"). Mirror of the
+# mapping in page_writer.py — keeping a local copy here avoids importing
+# page_writer into synthesis, which would create a circular dependency.
+_TYPE_TO_DIR = {
+    "entity": "entities",
+    "concept": "concepts",
+    "synthesis": "syntheses",
+    "decision": "decisions",
+}
+
+
+def _find_slug_collision(
+    proposed_type: str,
+    proposed_slug: str,
+    existing_page_ids: list[str],
+) -> str | None:
+    """Return an existing page_id that near-matches the proposed one, if any.
+
+    Scopes the comparison to the same type directory
+    (``concepts/``, ``entities/``, ...) because cross-type collisions
+    are typically meaningful — a concept and an entity that share a
+    name usually refer to distinct things. Uses rapidfuzz
+    token_sort_ratio with ``SLUG_COLLISION_THRESHOLD`` as the floor.
+    Returns the matched existing id or None.
+    """
+    type_dir = _TYPE_TO_DIR.get(proposed_type)
+    if not type_dir or not proposed_slug or not existing_page_ids:
+        return None
+    prefix = f"{type_dir}/"
+    candidates = [p for p in existing_page_ids if p.startswith(prefix)]
+    if not candidates:
+        return None
+    target = f"{prefix}{proposed_slug}"
+    best = process.extractOne(
+        target,
+        candidates,
+        scorer=fuzz.token_sort_ratio,
+        score_cutoff=SLUG_COLLISION_THRESHOLD,
+    )
+    if best is None:
+        return None
+    matched_id = best[0]
+    if matched_id == target:
+        return None  # exact identity isn't a "collision" to redirect
+    return matched_id
 
 
 def _format_abort_message(
@@ -519,6 +575,12 @@ def run_synthesis(
                         if not f.done():
                             f.cancel()
 
+    # Snapshot of existing manifest page_ids for the slug-collision
+    # guard. Mutable — we extend it as this ingest's own creates land,
+    # so two chunks proposing near-variants of a new page converge on
+    # a single target rather than producing duplicates of each other.
+    existing_page_ids: list[str] = list(registry.pages.keys())
+
     # Post-gather: walk results in chunk_index order so seen_slugs
     # dedup, state writes, and page-proposal ordering are deterministic
     # regardless of which worker finished first.
@@ -573,22 +635,59 @@ def run_synthesis(
             )
 
         for page_data in data.get("pages_to_create", []) or []:
-            key = (page_data.get("type", ""), page_data.get("suggested_slug", ""))
+            ptype = page_data.get("type", "")
+            slug = page_data.get("suggested_slug", "")
+            key = (ptype, slug)
             if key in seen_slugs:
                 continue
             seen_slugs.add(key)
+
+            # Slug-collision guard: if a proposed new page's page_id
+            # fuzzy-matches an existing one, divert to update instead.
+            # Catches "account-closure-procedure" when the wiki already
+            # has "account-closure-procedures", etc. The LLM can't
+            # always see the existing page through semantic retrieval
+            # alone, so this is a deterministic last-mile check.
+            collision = _find_slug_collision(
+                ptype, slug, existing_page_ids
+            )
+            if collision is not None:
+                pages_to_update.append(
+                    PageProposal(
+                        intent="update",
+                        chunk_id=chunk_id,
+                        existing_path=collision,
+                        additions_markdown=page_data.get(
+                            "content_markdown", ""
+                        ),
+                        contradictions=[],
+                    )
+                )
+                type_dir = _TYPE_TO_DIR.get(ptype, ptype)
+                notes.append(
+                    f"chunk {ci + 1}/{ct}: slug collision redirected "
+                    f"{type_dir}/{slug} → {collision}"
+                )
+                continue
+
             pages_to_create.append(
                 PageProposal(
                     intent="create",
                     chunk_id=chunk_id,
                     title=page_data.get("title", ""),
-                    type=page_data.get("type", ""),
-                    suggested_slug=page_data.get("suggested_slug", ""),
+                    type=ptype,
+                    suggested_slug=slug,
                     content_markdown=page_data.get("content_markdown", ""),
                     confidence=page_data.get("confidence", ""),
                     claims=list(page_data.get("claims", []) or []),
                 )
             )
+            # Track the just-created page_id so a later chunk in this
+            # same ingest can collide with it and redirect, instead of
+            # racing to create a second near-variant.
+            type_dir = _TYPE_TO_DIR.get(ptype)
+            if type_dir and slug:
+                existing_page_ids.append(f"{type_dir}/{slug}")
 
         for page_data in data.get("pages_to_update", []) or []:
             pages_to_update.append(
