@@ -69,11 +69,14 @@ class LintReport:
     index_drift: list[str] = field(default_factory=list)
     contradictions: list[Contradiction] = field(default_factory=list)
     stubs: list[str] = field(default_factory=list)
+    promoted_from_update: list[str] = field(default_factory=list)
 
     @property
     def total_issues(self) -> int:
-        # ``dormant`` is informational, not an "issue" — older pages
-        # don't lower project health. Excluded from this count.
+        # ``dormant`` and ``promoted_from_update`` are informational,
+        # not "issues" — they're review prompts, not health problems.
+        # Excluded from the total so a healthy wiki with promoted
+        # pages under review still reads as healthy.
         return (
             len(self.broken_links)
             + len(self.orphans)
@@ -165,6 +168,7 @@ class WikiLinter:
             index_drift=self.check_index_consistency(),
             contradictions=self.check_contradictions(),
             stubs=self.check_stubs(),
+            promoted_from_update=self.check_promoted_from_update(),
         )
 
     def fix_all(self, report: LintReport) -> FixReport:
@@ -453,6 +457,28 @@ class WikiLinter:
         return sorted(
             pid for pid, entry in self.registry.pages.items() if entry.status == "stub"
         )
+
+    def check_promoted_from_update(self) -> list[str]:
+        """Pages created via the 'unresolved update → promoted create' path.
+
+        Reads ``promoted_from_update`` from each active page's
+        frontmatter (not cached in the manifest, so this walks the
+        files). Reviewer decides whether to keep, deprecate, or
+        split; the flag is cleared by editing + ``wikiloom save``.
+        """
+        promoted: list[str] = []
+        for page_id, entry in self.registry.pages.items():
+            if entry.status == "deprecated":
+                continue
+            page_path = self._page_path(page_id)
+            if page_path is None or not page_path.exists():
+                continue
+            fm, _ = parse_frontmatter(
+                page_path.read_text(encoding="utf-8")
+            )
+            if fm is not None and fm.promoted_from_update:
+                promoted.append(page_id)
+        return sorted(promoted)
 
     # ------------------------------------------------------------------
     # Fix helpers

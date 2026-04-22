@@ -16,6 +16,7 @@ import click
 
 from wikiloom.cli_output import (
     check as _check,
+    cross as _cross,
     dim as _dim,
     done_summary,
     format_tokens as _format_tokens,
@@ -697,36 +698,63 @@ def _run_post_ingest_merge(
         return
 
     mode = full_cfg.ingest.post_merge
-    click.echo(f"\nPost-ingest merge candidates ({len(plan)} pair(s)):")
+    click.echo("")
+    click.echo(f"Post-ingest auto-merge  {_dim(f'({len(plan)} pair(s))')}")
+    click.echo("")
     for pair, sug in plan:
         emb = (
             f"{pair.embedding_score:.2f}"
             if pair.embedding_score >= 0
             else "n/a"
         )
-        click.echo(
-            f"  {sug.loser_page_id}  →  {sug.winner_page_id}  "
+        detail = _dim(
             f"(slug {pair.slug_score:.0f}%, emb {emb}, {sug.reason})"
+        )
+        click.echo(
+            f"  {sug.loser_page_id}  →  {sug.winner_page_id}  {detail}"
         )
 
     if mode == "preview":
+        click.echo("")
         click.echo(
-            'Preview mode. Set ingest.post_merge = "safe" in wikiloom.toml '
-            "to auto-merge these."
+            _dim(
+                'Preview mode. Set ingest.post_merge = "safe" in '
+                "wikiloom.toml to auto-merge these."
+            )
         )
         return
 
     from wikiloom.merge import merge_pages
 
+    check_mark = _check()
+    cross_mark = _cross()
     applied: list[tuple[str, str]] = []
+    skipped = 0
+    click.echo("")
+    _merge_start = time.monotonic()
     for pair, sug in plan:
         try:
             merge_pages(project_root, sug.winner_page_id, sug.loser_page_id)
             applied.append((sug.winner_page_id, sug.loser_page_id))
+            click.echo(
+                f"  {check_mark} {sug.loser_page_id}  →  "
+                f"{sug.winner_page_id}"
+            )
         except ValueError as exc:
-            click.echo(f"  ✗ skipped {sug.loser_page_id}: {exc}")
+            click.echo(
+                f"  {cross_mark} skipped {sug.loser_page_id}  "
+                f"{_dim(f'({exc})')}"
+            )
+            skipped += 1
 
     if not applied:
+        click.echo("")
+        click.echo(
+            done_summary(
+                [f"0 merged", f"{skipped} skipped"],
+                elapsed=time.monotonic() - _merge_start,
+            )
+        )
         return
 
     # One cache sync + one commit for the whole batch.
@@ -759,7 +787,13 @@ def _run_post_ingest_merge(
             git_ops.repo.git.add("-A", "--", scope)
     git_ops.commit([], message)
 
-    click.echo(f"Merged {len(applied)} pair(s).")
+    click.echo("")
+    click.echo(
+        done_summary(
+            [f"{len(applied)} merged", f"{skipped} skipped"],
+            elapsed=time.monotonic() - _merge_start,
+        )
+    )
 
     if full_cfg.ingest.auto_relink:
         _run_post_merge_relink(project_root, full_cfg, git_ops)
@@ -791,13 +825,16 @@ def _run_post_merge_relink(
         return
 
     total = len(all_pages)
+    click.echo("")
     click.echo(f"Re-linking {total} page(s)...")
+    click.echo("")
     start = _time.monotonic()
     step = max(25, max(1, total // 10))
+    check_mark = _check()
 
     def _progress(done: int, total_inner: int) -> None:
         if done == total_inner or done % step == 0:
-            click.echo(f"  {done}/{total_inner} pages linked...")
+            click.echo(f"  {check_mark} {done}/{total_inner} pages linked")
 
     registry = Registry(project_root / "_registry")
     linker = LinkingEngine(registry, config=full_cfg.linking)
@@ -827,9 +864,12 @@ def _run_post_merge_relink(
         )
 
     elapsed = _time.monotonic() - start
+    click.echo("")
     click.echo(
-        f"Re-linked {total} page(s) in {elapsed:.1f}s "
-        f"({len(linked)} updated). Backlinks rebuilt."
+        done_summary(
+            [f"{total} pages", f"{len(linked)} updated"],
+            elapsed=elapsed,
+        )
     )
 
     if linked:

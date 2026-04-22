@@ -143,6 +143,15 @@ class PageWriter:
             outcome = self._write_update(proposal, source_entry)
             if outcome.kind == "updated":
                 result.updated_paths.append(outcome.path)
+            elif outcome.kind == "created":
+                # Update target didn't exist — the writer promoted
+                # the update into a create using the LLM's proposed
+                # page_id. Count it under created pages.
+                result.created_paths.append(outcome.path)
+                result.notes.append(
+                    f"update target not found: {outcome.page_id} "
+                    f"— wrote as new page instead"
+                )
             elif outcome.kind == "skipped":
                 result.notes.append(
                     f"update target not found: {outcome.page_id} "
@@ -234,6 +243,8 @@ class PageWriter:
         self,
         proposal: PageProposal,
         source_entry: SourceEntry | None,
+        *,
+        promoted: bool = False,
     ) -> "_WriteOutcome":
         target = self._resolve_create_path(proposal)
         page_id = _path_to_page_id(target, self.wiki_dir)
@@ -249,6 +260,7 @@ class PageWriter:
                 proposal=proposal,
                 existing_fm=existing_fm,
                 source_entry=source_entry,
+                promoted=promoted,
             )
             write_page(target, fm, body)
             self._register(
@@ -266,6 +278,7 @@ class PageWriter:
             proposal=proposal,
             existing_fm=None,
             source_entry=source_entry,
+            promoted=promoted,
         )
         write_page(target, fm, body)
         self._register(
@@ -291,6 +304,8 @@ class PageWriter:
         proposal: PageProposal,
         existing_fm: Frontmatter | None,
         source_entry: SourceEntry | None,
+        *,
+        promoted: bool = False,
     ) -> Frontmatter:
         existing_sources = (existing_fm.sources if existing_fm else [])
         sources = _append_source(
@@ -310,6 +325,7 @@ class PageWriter:
             human_edited=False,
             contradictions=(existing_fm.contradictions if existing_fm else []),
             tags=(existing_fm.tags if existing_fm else []),
+            promoted_from_update=promoted,
         )
 
     # ------------------------------------------------------------------
@@ -327,7 +343,22 @@ class PageWriter:
 
         target = self.wiki_dir / f"{page_id}.md"
         if not target.exists():
-            return _WriteOutcome(kind="skipped", path=target, page_id=page_id)
+            # The LLM referenced a page that doesn't exist yet (a
+            # common hallucination: it names a plausible-sounding
+            # sibling page from training rather than from the
+            # manifest context). Instead of dropping the content on
+            # the floor, synthesize a create proposal from the
+            # update's additions_markdown and write it. Preserves
+            # the LLM's work; any resulting near-duplicate gets
+            # caught by the slug-collision guard or post-ingest
+            # merge on the next writer pass. The ``promoted=True``
+            # flag flows into the page's frontmatter so
+            # ``wikiloom lint`` can surface it for review.
+            return self._write_create(
+                _update_to_create_proposal(proposal, page_id),
+                source_entry,
+                promoted=True,
+            )
 
         existing_fm, existing_body = read_page(target)
         if existing_fm is None:
@@ -489,6 +520,39 @@ def _append_source(
         }
     )
     return out
+
+
+_DIR_TO_TYPE = {v: k for k, v in _TYPE_TO_DIR.items()}
+_DIR_TO_TYPE[_SOURCE_DIR] = "source"
+
+
+def _update_to_create_proposal(
+    proposal: PageProposal, page_id: str
+) -> PageProposal:
+    """Synthesize a create proposal from an unresolved update.
+
+    Derives ``type`` and ``suggested_slug`` from the update's
+    ``existing_path`` (which the LLM already chose), infers a title
+    from the slug, and uses the update's ``additions_markdown`` as
+    the new page body. Confidence defaults to ``"medium"`` since
+    the LLM didn't explicitly set one for this proposal.
+    """
+    if "/" in page_id:
+        type_dir, slug = page_id.split("/", 1)
+    else:
+        type_dir, slug = "", page_id
+    inferred_type = _DIR_TO_TYPE.get(type_dir, "concept")
+    title = slug.replace("-", " ").title() if slug else page_id
+    return PageProposal(
+        intent="create",
+        chunk_id=proposal.chunk_id,
+        title=title,
+        type=inferred_type,
+        suggested_slug=slug,
+        content_markdown=proposal.additions_markdown,
+        confidence="medium",
+        claims=[],
+    )
 
 
 def _normalize_existing_path(raw: str) -> str:

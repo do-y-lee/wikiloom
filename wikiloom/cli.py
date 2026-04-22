@@ -437,16 +437,32 @@ def ingest(
     # Summary
     created = len(result.pages_created)
     updated = len(result.pages_updated)
+    total_tok = result.total_tokens_in + result.total_tokens_out
+    click.echo("")
     if created or updated:
+        from wikiloom.cli_output import (
+            done_summary,
+            format_tokens as _fmt_tok,
+        )
+
         click.echo(
-            f"Done: {created} page(s) created, {updated} updated"
-            f" ({result.total_tokens_in + result.total_tokens_out:,} tokens, "
-            f"${result.total_cost_usd:.2f})"
+            done_summary(
+                [
+                    f"{created} created",
+                    f"{updated} updated",
+                    f"{_fmt_tok(total_tok)} tok",
+                    f"${result.total_cost_usd:.2f}",
+                ]
+            )
         )
     else:
-        click.echo("Done: no pages synthesized.")
-    for note in result.notes:
-        click.echo(f"Note: {note}")
+        click.echo("  Done. no pages synthesized.")
+
+    if result.notes:
+        click.echo("")
+        click.echo(click.style("Notes", bold=True))
+        for note in result.notes:
+            click.echo(f"  {_dim('•')} {note}")
     _post_flight_budget_warning(project)
 
 
@@ -3048,7 +3064,7 @@ def rebuild_cache(project: Path | None) -> None:
 
 def _print_report(report) -> None:
     """Render a ``LintReport`` to stdout."""
-    if report.is_healthy:
+    if report.is_healthy and not report.promoted_from_update:
         click.echo("Wiki is healthy.")
         return
 
@@ -3088,6 +3104,15 @@ def _print_report(report) -> None:
     if report.stubs:
         click.echo(
             f"  Stubs ({len(report.stubs)}): {', '.join(report.stubs[:10])}")
+    if report.promoted_from_update:
+        click.echo(
+            f"  Promoted from update "
+            f"({len(report.promoted_from_update)}, informational — "
+            f"review; the content was preserved from an LLM update "
+            f"that targeted a nonexistent page):"
+        )
+        for pid in report.promoted_from_update[:10]:
+            click.echo(f"    {pid}")
 
 
 if __name__ == "__main__":

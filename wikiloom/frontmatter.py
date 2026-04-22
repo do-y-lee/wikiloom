@@ -37,6 +37,12 @@ class Frontmatter:
     contradictions: list[dict[str, str]] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
     related_pages: list[str] = field(default_factory=list)
+    # Set True when this page was created because an LLM ``pages_to_update``
+    # proposal referenced a page_id that didn't exist — the writer promoted
+    # it to a create to preserve the content. Surfaced by ``wikiloom lint``
+    # so users can review whether the content really belongs in the wiki.
+    # The user clears it via an edit + ``wikiloom save`` after review.
+    promoted_from_update: bool = False
 
     def all_chunk_ids(self) -> list[str]:
         """Flatten chunk_ids across all sources, preserving order."""
@@ -71,6 +77,7 @@ class Frontmatter:
             "contradictions": self.contradictions,
             "tags": self.tags,
             "related_pages": self.related_pages,
+            "promoted_from_update": self.promoted_from_update,
         }
 
     @classmethod
@@ -97,6 +104,9 @@ class Frontmatter:
             contradictions=data.get("contradictions", []),
             tags=data.get("tags", []),
             related_pages=data.get("related_pages", []),
+            promoted_from_update=bool(
+                data.get("promoted_from_update", False)
+            ),
         )
 
 

@@ -418,18 +418,67 @@ def test_update_unions_chunk_ids(project: Path, registry: Registry) -> None:
     assert "c-b" in chunk_ids
 
 
-def test_update_to_nonexistent_page_is_skipped(
+def test_update_to_nonexistent_page_promotes_to_create(
     project: Path, registry: Registry
 ) -> None:
+    """When the LLM proposes an update for a page that doesn't exist
+    yet — often a plausible-sounding page it ""remembered"" from its
+    training rather than from the manifest — the writer should
+    preserve the content by promoting the update to a create under
+    the proposed page_id, not silently drop it. A note records what
+    happened so the user isn't surprised by a page they didn't see
+    in pages_to_create."""
     writer = PageWriter(project, registry)
     result = writer.write(
         _synth(
             source_title=None,
-            updates=[_update_proposal("concepts/nonexistent", "new content")],
+            updates=[
+                _update_proposal(
+                    "concepts/overdraft-protection",
+                    "Overdraft protection covers transactions when the "
+                    "account is low on funds.",
+                )
+            ],
         ),
         source_entry=_source_entry(),
     )
-    assert any("concepts/nonexistent" in n for n in result.notes)
+
+    # The update got converted into a new page.
+    expected_path = (
+        project / "wiki" / "concepts" / "overdraft-protection.md"
+    )
+    assert expected_path.exists()
+    assert expected_path in result.created_paths
+    assert expected_path not in result.updated_paths
+
+    # And a note explains the promotion.
+    assert any(
+        "concepts/overdraft-protection" in n
+        and "wrote as new page instead" in n
+        for n in result.notes
+    )
+
+    # Title is derived from the slug.
+    saved = expected_path.read_text(encoding="utf-8")
+    assert "Overdraft Protection" in saved
+
+
+def test_update_without_existing_path_is_still_skipped(
+    project: Path, registry: Registry
+) -> None:
+    """An update proposal with empty/missing existing_path can't be
+    promoted — there's no slug to derive from. Still skipped."""
+    writer = PageWriter(project, registry)
+    result = writer.write(
+        _synth(
+            source_title=None,
+            updates=[_update_proposal("", "stray content")],
+        ),
+        source_entry=_source_entry(),
+    )
+    # No file created for an empty target.
+    assert result.created_paths == []
+    assert result.updated_paths == []
 
 
 def test_update_accepts_varied_path_formats(

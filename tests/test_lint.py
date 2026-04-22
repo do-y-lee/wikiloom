@@ -9,7 +9,7 @@ import pytest
 
 from wikiloom.backlinks import BacklinkRegistry
 from wikiloom.config import DormantConfig
-from wikiloom.frontmatter import Frontmatter, render_frontmatter
+from wikiloom.frontmatter import Frontmatter, parse_frontmatter, render_frontmatter
 from wikiloom.lint import (
     BrokenLink,
     DormantPage,
@@ -408,6 +408,49 @@ def test_check_stubs_returns_stub_pages(project: Path) -> None:
     linter = WikiLinter(project)
     stubs = linter.check_stubs()
     assert stubs == ["concepts/stub1"]
+
+
+def test_check_promoted_from_update_flags_only_promoted_pages(
+    project: Path,
+) -> None:
+    """The check lists page_ids whose frontmatter has
+    ``promoted_from_update: true``, ignoring everything else."""
+    # Regular page — flag is False by default.
+    _write_page(project, "concepts/normal.md")
+    _register(project, "concepts/normal")
+
+    # Promoted page — write manually with the flag set.
+    path = project / "wiki" / "concepts" / "from-hallucination.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fm = Frontmatter(
+        title="From Hallucination",
+        type="concept",
+        status="active",
+        created=now_iso(),
+        modified=now_iso(),
+        summary="summary",
+        promoted_from_update=True,
+    )
+    path.write_text(render_frontmatter(fm) + "\nbody\n", encoding="utf-8")
+    _register(project, "concepts/from-hallucination")
+
+    # Deprecated pages are excluded — they're out of normal flow.
+    _write_page(project, "concepts/old.md", status="deprecated")
+    _register(project, "concepts/old", status="deprecated")
+    deprecated_path = project / "wiki" / "concepts" / "old.md"
+    fm_dep, body = parse_frontmatter(
+        deprecated_path.read_text(encoding="utf-8")
+    )
+    assert fm_dep is not None
+    fm_dep.promoted_from_update = True
+    deprecated_path.write_text(
+        render_frontmatter(fm_dep) + "\n" + body,
+        encoding="utf-8",
+    )
+
+    linter = WikiLinter(project)
+    promoted = linter.check_promoted_from_update()
+    assert promoted == ["concepts/from-hallucination"]
 
 
 # ----------------------------------------------------------------------
