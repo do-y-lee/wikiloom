@@ -1179,22 +1179,15 @@ def status(project: Path | None) -> None:
     click.echo(f"  Human-edited: {stats['human_edited']}")
     click.echo("")
 
-    # Graph section: linkage health.
+    # Graph section: linkage health. Uses the shared orphan definition
+    # so status, orphans, and lint all report the same count.
     from wikiloom.backlinks import BacklinkRegistry
+    from wikiloom.lint import find_orphan_page_ids
     from wikiloom.registry import Registry
 
     registry_obj = Registry(registry_dir)
     bl = BacklinkRegistry(registry_dir)
-    linked_pages: set[str] = set()
-    for edge in bl.edges:
-        linked_pages.add(edge.source)
-        linked_pages.add(edge.target)
-    orphan_count = sum(
-        1 for pid, entry in registry_obj.pages.items()
-        if entry.status != "deprecated"
-        and entry.type != "index"
-        and pid not in linked_pages
-    )
+    orphan_count = len(find_orphan_page_ids(registry_obj, bl))
 
     click.echo(click.style("Graph", bold=True))
     click.echo(
