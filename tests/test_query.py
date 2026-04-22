@@ -296,3 +296,42 @@ def test_save_flag_writes_synthesis_page(project: Path) -> None:
     assert saved_fm is not None
     assert saved_fm.type == "synthesis"
     assert "Flash Attention" in saved_body
+
+
+def test_save_last_regenerates_indexes(project: Path) -> None:
+    """`wikiloom query --save-last` must regenerate wiki/syntheses/index.md
+    and the root wiki/index.md. Earlier versions only wrote the page
+    file and updated the manifest, leaving indexes out of sync until the
+    next ingest/relink."""
+    from wikiloom.cli import _save_query_as_page
+
+    synthesis_index = project / "wiki" / "syntheses" / "index.md"
+    root_index = project / "wiki" / "index.md"
+
+    # Capture the pre-save content so we can prove the save call modified it.
+    before_synthesis_index = (
+        synthesis_index.read_text() if synthesis_index.exists() else ""
+    )
+
+    _save_query_as_page(
+        {
+            "question": "What is flash attention?",
+            "answer": "Flash attention is an I/O-aware attention algorithm.",
+            "confidence": "high",
+            "sources_consulted": [],
+        },
+        project,
+    )
+
+    # The synthesis page file exists…
+    page_path = project / "wiki" / "syntheses" / "what-is-flash-attention.md"
+    assert page_path.exists()
+
+    # …and both indexes now reference it.
+    assert synthesis_index.exists()
+    synthesis_index_text = synthesis_index.read_text()
+    assert "what-is-flash-attention" in synthesis_index_text
+    assert synthesis_index_text != before_synthesis_index
+
+    assert root_index.exists()
+    assert "syntheses" in root_index.read_text()

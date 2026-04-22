@@ -945,7 +945,19 @@ def _save_query_as_page(data: dict, project: Path) -> None:
     )
     registry.register_page(page_id, entry)
     registry.save()
-    _sync_cache(project, changed_files=[page_path])
+
+    # Regenerate category and root indexes so the new synthesis page
+    # appears in wiki/syntheses/index.md and wiki/index.md. Every
+    # other writer path (ingest, relink) rebuilds indexes after a
+    # manifest change — this one was missing that call, leaving the
+    # indexes out of sync until the next ingest or relink.
+    from wikiloom.search import IndexUpdater
+
+    index_paths = IndexUpdater(
+        project / "wiki", registry=registry
+    ).rebuild_all()
+    changed = [page_path, *index_paths]
+    _sync_cache(project, changed_files=changed)
     title_snippet = question[:60]
     _auto_commit(project, "query", f'saved synthesis "{title_snippet}"')
 
@@ -2119,12 +2131,19 @@ def _finalize_batch_merge(
     """
     if not applied:
         return
+    from wikiloom.registry import Registry
+    from wikiloom.search import IndexUpdater
+
     wiki_dir = project / "wiki"
     touched_paths: list[Path] = []
     for winner, loser in applied:
         touched_paths.append(wiki_dir / f"{winner}.md")
         touched_paths.append(wiki_dir / f"{loser}.md")
-    _sync_cache(project, changed_files=touched_paths)
+    # Rebuild indexes so archived losers disappear from category
+    # indexes and the root index.
+    registry = Registry(project / "_registry")
+    index_paths = IndexUpdater(wiki_dir, registry=registry).rebuild_all()
+    _sync_cache(project, changed_files=touched_paths + list(index_paths))
     body = "\n".join(f"  {loser} → {winner}" for winner, loser in applied)
     description = f"{commit_subject}\n\n{body}"
     _auto_commit(project, "merge", description)
@@ -2377,11 +2396,20 @@ def merge(winner: str, loser: str, yes: bool, project: Path | None) -> None:
         with FileLock(project):
             result = merge_pages(project, winner, loser)
             wiki_dir = project / "wiki"
+            # Rebuild indexes so the archived loser disappears.
+            from wikiloom.registry import Registry
+            from wikiloom.search import IndexUpdater
+
+            registry = Registry(project / "_registry")
+            index_paths = IndexUpdater(
+                wiki_dir, registry=registry
+            ).rebuild_all()
             _sync_cache(
                 project,
                 changed_files=[
                     wiki_dir / f"{winner}.md",
                     wiki_dir / f"{loser}.md",
+                    *index_paths,
                 ],
             )
             _auto_commit(
@@ -2481,6 +2509,8 @@ def deprecate(
             return
 
     with FileLock(project):
+        from wikiloom.search import IndexUpdater
+
         original_path = project / "wiki" / f"{page_id}.md"
         archive_path = registry.deprecate_page(
             page_id,
@@ -2489,12 +2519,18 @@ def deprecate(
             emit_event=True,
         )
         registry.save()
+        # Rebuild indexes so the deprecated page disappears from the
+        # category/root indexes.
+        index_paths = IndexUpdater(
+            project / "wiki", registry=registry
+        ).rebuild_all()
         # Original path is gone (file moved) — incremental sync will
         # drop the old row. The archive file is a new page_id so it
         # gets upserted too.
         touched = [original_path]
         if archive_path is not None:
             touched.append(archive_path)
+        touched.extend(index_paths)
         _sync_cache(project, changed_files=touched)
         suffix = f" (superseded by {superseded_by})" if superseded_by else ""
         _auto_commit(project, "deprecate", f"{page_id}{suffix}")
@@ -2575,6 +2611,8 @@ def purge(page_id: str, yes: bool, project: Path | None) -> None:
             return
 
     with FileLock(project):
+        from wikiloom.search import IndexUpdater
+
         if archive_file.exists():
             archive_file.unlink()
         # Remove manifest entry directly — there's no Registry method for this
@@ -2582,7 +2620,12 @@ def purge(page_id: str, yes: bool, project: Path | None) -> None:
         if page_id in registry._pages:  # noqa: SLF001
             del registry._pages[page_id]  # noqa: SLF001
             registry.save()
-        _sync_cache(project, changed_files=[archive_file])
+        index_paths = IndexUpdater(
+            project / "wiki", registry=registry
+        ).rebuild_all()
+        _sync_cache(
+            project, changed_files=[archive_file, *index_paths]
+        )
         _auto_commit(project, "deprecate", f"purge {page_id}")
 
     click.echo(f"Purged {page_id}.")
@@ -2828,18 +2871,28 @@ def save(message: str | None, dry_run: bool, project: Path | None) -> None:
         commit_msg = f"human-edit: {commit_msg}"
 
     with FileLock(project):
+        from wikiloom.registry import Registry
+        from wikiloom.search import IndexUpdater
+
         # Auto-bump frontmatter.modified on each saved page so manual
         # edits don't silently roll into dormant. Also flip dormant →
         # active since the user just touched the page. `_bump_...`
         # self-skips anything that isn't a wiki/*.md page, so config
         # and prompt edits flow through untouched.
         freshened = _bump_modified_and_freshen(project, dirty)
+        # Rebuild indexes so newly-created pages (human edits that
+        # added whole new files) show up in category/root indexes.
+        registry = Registry(project / "_registry")
+        index_paths = IndexUpdater(
+            project / "wiki", registry=registry
+        ).rebuild_all()
         # `git add -A -- <paths>` handles adds, modifications, and
         # deletions in one call, which matters for pages the user
         # removed via their editor.
-        git.repo.git.add("-A", "--", *[str(p) for p in dirty])
+        staged = list(dirty) + list(index_paths)
+        git.repo.git.add("-A", "--", *[str(p) for p in staged])
         git.commit([], commit_msg)
-        _sync_cache(project, changed_files=list(dirty))
+        _sync_cache(project, changed_files=staged)
 
     click.echo(f"Saved {len(dirty)} file(s).")
     if freshened:

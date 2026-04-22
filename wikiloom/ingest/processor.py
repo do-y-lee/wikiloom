@@ -725,9 +725,14 @@ def _run_post_ingest_merge(
     for winner, loser in applied:
         touched_paths.append(wiki_dir / f"{winner}.md")
         touched_paths.append(wiki_dir / f"{loser}.md")
+    # Rebuild indexes so archived losers disappear from category/root
+    # indexes even when auto_relink is false (post-merge relink is the
+    # other path that would otherwise cover this).
+    registry = Registry(registry_dir)
+    index_paths = IndexUpdater(wiki_dir, registry=registry).rebuild_all()
     SQLiteCache(registry_dir / "wiki.db").sync_from_files(
         project_root,
-        changed_files=touched_paths,
+        changed_files=touched_paths + list(index_paths),
         embedder=load_embedder(project_root),
     )
 
