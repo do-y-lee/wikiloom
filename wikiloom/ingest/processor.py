@@ -33,6 +33,7 @@ from wikiloom.ingest.errors import (
     BudgetExceededError,
     EmptyExtractionError,
     FileTooLargeError,
+    IngestError,
 )
 from wikiloom.ingest.extractors.base import ExtractedContent
 from wikiloom.ingest.page_writer import PageWriter
@@ -249,11 +250,22 @@ def ingest(
                     source_path, existing, content_hash
                 )
 
-        # 1. Extract
+        # 1. Extract. URL sources must pass the original ``source``
+        # string through — ``Path(source)`` normalizes ``https://`` to
+        # ``https:/`` which then fails to fetch.
         click.echo("")
-        click.echo(f"Extracting {source_path.name}...")
+        if is_url:
+            click.echo(f"Extracting {source}...")
+        else:
+            click.echo(f"Extracting {source_path.name}...")
         extractor = router.route(source)
-        content = extractor.extract(source_path)
+        extract_arg = source if is_url else source_path
+        try:
+            content = extractor.extract(extract_arg)
+        except RuntimeError as exc:
+            # Network / fetch / parse failure from the extractor.
+            # Surface as a clean message instead of a traceback.
+            raise IngestError(str(exc)) from exc
 
         # Guard 2: empty-extraction. Raised *after* we've routed to an
         # extractor so the error message can cite the content_type.
