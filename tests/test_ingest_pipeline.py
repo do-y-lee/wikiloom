@@ -410,3 +410,91 @@ def test_ingest_populates_event_log_with_real_tokens(
     # Cost rounds to $0.00 at current pricing — the important thing
     # is that a cost line exists, not its exact value.
     assert "**Cost**" in log_content
+
+
+def test_post_merge_relink_scopes_cache_sync_to_linked_pages(
+    project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_run_post_merge_relink`` must NOT trigger a blind full_rebuild.
+
+    Regression guard: the previous version called
+    ``sync_from_files(project_root, embedder=...)`` with no
+    ``changed_files``, which silently fell through to ``full_rebuild``.
+    Under any embedder hiccup at that moment, the whole wiki's
+    embeddings ended up NULL because full_rebuild DROPs the pages
+    table before re-embedding.
+
+    Now the sync must pass ``changed_files=<linked>`` so at worst
+    only the handful of pages the linker actually modified are
+    re-embedded, and unaffected rows keep their existing embeddings.
+    """
+    from wikiloom.ingest.processor import _run_post_merge_relink
+    from wikiloom.config import Config
+
+    # Seed a page so rglob finds at least one .md file.
+    wiki_dir = project / "wiki"
+    (wiki_dir / "concepts").mkdir(parents=True, exist_ok=True)
+    (wiki_dir / "concepts" / "alpha.md").write_text(
+        "---\ntitle: Alpha\ntype: concept\nstatus: active\n---\nBody.\n",
+        encoding="utf-8",
+    )
+
+    # Stub LinkingEngine.link_all to return a fixed "linked" list of
+    # one page — the thing we want to verify gets passed through.
+    linked_paths = [wiki_dir / "concepts" / "alpha.md"]
+
+    import wikiloom.ingest.processor as processor_module
+
+    class _StubLinker:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def link_all(self, pages: list[Path], progress: Any = None) -> list[Path]:
+            return linked_paths
+
+    monkeypatch.setattr(
+        "wikiloom.linker.LinkingEngine", _StubLinker, raising=True
+    )
+
+    # Capture the sync_from_files arguments to prove changed_files is
+    # passed (not None → no full_rebuild).
+    from wikiloom.cache import SQLiteCache
+
+    sync_calls: list[dict[str, Any]] = []
+    real_sync = SQLiteCache.sync_from_files
+
+    def spy_sync(self: Any, *args: Any, **kwargs: Any) -> Any:
+        # args[0] is project_root; kwargs carry changed_files/embedder
+        sync_calls.append({
+            "project_root": args[0] if args else None,
+            "changed_files": kwargs.get("changed_files"),
+            "has_embedder": kwargs.get("embedder") is not None,
+        })
+        return real_sync(self, *args, **kwargs)
+
+    monkeypatch.setattr(SQLiteCache, "sync_from_files", spy_sync)
+
+    # Stub git commit — no repo state needed for this test.
+    class _StubRepoGit:
+        def add(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+    class _StubRepo:
+        git = _StubRepoGit()
+
+    class _StubGitOps:
+        repo = _StubRepo()
+
+        def commit(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+    cfg = Config(project_root=project)
+    _run_post_merge_relink(project, cfg, _StubGitOps())
+
+    # Exactly one sync should have happened, with changed_files set
+    # to the linker's output — NOT None.
+    assert len(sync_calls) == 1
+    call = sync_calls[0]
+    assert call["changed_files"] == linked_paths
+    assert call["changed_files"] is not None

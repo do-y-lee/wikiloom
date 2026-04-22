@@ -808,12 +808,23 @@ def _run_post_merge_relink(
     backlinks.save()
     IndexUpdater(wiki_dir, registry=registry).rebuild_all()
 
-    from wikiloom.cache import SQLiteCache
-    from wikiloom.embeddings import load_embedder
+    # Scope the cache sync to just the pages the linker actually
+    # modified. The previous version passed no ``changed_files`` and
+    # silently fell through to ``full_rebuild``, which DROPs the
+    # pages table and re-embeds from scratch — if the embedder
+    # hiccuped at that point, every row ended up with NULL
+    # embeddings. Incremental sync on ``linked`` only touches the
+    # handful of pages that actually changed, leaving the rest of
+    # the embedding column intact even under an embedder failure.
+    if linked:
+        from wikiloom.cache import SQLiteCache
+        from wikiloom.embeddings import load_embedder
 
-    SQLiteCache(project_root / "_registry" / "wiki.db").sync_from_files(
-        project_root, embedder=load_embedder(project_root)
-    )
+        SQLiteCache(project_root / "_registry" / "wiki.db").sync_from_files(
+            project_root,
+            changed_files=linked,
+            embedder=load_embedder(project_root),
+        )
 
     elapsed = _time.monotonic() - start
     click.echo(
