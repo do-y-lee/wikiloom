@@ -162,6 +162,52 @@ def test_status_stats_empty_project(project: Path) -> None:
     assert stats["backlinks"] == 0
 
 
+def test_status_does_not_wipe_embeddings(project: Path) -> None:
+    """`wikiloom status` is a read-only command. Previous versions
+    called cache.full_rebuild(project) without passing an embedder,
+    which silently rebuilt the pages table with every row's embedding
+    set to NULL. This regression guard seeds a page with a non-NULL
+    embedding, invokes the status command, and asserts the embedding
+    survives."""
+    import sqlite3
+
+    from click.testing import CliRunner
+
+    from wikiloom.cli import main
+
+    _add_page(project, "concepts/alpha", "Alpha")
+    cache = SQLiteCache(project / "_registry" / "wiki.db")
+
+    class _StubEmbedder:
+        def embed_texts(self, texts: list[str]) -> list[list[float]]:
+            return [[0.1, 0.2, 0.3, 0.4] for _ in texts]
+
+    cache.full_rebuild(project, embedder=_StubEmbedder())
+
+    # Seed embedding is present before we call status.
+    conn = sqlite3.connect(str(project / "_registry" / "wiki.db"))
+    before = conn.execute(
+        "SELECT embedding FROM pages WHERE page_id = ?",
+        ("concepts/alpha",),
+    ).fetchone()[0]
+    conn.close()
+    assert before is not None, "fixture failed to seed embedding"
+
+    runner = CliRunner()
+    result = runner.invoke(main, ["status", "--project", str(project)])
+    assert result.exit_code == 0, result.output
+
+    conn = sqlite3.connect(str(project / "_registry" / "wiki.db"))
+    after = conn.execute(
+        "SELECT embedding FROM pages WHERE page_id = ?",
+        ("concepts/alpha",),
+    ).fetchone()[0]
+    conn.close()
+
+    assert after is not None, "status wiped the embedding (regression)"
+    assert after == before, "status mutated the embedding"
+
+
 def test_status_stats_with_pages(project: Path) -> None:
     _add_page(project, "concepts/alpha", "Alpha")
     _add_page(project, "concepts/beta", "Beta")

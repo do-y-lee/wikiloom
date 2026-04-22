@@ -166,7 +166,8 @@ def init(
         if env_status == "saved":
             click.echo(f"     ✓ {api_key_env} saved to {project_dir}/.env")
         elif env_status == "empty":
-            click.echo(f"     Edit {project_dir}/.env and set {api_key_env}=...")
+            click.echo(
+                f"     Edit {project_dir}/.env and set {api_key_env}=...")
             click.echo(f"     ({preset['api_key_hint']})")
         else:
             click.echo(f"     cd {project_dir.name} && cp .env.example .env")
@@ -177,7 +178,8 @@ def init(
         click.echo(f"     {preset['api_key_hint']}")
     click.echo("")
 
-    click.echo("  2. (Recommended) Review the synthesis prompt — shapes every page WikiLoom writes")
+    click.echo(
+        "  2. (Recommended) Review the synthesis prompt — shapes every page WikiLoom writes")
     click.echo(f"     {prompt_path}")
     click.echo("")
 
@@ -186,7 +188,8 @@ def init(
     cheap_model = preset["cheap_model"]
     if cheap_model:
         click.echo(f"     Tip: switch to {cheap_model} for cheap iteration,")
-        click.echo(f"          back to {chosen_model} once the prompt feels right.")
+        click.echo(
+            f"          back to {chosen_model} once the prompt feels right.")
     click.echo("")
 
     click.echo("  4. Ingest your first file")
@@ -478,7 +481,8 @@ def lint(fix: bool, check_only: bool, project: Path | None) -> None:
     from wikiloom.locking import FileLock
 
     if fix and check_only:
-        raise click.UsageError("--fix and --check-only are mutually exclusive.")
+        raise click.UsageError(
+            "--fix and --check-only are mutually exclusive.")
 
     if project is None:
         project = _find_project_root(Path.cwd())
@@ -814,7 +818,8 @@ def query(
         return
 
     if not question:
-        raise click.UsageError("Missing argument 'QUESTION'. Use --last-detail or --save-last for the previous result.")
+        raise click.UsageError(
+            "Missing argument 'QUESTION'. Use --last-detail or --save-last for the previous result.")
 
     cfg = _load_config(project)
     if cfg is None:
@@ -902,10 +907,13 @@ def query(
     if not detail:
         click.echo("")
         click.echo("Next:")
-        click.echo(f'  wikiloom query --detail "{question}"   # re-run with sources + metadata')
-        click.echo("  wikiloom query --last-detail            # show sources + metadata for this answer without re-running")
+        click.echo(
+            f'  wikiloom query --detail "{question}"   # re-run with sources + metadata')
+        click.echo(
+            "  wikiloom query --last-detail            # show sources + metadata for this answer without re-running")
         if answer.suggest_synthesis:
-            click.echo("  wikiloom query --save-last              # save this answer as a wiki synthesis page")
+            click.echo(
+                "  wikiloom query --save-last              # save this answer as a wiki synthesis page")
 
 
 def _save_query_as_page(data: dict, project: Path) -> None:
@@ -1044,29 +1052,39 @@ def status(project: Path | None) -> None:
 
     _warn_if_dirty(project)
 
+    # Read-only command. Stats come from whatever's in the SQLite cache,
+    # which writer commands keep current.
     registry_dir = project / "_registry"
     cache = SQLiteCache(registry_dir / "wiki.db")
-    cache.full_rebuild(project)
     stats = cache.get_stats()
 
-    click.echo(f"WikiLoom project: {project.name}")
-    click.echo(f"  Pages: {stats['total_pages']}")
-    if stats["by_type"]:
-        for t, count in sorted(stats["by_type"].items()):
-            click.echo(f"    {t}: {count}")
-    if stats["by_status"]:
-        active_n = stats["by_status"].get("active", 0)
-        dormant_n = stats["by_status"].get("dormant", 0)
-        deprecated_n = stats["by_status"].get("deprecated", 0)
-        click.echo(
-            f"  Status: active {active_n}, dormant {dormant_n}, "
-            f"deprecated {deprecated_n}"
-        )
-    click.echo(f"  Human-edited: {stats['human_edited']}")
-    click.echo(f"  Backlinks: {stats['backlinks']}")
-    click.echo(f"  Aliases: {stats['aliases']}")
+    sep = _dim("•")
 
-    # Orphan count
+    click.echo(
+        f"WikiLoom project: {click.style(project.name, fg='cyan', bold=True)}"
+    )
+    click.echo("")
+
+    # Content section: page-type/status breakdown.
+    click.echo(click.style("Content", bold=True))
+    total_pages = stats["total_pages"]
+    by_type = stats.get("by_type") or {}
+    type_parts = [f"{c} {t}" for t, c in sorted(by_type.items())]
+    type_suffix = f"  {_dim('(' + ', '.join(type_parts) + ')')}" if type_parts else ""
+    click.echo(f"  Pages: {total_pages}{type_suffix}")
+
+    by_status = stats.get("by_status") or {}
+    active_n = by_status.get("active", 0)
+    dormant_n = by_status.get("dormant", 0)
+    deprecated_n = by_status.get("deprecated", 0)
+    click.echo(
+        f"  Status: {active_n} active  {sep}  "
+        f"{dormant_n} dormant  {sep}  {deprecated_n} deprecated"
+    )
+    click.echo(f"  Human-edited: {stats['human_edited']}")
+    click.echo("")
+
+    # Graph section: linkage health.
     from wikiloom.backlinks import BacklinkRegistry
     from wikiloom.registry import Registry
 
@@ -1082,16 +1100,28 @@ def status(project: Path | None) -> None:
         and entry.type != "index"
         and pid not in linked_pages
     )
-    click.echo(f"  Orphans: {orphan_count}")
 
+    click.echo(click.style("Graph", bold=True))
+    click.echo(
+        f"  {stats['backlinks']} backlinks  {sep}  "
+        f"{stats['aliases']} aliases  {sep}  {orphan_count} orphans"
+    )
+    click.echo("")
+
+    # Storage section: source + chunk provenance.
     chunk_store = ChunkStore(registry_dir / "wiki.db")
-    click.echo(f"  Chunks stored: {chunk_store.count()}")
-
+    source_count = 0
     if registry_dir.exists():
         catalog = SourceCatalog(registry_dir)
         source_count = len(catalog._entries)  # noqa: SLF001
-        click.echo(f"  Sources ingested: {source_count}")
 
+    click.echo(click.style("Storage", bold=True))
+    click.echo(
+        f"  {chunk_store.count()} chunks stored  {sep}  "
+        f"{source_count} sources ingested"
+    )
+
+    # Incomplete-ingest warning, if any — stays prominent.
     from wikiloom.ingest.state import IngestState
 
     incomplete = IngestState.load(registry_dir)
@@ -1101,24 +1131,30 @@ def status(project: Path | None) -> None:
         done = total_chunks - len(pending)
         click.echo("")
         click.echo(
-            f"  WARNING: incomplete ingest for {incomplete.source_name}"
-        )
-        click.echo(
-            f"           ({done}/{total_chunks} chunks synthesized "
-            f"— re-run with --force)"
+            click.style(
+                f"  ⚠ Incomplete ingest for {incomplete.source_name} "
+                f"({done}/{total_chunks} chunks — re-run with --force)",
+                fg="yellow",
+            )
         )
 
     events = parse_log(project / "wiki" / "log.md")
     if events:
+        click.echo("")
+        click.echo(click.style("Last event", bold=True))
         last = events[0]
         click.echo(
-            f"  Last event: {last['event_type']} | "
-            f"{last['description']} ({last['timestamp']})"
+            f"  {last['event_type']} {sep} {last['description']}"
         )
+        click.echo(f"  {_dim(str(last['timestamp']))}")
+
         total_tokens = sum(int(e.get("tokens_used", 0)) for e in events)
         total_cost = sum(float(e.get("cost_usd", 0.0)) for e in events)
-        click.echo(f"  Total tokens: {total_tokens:,}")
-        click.echo(f"  Total cost: ${total_cost:.2f}")
+        click.echo("")
+        click.echo(click.style("Usage", bold=True))
+        click.echo(
+            f"  {total_tokens:,} tokens  {sep}  ${total_cost:.2f}"
+        )
 
 
 @main.command("log")
@@ -1169,7 +1205,8 @@ def log_cmd(limit: int, project: Path | None) -> None:
         click.echo(line)
 
     if len(events) > limit:
-        click.echo(f"\n... {len(events) - limit} more event(s). Use -n to see more.")
+        click.echo(
+            f"\n... {len(events) - limit} more event(s). Use -n to see more.")
 
 
 @main.command("edits")
@@ -1206,10 +1243,12 @@ def edits(limit: int, project: Path | None) -> None:
     # regex. Anchored to the start of the subject so we don't catch
     # anything that merely mentions "human-edit:" in the body.
     commits = list(
-        gitops.repo.iter_commits(all=False, grep=r"^human-edit:", max_count=limit + 1)
+        gitops.repo.iter_commits(
+            all=False, grep=r"^human-edit:", max_count=limit + 1)
     )
     if not commits:
-        click.echo("No human edits yet — use `wikiloom save` to commit manual changes.")
+        click.echo(
+            "No human edits yet — use `wikiloom save` to commit manual changes.")
         return
 
     shown = commits[:limit]
@@ -1255,7 +1294,8 @@ def cost(project: Path | None) -> None:
         etype = str(event.get("event_type", "other"))
         tokens = int(event.get("tokens_used", 0))
         cost_usd = float(event.get("cost_usd", 0.0))
-        bucket = by_type.setdefault(etype, {"tokens": 0, "cost": 0.0, "count": 0})
+        bucket = by_type.setdefault(
+            etype, {"tokens": 0, "cost": 0.0, "count": 0})
         bucket["tokens"] += tokens
         bucket["cost"] += cost_usd
         bucket["count"] += 1
@@ -1276,7 +1316,8 @@ def cost(project: Path | None) -> None:
         total_events += n
         click.echo(f"{etype:<16} {n:>8} {t:>12,} ${c:>7.2f}")
     click.echo("---------------- -------- ------------ --------")
-    click.echo(f"{'Total':<16} {total_events:>8} {total_tokens:>12,} ${total_cost:>7.2f}")
+    click.echo(
+        f"{'Total':<16} {total_events:>8} {total_tokens:>12,} ${total_cost:>7.2f}")
 
     cfg = _load_config(project)
     if cfg is not None:
@@ -1541,7 +1582,8 @@ def related(page_id: str, limit: int, save: bool, link: bool, project: Path | No
         if edge.target == page_id:
             linked_ids.add(edge.source)
 
-    results = cache.semantic_search(page_vec, limit=limit + len(linked_ids) + 1)
+    results = cache.semantic_search(
+        page_vec, limit=limit + len(linked_ids) + 1)
 
     # Filter out the page itself, already-linked pages, and apply threshold
     threshold = 0.60
@@ -1619,7 +1661,8 @@ def related(page_id: str, limit: int, save: bool, link: bool, project: Path | No
 
         actions = []
         if save:
-            actions.append(f"{len(related_pages)} related page(s) to frontmatter")
+            actions.append(
+                f"{len(related_pages)} related page(s) to frontmatter")
         if link:
             actions.append(f"{len(new_links)} wikilink(s) to page body")
         click.echo(f"\nSaved: {', '.join(actions)}.")
@@ -1812,7 +1855,8 @@ def _dormant_list_candidates(project: Path) -> None:
     candidates = linter.check_dormant()
 
     if not candidates:
-        click.echo("No dormant candidates — all active pages are within their windows.")
+        click.echo(
+            "No dormant candidates — all active pages are within their windows.")
         return
 
     click.echo(
@@ -2053,7 +2097,8 @@ def duplicates(
     from wikiloom.duplicates import find_duplicates, suggest_winner
 
     if review and auto_merge:
-        raise click.UsageError("--review and --auto-merge are mutually exclusive.")
+        raise click.UsageError(
+            "--review and --auto-merge are mutually exclusive.")
 
     if project is None:
         project = _find_project_root(Path.cwd())
@@ -2166,7 +2211,8 @@ def _run_review_mode(project: Path, pairs: list) -> None:
     skip_glyph = _skip_mark()
 
     click.echo(f"Reviewing {total} suspected duplicate pair(s).")
-    click.echo("For each pair: [y]es merge / [s]wap winner-loser / [n]o skip / [q]uit")
+    click.echo(
+        "For each pair: [y]es merge / [s]wap winner-loser / [n]o skip / [q]uit")
     click.echo("")
     start = _time.monotonic()
 
@@ -2602,10 +2648,12 @@ def purge(page_id: str, yes: bool, project: Path | None) -> None:
         if archive_file.exists():
             click.echo(f"  - delete {archive_file.relative_to(project)}")
         else:
-            click.echo("  - delete the manifest entry (archive file already missing)")
+            click.echo(
+                "  - delete the manifest entry (archive file already missing)")
         click.echo(f"  - remove the manifest entry for {page_id}")
         click.echo("  This cannot be undone via wikiloom (only via git revert).")
-        typed = click.prompt(f"\nType the page_id to confirm", default="", show_default=False)
+        typed = click.prompt(f"\nType the page_id to confirm",
+                             default="", show_default=False)
         if typed.strip() != page_id:
             click.echo("Aborted: confirmation did not match.")
             return
@@ -2666,7 +2714,8 @@ def review(accept_all: bool, clear: bool, project: Path | None) -> None:
     from wikiloom.locking import FileLock
 
     if accept_all and clear:
-        raise click.UsageError("--accept-all and --clear are mutually exclusive.")
+        raise click.UsageError(
+            "--accept-all and --clear are mutually exclusive.")
 
     if project is None:
         project = _find_project_root(Path.cwd())
@@ -3009,7 +3058,8 @@ def _print_report(report) -> None:
         for b in report.broken_links[:10]:
             click.echo(f"    {b.source} → {b.target} ({b.reason})")
     if report.orphans:
-        click.echo(f"  Orphans ({len(report.orphans)}): {', '.join(report.orphans[:10])}")
+        click.echo(
+            f"  Orphans ({len(report.orphans)}): {', '.join(report.orphans[:10])}")
     if report.dormant:
         click.echo(
             f"  Dormant candidates ({len(report.dormant)}, informational — "
@@ -3036,7 +3086,8 @@ def _print_report(report) -> None:
         for c in report.contradictions[:10]:
             click.echo(f"    {c.page_id}: {c.existing[:40]} vs {c.new[:40]}")
     if report.stubs:
-        click.echo(f"  Stubs ({len(report.stubs)}): {', '.join(report.stubs[:10])}")
+        click.echo(
+            f"  Stubs ({len(report.stubs)}): {', '.join(report.stubs[:10])}")
 
 
 if __name__ == "__main__":
