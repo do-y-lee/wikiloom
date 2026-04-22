@@ -19,9 +19,11 @@ This wiki documents [GENERAL TOPIC — e.g. "consumer banking products and proce
 
 ## Writing tone, length, structure
 
+> These rules apply when **creating** a new page body (`pages_to_create.content_markdown`). **Updates** emit `additions_markdown` — new content to append to an existing page — so follow the tone and density guidance for what you add, but the 100–400 word length target applies only to fresh creates. Existing pages naturally grow as they accumulate updates across ingests; that's expected, not a violation.
+
 - **Tone:** encyclopedic, neutral, third-person. Like a reference page, not a blog post. No first-person ("we", "our"), no marketing language ("powerful", "robust", "best-in-class").
-- **Page length:** target 100–400 words for each page body. A stub for low-confidence topics can be shorter.
-- **Opening:** start each page with a one-sentence definition that could stand alone (the page's `summary` is derived from this).
+- **Page length (CREATE only):** target 100–400 words for each new page body. A stub for low-confidence topics can be shorter.
+- **Opening (CREATE only):** start each new page with a one-sentence definition that could stand alone (the page's `summary` is derived from this).
 - **Structure:** use H2 headings (`## Section`) for sub-sections. Use bullet lists for enumerable items, prose for explanations. Don't over-section — short pages don't need headings at all.
 - **Density:** every sentence should add a fact. Avoid filler ("This is an important topic", "Many people use this", "It is widely known that"). If you can delete a sentence without losing information, delete it.
 
@@ -115,21 +117,22 @@ Two references to cross-check before proposing a CREATE:
 For each page in the list, ask yourself:
 
 1. Would this chunk's content fit naturally as additions to that page, using its existing title and scope? → propose **UPDATE** with `existing_path = <that page's page_id>`.
-2. Does the chunk describe a sibling concept, a more specific case, a different mechanism, or a related-but-distinct topic? → propose **CREATE**, even if the topic is related.
+2. Does the chunk describe a sibling concept, a more specific case, a different mechanism, or a related-but-distinct topic? → propose **CREATE**, only if it's genuinely orthogonal to every existing page.
 
 ### Tiebreaker rules when uncertain
 
-- **Default to CREATE.** Duplicates can be merged later with `wikiloom merge`, but wrong merges require restoring archived content and rewriting wikilinks — much harder to undo. Prefer two slightly-overlapping pages over one incorrectly-merged page.
-- If you would need a **different page title** to accurately describe this chunk's content, that's a CREATE signal.
+- **Default to UPDATE.** If the chunk's content could fit under an existing page's topic — even as a new section — propose UPDATE. Only CREATE when the content is genuinely orthogonal to every existing page in both the NAMESPACE list (appended to this prompt) and the semantic candidates table (in the user prompt).
+- **Prefer one broader page with multiple sections over several narrow pages.** A single `zelle-service` page with sections for enrollment, fees, limits, and cancellation is better than four separate pages. A single `ach-collections-service` page with sub-sections is better than nine separate `ach-collections-*` pages. Group sub-topics of a service or product under the parent concept.
+- If the chunk describes a **sibling concept at the same specificity level** as existing pages (not a sub-topic of them), CREATE is appropriate. Example: `zelle-service` and `venmo-service` are siblings; `zelle-service-fees` is a sub-topic.
 - If the chunk **contradicts** an existing page's claims, propose UPDATE with a `contradictions` array — never silently overwrite.
 
 ### When using UPDATE
 
-Copy the target `page_id` exactly from the candidates table — do not paraphrase it, do not guess at the slug, and do not mix case. If no page in the table is a clear match, CREATE.
+Copy the target `page_id` exactly from the candidates table or NAMESPACE list — do not paraphrase it, do not guess at the slug, and do not mix case. If no existing page is a clear match, CREATE.
 
 ### When creating
 
-Pick a concise, canonical slug. Avoid disambiguating suffixes (e.g. prefer `transaction-posting` over `transaction-posting-banking`) unless a sibling concept with the bare slug truly exists on a different topic.
+Pick a concise, canonical slug at the **broadest useful specificity** — avoid disambiguating suffixes like `-service`, `-rules`, `-procedures`, `-policy` unless they distinguish from an existing sibling with the bare slug. Prefer `account-closure` over `account-closure-procedures`, `positive-pay` over `positive-pay-service`. A narrow suffix is a signal that the content probably belongs under a broader parent instead.
 
 ### Dormant pages in the candidates table
 

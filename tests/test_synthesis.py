@@ -232,12 +232,15 @@ def test_render_namespace_list_covers_every_active_page(
     registry.save()
 
     rendered = render_namespace_list(registry)
+    lines = rendered.splitlines()
 
-    assert "concepts/alpha | Alpha" in rendered
-    assert "entities/zeta-corp | Zeta Corp" in rendered
-    assert "concepts/gone" not in rendered
-    # Sorted by page_id for cache stability.
-    assert rendered.index("concepts/alpha") < rendered.index("entities/zeta-corp")
+    # page_id only, no title column, no separator.
+    assert "concepts/alpha" in lines
+    assert "entities/zeta-corp" in lines
+    assert "concepts/gone" not in lines
+    assert "|" not in rendered  # titles dropped to halve token cost
+    # Sorted for cache stability.
+    assert lines.index("concepts/alpha") < lines.index("entities/zeta-corp")
 
 
 def test_run_synthesis_embeds_namespace_in_system_prompt(
@@ -267,7 +270,9 @@ def test_run_synthesis_embeds_namespace_in_system_prompt(
     call = llm.synthesize.call_args_list[0]
     system_prompt_arg = call.args[0] if call.args else call.kwargs["system_prompt"]
     assert "## NAMESPACE" in system_prompt_arg
-    assert "concepts/alpha | Alpha" in system_prompt_arg
+    # Namespace lines carry page_ids only (titles dropped to halve cost).
+    assert "concepts/alpha" in system_prompt_arg
+    assert "concepts/alpha | Alpha" not in system_prompt_arg
 
 
 # ----------------------------------------------------------------------

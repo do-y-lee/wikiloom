@@ -143,26 +143,27 @@ def load_prompt(project_root: Path) -> str:
 
 
 def render_namespace_list(registry: Registry) -> str:
-    """Render every active page as ``page_id | title`` lines.
+    """Render every non-deprecated page as a single page_id per line.
 
     Used as a compact "don't create duplicates of these" checklist
-    injected into the cached system prompt. Output is sorted by
-    page_id for stability so the Anthropic prompt cache treats
-    it as identical across chunks of the same ingest. Deprecated
-    pages are excluded — they're not valid update targets and
-    shouldn't block new creates.
+    injected into the cached system prompt. Output is sorted for
+    stability so the Anthropic prompt cache treats it as identical
+    across chunks of the same ingest. Deprecated pages are excluded —
+    they're not valid update targets and shouldn't block new creates.
+
+    Page_id alone (``concepts/account-closure-procedures``) is used
+    instead of ``page_id | title``: the id already contains the
+    significant tokens from the title in nearly every case, and
+    halving the per-chunk token footprint helps large wikis stay
+    within the cached-prompt budget and per-provider rate limits.
     """
-    live = [p for p in registry.pages.values() if p.status != "deprecated"]
-    if not live:
+    live_ids = sorted(
+        pid for pid, entry in registry.pages.items()
+        if entry.status != "deprecated"
+    )
+    if not live_ids:
         return "(the wiki has no existing pages yet)"
-    lines: list[str] = []
-    for page_id in sorted(registry.pages.keys()):
-        entry = registry.pages[page_id]
-        if entry.status == "deprecated":
-            continue
-        title = (entry.title or "").replace("\n", " ").replace("|", "\\|")
-        lines.append(f"{page_id} | {title}")
-    return "\n".join(lines)
+    return "\n".join(live_ids)
 
 
 def render_manifest_context(
@@ -512,13 +513,14 @@ def run_synthesis(
     # cache marker (Phase 1) at ~10% input cost for chunks 2..N.
     system_prompt = (
         load_prompt(project_root)
-        + "\n\n## NAMESPACE — every active page in this wiki\n\n"
-        + "Each line below is `page_id | title`. BEFORE emitting "
-        + "`pages_to_create`, compare each proposed `type/slug` and "
-        + "title against this list. If an existing page covers the "
-        + "same concept — even under a slightly different name — emit "
-        + "`pages_to_update` targeting that `page_id` instead. Do not "
-        + "create variants like `X-service` when `X` already exists.\n\n"
+        + "\n\n## NAMESPACE — every active page_id in this wiki\n\n"
+        + "Each line below is a full `page_id` (e.g. "
+        + "`concepts/account-closure-procedures`). BEFORE emitting "
+        + "`pages_to_create`, compare each proposed `type/slug` against "
+        + "this list. If an existing page_id covers the same concept — "
+        + "even under a slightly different name — emit `pages_to_update` "
+        + "targeting that `page_id` instead. Do not create variants like "
+        + "`X-service` when `X` already exists.\n\n"
         + render_namespace_list(registry)
     )
     fallback_manifest_context = render_manifest_context(registry)
