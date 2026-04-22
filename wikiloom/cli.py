@@ -2296,29 +2296,52 @@ def duplicates(
         return
 
     shown = pairs[:limit]
-    click.echo(f"Suspected duplicate pairs ({len(pairs)}):\n")
+    click.echo("")
+    click.echo(
+        click.style("Suspected duplicate pairs", bold=True)
+        + f"  {_dim('(' + str(len(pairs)) + ')')}"
+    )
+    click.echo("")
     for pair in shown:
-        if pair.embedding_score >= 0:
-            emb = f"emb {pair.embedding_score:.2f}"
-        else:
-            emb = "emb n/a"
-        click.echo(f"  slug {pair.slug_score:.0f}% | {emb}")
-        click.echo(f"    {pair.page_a}  ({pair.title_a})")
-        click.echo(f"    {pair.page_b}  ({pair.title_b})")
+        emb_display = (
+            f"emb {pair.embedding_score:.2f}"
+            if pair.embedding_score >= 0
+            else "emb n/a"
+        )
+        scores = _dim(f"slug {pair.slug_score:.0f}%  •  {emb_display}")
+        click.echo(f"  {scores}")
+        click.echo(
+            f"    {click.style(pair.page_a, fg='cyan')}  "
+            f"{_dim('(' + pair.title_a + ')')}"
+        )
+        click.echo(
+            f"    {click.style(pair.page_b, fg='cyan')}  "
+            f"{_dim('(' + pair.title_b + ')')}"
+        )
         suggestion = suggest_winner(pair)
         click.echo(
-            f"    → wikiloom merge {suggestion.winner_page_id} "
-            f"{suggestion.loser_page_id}  ({suggestion.reason})\n"
+            f"    {_dim('→')} wikiloom merge "
+            f"{click.style(suggestion.winner_page_id, fg='cyan')} "
+            f"{click.style(suggestion.loser_page_id, fg='cyan')}  "
+            f"{_dim('(' + suggestion.reason + ')')}"
         )
+        click.echo("")
 
     if len(pairs) > limit:
         click.echo(
-            f"... and {len(pairs) - limit} more. Pass --limit N to see more."
+            _dim(
+                f"… and {len(pairs) - limit} more. "
+                f"Pass --limit N to see more."
+            )
         )
+        click.echo("")
     click.echo(
-        "\nTip: use `wikiloom duplicates --review` to walk through them "
-        "interactively, or `--auto-merge` for safe singular/plural variants."
+        _dim(
+            "Tip: `wikiloom duplicates --review` to walk through them "
+            "interactively, or `--auto-merge` for safe variants."
+        )
     )
+    click.echo("")
 
 
 def _finalize_batch_merge(
