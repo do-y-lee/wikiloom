@@ -289,21 +289,6 @@ def test_load_tolerates_missing_version_field(project: Path) -> None:
 # ----------------------------------------------------------------------
 
 
-def test_get_orphans_returns_pages_with_no_inbound(project: Path) -> None:
-    _write_page(project, "concepts/a.md", "[[concepts/b]]")
-    _write_page(project, "concepts/b.md", "[[concepts/c]]")
-    _write_page(project, "concepts/c.md", "body")
-
-    reg = BacklinkRegistry(project / "_registry", project / "wiki")
-    reg.rebuild()
-
-    orphans = reg.get_orphans()
-    # a has no inbound; b and c do.
-    assert "concepts/a" in orphans
-    assert "concepts/b" not in orphans
-    assert "concepts/c" not in orphans
-
-
 def test_get_most_connected_ranks_by_total_degree(project: Path) -> None:
     _write_page(project, "concepts/hub.md", "[[concepts/a]] [[concepts/b]] [[concepts/c]]")
     _write_page(project, "concepts/a.md", "[[concepts/hub]]")

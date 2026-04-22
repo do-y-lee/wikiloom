@@ -306,22 +306,6 @@ class BacklinkRegistry:
     # Queries
     # ------------------------------------------------------------------
 
-    def get_orphans(self) -> list[str]:
-        """Pages with zero inbound edges.
-
-        Only considers pages that appear as an edge source or target in
-        ``backlinks.json``. Truly-isolated pages (no edges at all in
-        either direction) aren't tracked here; the linter's
-        ``check_orphans`` should also consult the manifest.
-        """
-        inbound_counts: dict[str, int] = {}
-        all_pages: set[str] = set()
-        for edge in self._edges:
-            all_pages.add(edge.source)
-            all_pages.add(edge.target)
-            inbound_counts[edge.target] = inbound_counts.get(edge.target, 0) + 1
-        return sorted(p for p in all_pages if inbound_counts.get(p, 0) == 0)
-
     def get_most_connected(self, n: int = 10) -> list[tuple[str, int]]:
         """Top-N pages by total degree (inbound + outbound).
 
