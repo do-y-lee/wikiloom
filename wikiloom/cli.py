@@ -3189,17 +3189,51 @@ def save(message: str | None, dry_run: bool, project: Path | None) -> None:
 
 
 def _bump_modified_and_freshen(project: Path, paths: list[Path]) -> int:
-    """For each wiki page in ``paths``, bump frontmatter.modified to now
-    and flip dormant → active. Returns the count of pages freshened.
+    """Bump modified on each page; flag real human edits on the way.
 
-    Skips files without frontmatter, missing files, and non-page files
-    (everything outside ``wiki/`` or named ``log.md`` / ``index.md``).
+    For every wiki page in ``paths``:
+
+    1. Always bumps ``frontmatter.modified`` and flips dormant →
+       active (the "freshen" part).
+    2. Flags ``human_edited = True`` (frontmatter + manifest) **only
+       when the working-tree change actually touches the human region
+       above the ``wikiloom:auto`` marker**. A relink that only
+       rewrites wikilinks below the marker is a mechanical edit, not
+       a human one, and shouldn't trigger the flag.
+
+    New files (no HEAD version) are always flagged — they're
+    human-created by definition. Non-markered files (no auto region
+    yet) are also flagged — the whole body is human content.
+
+    Returns the count of pages freshened from dormant.
     """
     from wikiloom.frontmatter import parse_frontmatter, render_frontmatter
-    from wikiloom.utils import now_iso
+    from wikiloom.git_ops import GitOps
+    from wikiloom.protection import HumanEditProtection
+    from wikiloom.registry import Registry
+    from wikiloom.utils import now_iso, page_id_from_path
 
     freshened = 0
     timestamp = now_iso()
+    registry: Registry | None = None
+    manifest_changed = False
+
+    try:
+        git = GitOps(project)
+    except ValueError:
+        git = None
+
+    def _head_body(rel_posix: str) -> str | None:
+        """Return the file's body as of HEAD, or None if absent."""
+        if git is None:
+            return None
+        try:
+            head_text = git.repo.git.show(f"HEAD:{rel_posix}")
+        except Exception:
+            return None
+        _, body_at_head = parse_frontmatter(head_text)
+        return body_at_head
+
     for rel in paths:
         if rel.parts[:1] != ("wiki",) or rel.name in ("log.md", "index.md"):
             continue
@@ -3210,14 +3244,43 @@ def _bump_modified_and_freshen(project: Path, paths: list[Path]) -> int:
         fm, body = parse_frontmatter(text)
         if fm is None:
             continue
+
+        # Decide whether this edit actually touches the human region.
+        # If not, leave human_edited alone — it's a mechanical change
+        # (e.g. linker rewrote wikilinks below the auto marker) that
+        # happened to land in the save batch.
+        head_body = _head_body(rel.as_posix())
+        human_now, _ = HumanEditProtection.split(body)
+        human_edit = (
+            head_body is None  # new file — human-created
+            or HumanEditProtection.split(head_body)[0] != human_now
+        )
+
         original_status = fm.status
         fm.modified = timestamp
+        if human_edit:
+            fm.human_edited = True
+            fm.human_edited_at = timestamp
         if fm.status == "dormant":
             fm.status = "active"
             freshened += 1
         new_text = render_frontmatter(fm) + "\n" + body
         if new_text != text or original_status != fm.status:
             full.write_text(new_text, encoding="utf-8")
+
+        if human_edit:
+            # Mirror the flag into the manifest so status / lint / the
+            # HumanEditProtection scanner all see the same truth.
+            if registry is None:
+                registry = Registry(project / "_registry")
+            page_id = page_id_from_path(project / "wiki", full)
+            entry = registry.get_page(page_id)
+            if entry is not None and not entry.human_edited:
+                entry.human_edited = True
+                manifest_changed = True
+
+    if manifest_changed and registry is not None:
+        registry.save()
     return freshened
 
 
