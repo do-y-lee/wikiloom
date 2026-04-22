@@ -511,6 +511,7 @@ def ingest(
         for note in result.notes:
             click.echo(f"  {_dim('•')} {note}")
     _post_flight_budget_warning(project)
+    click.echo("")
 
 
 @main.command()
@@ -702,6 +703,7 @@ def reindex(project: Path | None) -> None:
                 "reindex",
                 f"rebuilt {len(written)} index file(s)",
             )
+    click.echo("")
     click.echo(
         f"{_check()} Rebuilt {len(written)} index file(s)."
     )
@@ -752,6 +754,7 @@ def relink(project: Path | None) -> None:
 
     _require_clean_tree(project, "relink")
     total_pages = len(all_pages)
+    click.echo("")
     click.echo(f"Re-linking {total_pages} page(s)...")
     click.echo("")
 
@@ -794,6 +797,7 @@ def relink(project: Path | None) -> None:
             elapsed=_time.monotonic() - start,
         )
     )
+    click.echo("")
 
 
 @main.command("query")
@@ -878,9 +882,11 @@ def query(
         if not last_query_path.exists():
             raise click.ClickException("No previous query result found.")
         data = json_mod.loads(last_query_path.read_text(encoding="utf-8"))
+        click.echo("")
         click.echo(data.get("answer", ""))
         click.echo("")
         _print_query_detail(data, project)
+        click.echo("")
         return
 
     if not question:
@@ -963,6 +969,7 @@ def query(
     )
 
     # Print the answer
+    click.echo("")
     click.echo(answer.answer)
 
     # --detail: show metadata inline
@@ -980,6 +987,7 @@ def query(
             click.echo(
                 _dim("  --save-last    save this answer as a synthesis page")
             )
+    click.echo("")
 
 
 def _save_query_as_page(data: dict, project: Path) -> None:
@@ -1036,10 +1044,12 @@ def _save_query_as_page(data: dict, project: Path) -> None:
     _auto_commit(project, "query", f'saved synthesis "{title_snippet}"')
 
     rel_path = page_path.relative_to(project)
+    click.echo("")
     click.echo(
         f"{_check()} Saved synthesis  "
         f"{click.style(str(rel_path), fg='cyan')}"
     )
+    click.echo("")
 
 
 def _print_query_detail(data: dict, project: Path) -> None:
@@ -1155,6 +1165,7 @@ def status(project: Path | None) -> None:
 
     sep = _dim("•")
 
+    click.echo("")
     click.echo(
         f"WikiLoom project: {click.style(project.name, fg='cyan', bold=True)}"
     )
@@ -1250,6 +1261,7 @@ def status(project: Path | None) -> None:
         click.echo(
             f"  {total_tokens:,} tokens  {sep}  ${total_cost:.2f}"
         )
+    click.echo("")
 
 
 @main.command("log")
@@ -1279,6 +1291,7 @@ def log_cmd(limit: int, project: Path | None) -> None:
         return
 
     shown = events[:limit]
+    click.echo("")
     click.echo(click.style(f"Recent events ({len(shown)})", bold=True))
     click.echo("")
     for event in shown:
@@ -1357,6 +1370,7 @@ def edits(limit: int, project: Path | None) -> None:
 
     shown = commits[:limit]
     author_width = max((len(c.author.name or "") for c in shown), default=6)
+    click.echo("")
     click.echo(
         click.style("Recent human edits", bold=True)
         + f"  {_dim('(' + str(len(shown)) + ')')}"
@@ -1419,6 +1433,7 @@ def cost(project: Path | None) -> None:
     total_cost = 0.0
     total_events = 0
 
+    click.echo("")
     click.echo(click.style("Usage by event type", bold=True))
     click.echo("")
     header = f"  {'Event':<16} {'Count':>8} {'Tokens':>12} {'Cost':>10}"
@@ -1741,6 +1756,7 @@ def related(page_id: str, limit: int, save: bool, link: bool, project: Path | No
         click.echo("")
         return
 
+    click.echo("")
     click.echo(
         click.style("Related to", bold=True)
         + f" {click.style(page['title'], fg='cyan')}  "
@@ -1868,6 +1884,7 @@ def orphans(project: Path | None) -> None:
         for pid in orphan_ids
     ]
 
+    click.echo("")
     click.echo(
         click.style("Orphan pages", bold=True)
         + f"  {_dim('(' + str(len(orphan_list)) + ')')}"
@@ -2633,6 +2650,7 @@ def merge(winner: str, loser: str, yes: bool, project: Path | None) -> None:
             )
         raise click.ClickException(msg) from exc
 
+    click.echo("")
     click.echo(
         f"{_check()} Merged  "
         f"{click.style(loser, fg='cyan')}  →  "
@@ -2758,6 +2776,7 @@ def deprecate(
         suffix = f" (superseded by {superseded_by})" if superseded_by else ""
         _auto_commit(project, "deprecate", f"{page_id}{suffix}")
 
+    click.echo("")
     click.echo(
         f"{_check()} Deprecated  {click.style(page_id, fg='cyan')}"
     )
@@ -2856,6 +2875,7 @@ def purge(page_id: str, yes: bool, project: Path | None) -> None:
         )
         _auto_commit(project, "deprecate", f"purge {page_id}")
 
+    click.echo("")
     click.echo(
         f"{_check()} Purged  {click.style(page_id, fg='cyan')}"
     )
@@ -3129,6 +3149,7 @@ def save(message: str | None, dry_run: bool, project: Path | None) -> None:
     parts = [f"{len(dirty)} file(s) saved"]
     if freshened:
         parts.append(f"{freshened} freshened from dormant")
+    click.echo("")
     click.echo(done_summary(parts))
     click.echo("")
 
@@ -3194,6 +3215,7 @@ def rebuild_cache(project: Path | None) -> None:
 
     embedder = load_embedder(project)
 
+    click.echo("")
     click.echo("Rebuilding cache...")
     start = _time.monotonic()
 
@@ -3229,6 +3251,7 @@ def rebuild_cache(project: Path | None) -> None:
             elapsed=_time.monotonic() - start,
         )
     )
+    click.echo("")
 
 
 def _print_report(report) -> None:

@@ -250,6 +250,7 @@ def ingest(
                 )
 
         # 1. Extract
+        click.echo("")
         click.echo(f"Extracting {source_path.name}...")
         extractor = router.route(source)
         content = extractor.extract(source_path)
