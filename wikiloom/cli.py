@@ -68,11 +68,19 @@ class _StyledCommand(click.Command):
 
     Click's default ``--help`` is cramped: no leading/trailing
     whitespace, plain section labels. This subclass adds consistent
-    air around the whole block, emphasizes section names, and tints
-    option flags cyan so they stand out from their descriptions.
-    Applied to every command in the group via the
-    ``_CategorizedGroup.command_class`` hook.
+    air around the whole block, emphasizes section names, bolds the
+    "Usage:" prefix, and tints option flags cyan so they stand out
+    from their descriptions. Applied to every command in the group
+    via the ``_CategorizedGroup.command_class`` hook.
     """
+
+    def format_usage(
+        self, ctx: click.Context, formatter: click.HelpFormatter
+    ) -> None:
+        pieces = self.collect_usage_pieces(ctx)
+        formatter.write_usage(
+            ctx.command_path, " ".join(pieces), prefix=_bold("Usage:") + " "
+        )
 
     def format_options(
         self, ctx: click.Context, formatter: click.HelpFormatter
@@ -103,6 +111,14 @@ class _CategorizedGroup(click.Group):
     """
 
     command_class = _StyledCommand
+
+    def format_usage(
+        self, ctx: click.Context, formatter: click.HelpFormatter
+    ) -> None:
+        pieces = self.collect_usage_pieces(ctx)
+        formatter.write_usage(
+            ctx.command_path, " ".join(pieces), prefix=_bold("Usage:") + " "
+        )
 
     def format_options(
         self, ctx: click.Context, formatter: click.HelpFormatter
@@ -1721,33 +1737,70 @@ def show(
             )
         value = data[field]
         if as_json:
+            # JSON output stays unstyled so it's round-trip parseable.
+            # Blank-line framing is still useful for visual parsing on
+            # a terminal; Click auto-strips nothing from JSON so the
+            # output is still round-trippable through ``jq``.
+            click.echo("")
             click.echo(json_mod.dumps(value, indent=2, ensure_ascii=False))
-        elif isinstance(value, list):
+            click.echo("")
+            return
+        # Pretty --field output: cyan for identifier-like field values
+        # (chunk_ids, aliases, sources) so the console reads
+        # consistently with the shared styling. Click auto-strips
+        # ANSI when the stream isn't a TTY (piped to a file, CI, etc.)
+        # so scripts still see the raw strings.
+        cyan_fields = {"title", "type", "aliases", "chunk_ids"}
+        style_value = field in cyan_fields
+
+        click.echo("")
+        if isinstance(value, list):
             for item in value:
                 if isinstance(item, dict):
-                    click.echo(
-                        json_mod.dumps(item, ensure_ascii=False)
-                    )
+                    click.echo(json_mod.dumps(item, ensure_ascii=False))
                 else:
-                    click.echo(str(item))
+                    text = str(item)
+                    click.echo(click.style(text, fg="cyan") if style_value else text)
         elif value is None:
-            click.echo("(none)")
+            click.echo(_dim("—"))
         else:
-            click.echo(str(value))
+            text = str(value)
+            click.echo(click.style(text, fg="cyan") if style_value else text)
+        click.echo("")
         return
 
     if as_json:
         click.echo(json_mod.dumps(data, indent=2, ensure_ascii=False))
         return
 
-    # Pretty default — key: value, lists/dicts compact.
-    click.echo(f"page: {page_id}\n")
+    # Pretty default — mirrors the shared styling used by status,
+    # links, and source: leading/trailing blank lines, bold section
+    # headers, cyan for identifier-ish values, dim labels and
+    # placeholder dashes, plain values for everything else.
+    def _label(text: str) -> str:
+        return _dim(f"  {text:<22}")
+
+    def _placeholder() -> str:
+        return _dim("—")
+
+    click.echo("")
+    click.echo(
+        f"Page  {click.style(page_id, fg='cyan', bold=True)}"
+    )
+    click.echo("")
+    click.echo(click.style("Frontmatter", bold=True))
+
+    # Identifier-ish keys rendered in cyan so page_ids, titles, and
+    # aliases read consistently with the rest of the CLI. Everything
+    # else keeps its natural formatting.
+    cyan_keys = {"title", "type", "aliases", "chunk_ids"}
+
     for key, value in data.items():
         if value in ([], {}, None):
-            click.echo(f"  {key}: -")
+            click.echo(f"{_label(key + ':')} {_placeholder()}")
             continue
         if isinstance(value, list):
-            click.echo(f"  {key} ({len(value)}):")
+            click.echo(f"{_label(key + ':')} {_dim(f'({len(value)})')}")
             for item in value:
                 if isinstance(item, dict):
                     name = (
@@ -1758,14 +1811,27 @@ def show(
                     )
                     extra = ""
                     if "chunk_ids" in item:
-                        extra = f" (chunks: {len(item.get('chunk_ids') or [])})"
-                    click.echo(f"    - {name}{extra}")
+                        extra = _dim(
+                            f"  (chunks: {len(item.get('chunk_ids') or [])})"
+                        )
+                    click.echo(
+                        f"    {_dim('-')} {click.style(name, fg='cyan')}{extra}"
+                    )
                 else:
-                    click.echo(f"    - {item}")
+                    item_str = str(item)
+                    if key in cyan_keys:
+                        item_str = click.style(item_str, fg="cyan")
+                    click.echo(f"    {_dim('-')} {item_str}")
         elif isinstance(value, dict):
-            click.echo(f"  {key}: {json_mod.dumps(value, ensure_ascii=False)}")
+            click.echo(
+                f"{_label(key + ':')} {json_mod.dumps(value, ensure_ascii=False)}"
+            )
         else:
-            click.echo(f"  {key}: {value}")
+            value_str = str(value)
+            if key in cyan_keys:
+                value_str = click.style(value_str, fg="cyan")
+            click.echo(f"{_label(key + ':')} {value_str}")
+    click.echo("")
 
 
 @main.command("links")
@@ -3663,11 +3729,23 @@ def _run_pending_review(project: Path, page_id: str) -> None:
 def source(chunk_id: str, project: Path | None) -> None:
     """Show the raw source text for a chunk referenced by a wiki page.
 
-    Pages synthesized via `wikiloom ingest` carry chunk_ids in
-    their frontmatter. Pass one of those ids here to see the exact
-    text the LLM saw when it produced that page — structural
-    provenance click-through without trusting the LLM's self-
-    attribution.
+    A chunk_id is a 16-char identifier for one slice of an ingested
+    source, recorded in the synthesized page's frontmatter.
+
+    \b
+    Getting a chunk_id to pass in:
+      \x1b[36mwikiloom show <page_id> --field chunk_ids\x1b[0m
+
+    \b
+    Examples:
+      \x1b[36mwikiloom source 9f2e1c4a3b8d7e02\x1b[0m
+      \x1b[36mwikiloom source --project ~/projects/kb 9f2e1c4a3b8d7e02\x1b[0m
+      \x1b[36mwikiloom source --help\x1b[0m
+
+    \b
+    Output:
+      metadata header (source, origin path or URL, chunk index,
+      tokens, timestamp) followed by the exact chunk text.
     """
     from wikiloom.chunk_store import ChunkStore
     from wikiloom.source_catalog import SourceCatalog
@@ -3703,15 +3781,38 @@ def source(chunk_id: str, project: Path | None) -> None:
         origin_label = "raw_path"
         origin_value = "—"
 
-    click.echo(f"chunk_id:     {chunk.chunk_id}")
-    click.echo(f"source:       {source_name}")
-    click.echo(f"{origin_label + ':':<13} {origin_value}")
-    click.echo(f"chunk:        {chunk.chunk_index + 1} of {chunk.chunk_total}")
-    click.echo(f"content_type: {chunk.content_type}")
-    click.echo(f"tokens:       {chunk.token_estimate}")
-    click.echo(f"created_at:   {chunk.created_at}")
-    click.echo("---")
-    click.echo(chunk.text)
+    # Labels are always the same width so values align into a clean
+    # right column. Identifier-ish fields (chunk_id, source, url/path)
+    # use the shared cyan "this is something you can type or point at"
+    # color; plain-text fields (chunk index, content type, tokens,
+    # timestamp) stay unstyled so they don't compete for attention.
+    def _label(text: str) -> str:
+        return _dim(f"  {text:<13}")
+
+    created_display = _format_event_timestamp(chunk.created_at)
+
+    click.echo("")
+    click.echo(click.style("Chunk", bold=True))
+    click.echo(f"{_label('chunk_id:')} {click.style(chunk.chunk_id, fg='cyan')}")
+    click.echo(f"{_label('source:')} {click.style(source_name, fg='cyan')}")
+    click.echo(
+        f"{_label(origin_label + ':')} "
+        f"{click.style(origin_value, fg='cyan') if origin_value != '—' else _dim(origin_value)}"
+    )
+    click.echo(
+        f"{_label('chunk:')} {chunk.chunk_index + 1} of {chunk.chunk_total}"
+    )
+    click.echo(f"{_label('content_type:')} {chunk.content_type}")
+    click.echo(f"{_label('tokens:')} {chunk.token_estimate:,}")
+    click.echo(f"{_label('created_at:')} {created_display}")
+    click.echo("")
+    click.echo(click.style("Content", bold=True))
+    # Indent every body line by two spaces so the block is visually
+    # separated from the metadata above. Blank lines stay blank — no
+    # trailing indent artifact.
+    for line in chunk.text.splitlines():
+        click.echo(f"  {line}" if line else "")
+    click.echo("")
 
 
 @main.command("save")

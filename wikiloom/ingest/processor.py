@@ -463,7 +463,11 @@ def ingest(
 
             click.echo("Writing pages...")
             writer = PageWriter(project_root, registry, force=force)
-            write_result = writer.write(synthesis, source_entry=catalog_entry)
+            write_result = writer.write(
+                synthesis,
+                source_entry=catalog_entry,
+                all_chunk_ids=chunk_ids,
+            )
 
             result.pages_created.extend(write_result.created_page_ids)
             result.pages_updated.extend(write_result.updated_page_ids)

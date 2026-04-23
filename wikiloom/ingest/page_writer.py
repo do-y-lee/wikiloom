@@ -107,6 +107,8 @@ class PageWriter:
         self,
         synthesis: SynthesisResult,
         source_entry: SourceEntry | None,
+        *,
+        all_chunk_ids: list[str] | None = None,
     ) -> PageWriteResult:
         """Write every page proposal in a ``SynthesisResult`` to disk.
 
@@ -115,6 +117,14 @@ class PageWriter:
         2. pages_to_create (fresh or --force collision handling)
         3. pages_to_update (append-to-auto-region handling)
 
+        ``all_chunk_ids`` is the full, ordered list of chunk_ids that
+        were persisted for this source — every slice the chunker
+        produced, not just the ones that yielded a create/update
+        proposal. Callers (``processor.py``) should pass this through
+        so the source page's frontmatter reports complete provenance.
+        When omitted, falls back to the subset derivable from
+        proposals (legacy path for tests and reduced-info callers).
+
         Returns a ``PageWriteResult`` the processor can consume for
         commit staging and event logging.
         """
@@ -122,9 +132,13 @@ class PageWriter:
 
         # 1. Source page
         if synthesis.source_summary is not None and source_entry is not None:
-            all_chunk_ids = _all_chunk_ids_from_synthesis(synthesis)
+            source_chunk_ids = (
+                list(all_chunk_ids)
+                if all_chunk_ids is not None
+                else _all_chunk_ids_from_synthesis(synthesis)
+            )
             src_path = self._write_source_page(
-                synthesis.source_summary, source_entry, all_chunk_ids
+                synthesis.source_summary, source_entry, source_chunk_ids
             )
             if src_path is not None:
                 # Source pages are always fresh-or-updated, not "created"
@@ -203,14 +217,7 @@ class PageWriter:
             created=(existing_fm.created if existing_fm else now_iso()),
             modified=now_iso(),
             summary=summary.one_line,
-            sources=[
-                {
-                    "hash": source_entry.content_hash,
-                    "name": source_entry.name,
-                    "raw_path": source_entry.raw_path or "",
-                    "chunk_ids": all_chunk_ids,
-                }
-            ],
+            sources=[_source_entry_to_frontmatter_dict(source_entry, all_chunk_ids)],
             source_count=1,
             confidence="high",
         )
@@ -529,15 +536,30 @@ def _append_source(
                     s["chunk_ids"].append(cid)
             return out
 
-    out.append(
-        {
-            "hash": source_entry.content_hash,
-            "name": source_entry.name,
-            "raw_path": source_entry.raw_path or "",
-            "chunk_ids": new_chunk_ids,
-        }
-    )
+    out.append(_source_entry_to_frontmatter_dict(source_entry, new_chunk_ids))
     return out
+
+
+def _source_entry_to_frontmatter_dict(
+    source_entry: SourceEntry, chunk_ids: list[str]
+) -> dict[str, Any]:
+    """Serialize a ``SourceEntry`` into the shape stored in page frontmatter.
+
+    Emits ``url`` only when it's present — file sources don't carry
+    one, URL sources don't have a ``raw_path``, and mixing empty
+    placeholders into every record would clutter every page's
+    frontmatter. The catalog (``sources.json``) is the authoritative
+    store; this is the per-page mirror.
+    """
+    entry: dict[str, Any] = {
+        "hash": source_entry.content_hash,
+        "name": source_entry.name,
+        "raw_path": source_entry.raw_path or "",
+        "chunk_ids": list(chunk_ids),
+    }
+    if source_entry.url:
+        entry["url"] = source_entry.url
+    return entry
 
 
 _DIR_TO_TYPE = {v: k for k, v in _TYPE_TO_DIR.items()}
