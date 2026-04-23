@@ -408,6 +408,27 @@ def _auto_commit(project: Path, commit_type: str, description: str) -> str | Non
     return git.commit([], f"{commit_type}: {description}") or None
 
 
+def _commit_merge_log_tail(project: Path, subject: str) -> None:
+    """Commit wiki/log.md after a merge flow.
+
+    MERGE events are appended *after* the primary merge commit lands so
+    the event can record that commit's hash (matching the ingest-tail
+    pattern in processor.py step 16). This follow-up picks up the
+    resulting log.md change. No-ops when the repo or log are missing or
+    when log.md is unchanged.
+    """
+    from wikiloom.git_ops import GitOps
+
+    log_path = project / "wiki" / "log.md"
+    if not log_path.exists():
+        return
+    try:
+        git = GitOps(project)
+    except ValueError:
+        return
+    git.commit([log_path], subject)
+
+
 @main.command()
 @click.argument("source")
 @click.option(
@@ -1194,7 +1215,6 @@ def status(project: Path | None) -> None:
         f"  Status: {active_n} active  {sep}  "
         f"{dormant_n} dormant  {sep}  {deprecated_n} deprecated"
     )
-    click.echo(f"  Human-edited: {stats['human_edited']}")
     click.echo("")
 
     # Graph section: linkage health. Uses the shared orphan definition
@@ -2435,6 +2455,9 @@ def _finalize_batch_merge(
             ),
             commit_hash,
         )
+    _commit_merge_log_tail(
+        project, f"merge: log {len(applied)} event(s)"
+    )
 
 
 def _run_review_mode(project: Path, pairs: list) -> None:
@@ -2708,6 +2731,9 @@ def merge(winner: str, loser: str, yes: bool, project: Path | None) -> None:
                 f"{loser} into {winner}",
             )
             emit_merge_event(project, result, commit_hash)
+            _commit_merge_log_tail(
+                project, f"merge: log event for {loser} → {winner}"
+            )
     except ValueError as exc:
         msg = str(exc)
         # Surface a recovery hint when the ValueError is a missing-

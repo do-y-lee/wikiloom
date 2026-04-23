@@ -819,6 +819,15 @@ def _run_post_ingest_merge(
             ),
             commit_hash,
         )
+    # Tail commit for the log.md updates. The MERGE events were
+    # appended after the primary commit so they could record its hash;
+    # this picks up the resulting log.md change the same way step 16
+    # does for ingest events.
+    log_tail = project_root / "wiki" / "log.md"
+    if log_tail.exists():
+        git_ops.commit(
+            [log_tail], f"merge: log {len(applied)} event(s)"
+        )
 
     click.echo("")
     click.echo(
