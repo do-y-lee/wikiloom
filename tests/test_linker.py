@@ -398,6 +398,149 @@ def test_path_to_id_extracts_relative_id(tmp_path: Path) -> None:
 # ----------------------------------------------------------------------
 
 
+# ----------------------------------------------------------------------
+# Hybrid linker (fuzzy pre-filter → cosine rerank)
+# ----------------------------------------------------------------------
+
+
+class _FakeEmbedder:
+    """Deterministic embedder: maps substrings to pre-set vectors.
+
+    Falls back to a zero vector so any input that matches no rule
+    scores cosine 0 — an unambiguous "no match" for the linker.
+    """
+
+    def __init__(self, rules: list[tuple[str, list[float]]]) -> None:
+        self._rules = rules
+
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        out: list[list[float]] = []
+        for text in texts:
+            vec = [0.0, 0.0, 0.0]
+            for needle, v in self._rules:
+                if needle.lower() in text.lower():
+                    vec = v
+                    break
+            out.append(vec)
+        return out
+
+
+class _FakeCache:
+    """Stand-in for SQLiteCache exposing only load_page_embeddings."""
+
+    def __init__(self, embeddings: dict[str, list[float]]) -> None:
+        self._embeddings = embeddings
+
+    def load_page_embeddings(self) -> dict[str, list[float]]:
+        return dict(self._embeddings)
+
+
+@requires_model
+def test_hybrid_cosine_drops_fuzzy_false_positive(
+    registry: Registry, project: Path
+) -> None:
+    """Cosine rerank should kill a fuzzy-matching but semantically-wrong candidate.
+
+    Exercises ``_resolve_with_rerank`` directly so spaCy's entity
+    ruler (which would exact-hit registered aliases) isn't in the
+    way. The span here is a deliberately-fuzzy variant of a
+    registered alias; the page's embedding is orthogonal to the
+    span-context embedding. Cosine lands at 0.0, ``_bucket_for``
+    returns "drop", and the match carries a near-zero cosine_score
+    so callers can see why.
+    """
+    embedder = _FakeEmbedder(
+        rules=[("google brain team", [1.0, 0.0, 0.0])]
+    )
+    cache = _FakeCache(
+        embeddings={"entities/google-brain": [0.0, 1.0, 0.0]}
+    )
+    eng = LinkingEngine(
+        registry,
+        LinkingConfig(auto_create_stubs=False),
+        embedder=embedder,
+        cache=cache,
+    )
+
+    body = "the Google Brain Team announced results today"
+    match = eng._resolve_with_rerank("Google Brain Team", body, 4, 21)
+    assert match is not None
+    assert match.method == "hybrid"
+    assert match.page_id == "entities/google-brain"
+    assert match.cosine_score == pytest.approx(0.0)
+    assert eng._bucket_for(match) == "drop"
+
+
+@requires_model
+def test_hybrid_cosine_promotes_strong_semantic_match(
+    registry: Registry, project: Path
+) -> None:
+    """Cosine near 1.0 should promote a fuzzy-only pending candidate to a link.
+
+    A cosine of 1.0 lands the candidate in the high bucket regardless
+    of where ``cosine_high_threshold`` is set, even when the fuzzy
+    score alone would have fallen under the fuzzy high threshold.
+    """
+    # Span context and page embedding point the same direction →
+    # cosine similarity is 1.0, clearly above any configured cosine
+    # threshold.
+    embedder = _FakeEmbedder(
+        rules=[("google brain team", [1.0, 0.0, 0.0])]
+    )
+    cache = _FakeCache(
+        embeddings={"entities/google-brain": [1.0, 0.0, 0.0]}
+    )
+    eng = LinkingEngine(
+        registry,
+        LinkingConfig(auto_create_stubs=False),
+        embedder=embedder,
+        cache=cache,
+    )
+
+    body = "The Google Brain Team published a paper on attention mechanisms."
+    result = eng._link_text(body, source_page_id="sources/paper")
+
+    high_targets = {l.page_id for l in result.high_links}
+    assert "entities/google-brain" in high_targets
+    # Cosine score should be populated on the resolved link.
+    matched = next(
+        l for l in result.high_links if l.page_id == "entities/google-brain"
+    )
+    assert matched.cosine_score is not None
+    assert matched.cosine_score > 0.99
+
+
+@requires_model
+def test_hybrid_exact_alias_skips_cosine(
+    registry: Registry, project: Path
+) -> None:
+    """Exact alias hits shouldn't burn an embedder call.
+
+    The embedder below would throw on any call, proving the exact-
+    match fast path short-circuits before reaching it.
+    """
+
+    class _ExplodingEmbedder:
+        def embed_texts(self, texts: list[str]) -> list[list[float]]:
+            raise AssertionError(
+                "embed_texts should not be called on an exact alias hit"
+            )
+
+    cache = _FakeCache(embeddings={})
+    eng = LinkingEngine(
+        registry,
+        LinkingConfig(auto_create_stubs=False),
+        embedder=_ExplodingEmbedder(),
+        cache=cache,
+    )
+
+    # "Flash Attention" is a registered page title — exact alias hit.
+    match = eng._resolve_with_rerank("Flash Attention", "body", 0, 15)
+    assert match is not None
+    assert match.method == "exact"
+    assert match.cosine_score is None
+
+
 @requires_model
 def test_link_page_writes_back_with_frontmatter(registry: Registry, project: Path) -> None:
     eng = LinkingEngine(registry, LinkingConfig(auto_create_stubs=False))

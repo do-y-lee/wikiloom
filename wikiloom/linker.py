@@ -23,6 +23,9 @@ from wikiloom.utils import now_iso, page_id_from_path, slugify
 if TYPE_CHECKING:
     import spacy.language
 
+    from wikiloom.cache import SQLiteCache
+    from wikiloom.embeddings import Embedder
+
 
 # Common English words that should never be auto-linked even if a page
 # happens to share their title. Conservative — extend as needed.
@@ -47,18 +50,20 @@ STOP_WORDS: frozenset[str] = frozenset({
 @dataclass
 class MatchResult:
     page_id: str
-    score: int
-    method: str  # "exact" | "fuzzy"
+    score: int  # 0-100 fuzzy score (or 100 for exact alias hits)
+    method: str  # "exact" | "fuzzy" | "hybrid"
+    cosine_score: float | None = None  # populated only on the hybrid path
 
 
 @dataclass
 class ResolvedLink:
     original_text: str
     page_id: str
-    score: int
+    score: int  # fuzzy score
     confidence: str  # "high" | "medium"
     start: int
     end: int
+    cosine_score: float | None = None
 
 
 @dataclass
@@ -66,8 +71,9 @@ class PendingLink:
     source_page: str
     matched_text: str
     candidate_page_id: str
-    score: int
+    score: int  # fuzzy score
     label: str
+    cosine_score: float | None = None
 
 
 @dataclass
@@ -99,6 +105,8 @@ class LinkingEngine:
         registry: Registry,
         config: LinkingConfig | None = None,
         nlp: "spacy.language.Language | None" = None,
+        embedder: "Embedder | None" = None,
+        cache: "SQLiteCache | None" = None,
     ) -> None:
         import spacy  # imported lazily so tests that don't need NER stay fast
 
@@ -115,6 +123,14 @@ class LinkingEngine:
 
         self.alias_map: dict[str, str] = registry.get_all_aliases()
         self._build_entity_ruler()
+
+        # Hybrid-rerank dependencies. When both are present, the linker
+        # uses fuzzy as a pre-filter and cosine similarity against page
+        # body embeddings as the decision. Loaded lazily so the old
+        # fuzzy-only path pays no setup cost.
+        self.embedder = embedder
+        self.cache = cache
+        self._page_embeddings: dict[str, list[float]] | None = None
 
     # ------------------------------------------------------------------
     # Setup
@@ -250,8 +266,12 @@ class LinkingEngine:
         linked_targets: set[str] = set()
         resolved_or_pending_texts: set[str] = set()
 
+        hybrid = self._hybrid_enabled()
         for text, label, start, end in candidates:
-            match = self._resolve(text)
+            if hybrid:
+                match = self._resolve_with_rerank(text, body, start, end)
+            else:
+                match = self._resolve(text)
             if not match:
                 continue
             if match.page_id == source_page_id:
@@ -267,7 +287,8 @@ class LinkingEngine:
                 resolved_or_pending_texts.add(text.lower())
                 continue
 
-            if match.score >= self.high_threshold:
+            bucket = self._bucket_for(match)
+            if bucket == "high":
                 high_links.append(
                     ResolvedLink(
                         original_text=text,
@@ -276,11 +297,12 @@ class LinkingEngine:
                         confidence="high",
                         start=start,
                         end=end,
+                        cosine_score=match.cosine_score,
                     )
                 )
                 linked_targets.add(match.page_id)
                 resolved_or_pending_texts.add(text.lower())
-            elif match.score >= self.medium_threshold:
+            elif bucket == "medium":
                 medium_links.append(
                     ResolvedLink(
                         original_text=text,
@@ -289,11 +311,12 @@ class LinkingEngine:
                         confidence="medium",
                         start=start,
                         end=end,
+                        cosine_score=match.cosine_score,
                     )
                 )
                 linked_targets.add(match.page_id)
                 resolved_or_pending_texts.add(text.lower())
-            elif match.score >= self.low_threshold:
+            elif bucket == "pending":
                 pending.append(
                     PendingLink(
                         source_page=source_page_id,
@@ -301,6 +324,7 @@ class LinkingEngine:
                         candidate_page_id=match.page_id,
                         score=match.score,
                         label=label,
+                        cosine_score=match.cosine_score,
                     )
                 )
                 resolved_or_pending_texts.add(text.lower())
@@ -352,6 +376,158 @@ class LinkingEngine:
         return MatchResult(
             page_id=self.alias_map[alias], score=int(score), method="fuzzy"
         )
+
+    def _resolve_top_k(
+        self, text: str, k: int, score_cutoff: int
+    ) -> list[tuple[str, int]]:
+        """Return up to ``k`` fuzzy candidates as ``(page_id, score)`` pairs.
+
+        Used by the hybrid path as a cheap pre-filter before cosine
+        rerank. Exact alias hits collapse to a single top-1 result so
+        the cosine pass is skipped when the answer is already certain.
+        Duplicates (multiple aliases pointing to the same page) are
+        deduped by page_id, keeping the best alias score.
+        """
+        normalized = text.lower().strip()
+        if not normalized or not self.alias_map:
+            return []
+        if normalized in self.alias_map:
+            return [(self.alias_map[normalized], 100)]
+        matches = process.extract(
+            normalized,
+            list(self.alias_map.keys()),
+            scorer=fuzz.token_sort_ratio,
+            score_cutoff=score_cutoff,
+            limit=k * 3,  # overshoot to survive the alias→page_id dedup
+        )
+        seen: dict[str, int] = {}
+        for alias, score, _ in matches:
+            page_id = self.alias_map[alias]
+            if page_id not in seen or score > seen[page_id]:
+                seen[page_id] = int(score)
+        return sorted(seen.items(), key=lambda x: x[1], reverse=True)[:k]
+
+    def _resolve_with_rerank(
+        self, text: str, body: str, start: int, end: int
+    ) -> MatchResult | None:
+        """Hybrid resolver: fuzzy pre-filter → cosine rerank.
+
+        Steps:
+
+        1. Fuzzy top-K against the alias map at a relaxed cutoff.
+        2. Build a context window (~200 chars either side of the span)
+           and embed it. The span alone is often too terse — "account"
+           on its own cosine-matches every account-related page — so
+           we feed surrounding context to give the embedder real
+           signal about *which* target fits this mention.
+        3. Cosine-compare the context embedding against each
+           candidate's pre-loaded page embedding; return the best.
+
+        Falls back to ``_resolve`` when prerequisites are missing
+        (candidate has no embedding, embedder unavailable, etc.) so a
+        partially-embedded wiki still produces some links.
+        """
+        from wikiloom.embeddings import cosine_similarity
+
+        normalized = text.lower().strip()
+        if not normalized:
+            return None
+        # Exact alias hit — no need to burn an embedding call.
+        if normalized in self.alias_map:
+            return MatchResult(
+                page_id=self.alias_map[normalized], score=100, method="exact"
+            )
+
+        candidates = self._resolve_top_k(
+            text,
+            k=self.config.fuzzy_prefilter_top_k,
+            score_cutoff=self.config.fuzzy_prefilter_threshold,
+        )
+        if not candidates:
+            return None
+
+        self._ensure_page_embeddings_loaded()
+        embeddings = self._page_embeddings or {}
+        usable = [(pid, fscore) for pid, fscore in candidates if pid in embeddings]
+        if not usable:
+            # No embedding coverage for any top-K candidate — fall back
+            # to plain fuzzy so the bucket logic can still decide.
+            return self._resolve(text)
+
+        context = self._context_window(body, start, end)
+        try:
+            span_vectors = self.embedder.embed_texts([context])
+        except Exception:  # noqa: BLE001 — degrade rather than crash a link pass
+            return self._resolve(text)
+        if not span_vectors:
+            return self._resolve(text)
+        span_vec = span_vectors[0]
+
+        best_page_id: str | None = None
+        best_fuzzy = 0
+        best_cosine = -1.0
+        for page_id, fuzzy_score in usable:
+            cosine = cosine_similarity(span_vec, embeddings[page_id])
+            if cosine > best_cosine:
+                best_cosine = cosine
+                best_fuzzy = fuzzy_score
+                best_page_id = page_id
+
+        if best_page_id is None:
+            return None
+        return MatchResult(
+            page_id=best_page_id,
+            score=best_fuzzy,
+            method="hybrid",
+            cosine_score=best_cosine,
+        )
+
+    def _hybrid_enabled(self) -> bool:
+        return self.embedder is not None and self.cache is not None
+
+    def _bucket_for(self, match: MatchResult) -> str:
+        """Map a MatchResult to ``"high" | "medium" | "pending" | "drop"``.
+
+        On the hybrid path (cosine_score is populated), cosine is the
+        decision metric — fuzzy is just a pre-filter breadcrumb. On
+        the pure-fuzzy fallback, the original integer thresholds
+        decide. Exact alias hits always land in ``"high"`` since they
+        carry no cosine and no ambiguity.
+        """
+        if match.method == "exact":
+            return "high"
+        if match.cosine_score is not None:
+            c = match.cosine_score
+            if c >= self.config.cosine_high_threshold:
+                return "high"
+            if c >= self.config.cosine_medium_threshold:
+                return "medium"
+            if c >= self.config.cosine_low_threshold:
+                return "pending"
+            return "drop"
+        # Fuzzy-only fallback — current v1 thresholds.
+        if match.score >= self.high_threshold:
+            return "high"
+        if match.score >= self.medium_threshold:
+            return "medium"
+        if match.score >= self.low_threshold:
+            return "pending"
+        return "drop"
+
+    def _ensure_page_embeddings_loaded(self) -> None:
+        if self._page_embeddings is not None or self.cache is None:
+            return
+        try:
+            self._page_embeddings = self.cache.load_page_embeddings()
+        except Exception:  # noqa: BLE001 — missing cache shouldn't kill linking
+            self._page_embeddings = {}
+
+    @staticmethod
+    def _context_window(body: str, start: int, end: int, radius: int = 200) -> str:
+        """Return ``body[start-radius : end+radius]`` clamped to bounds."""
+        left = max(0, start - radius)
+        right = min(len(body), end + radius)
+        return body[left:right]
 
     # ------------------------------------------------------------------
     # Safe zones
@@ -488,16 +664,17 @@ class LinkingEngine:
 
         timestamp = now_iso()
         for p in pending:
-            existing_items.append(
-                {
-                    "source_page": p.source_page,
-                    "matched_text": p.matched_text,
-                    "candidate_page_id": p.candidate_page_id,
-                    "score": p.score,
-                    "label": p.label,
-                    "added_at": timestamp,
-                }
-            )
+            entry: dict[str, Any] = {
+                "source_page": p.source_page,
+                "matched_text": p.matched_text,
+                "candidate_page_id": p.candidate_page_id,
+                "score": p.score,
+                "label": p.label,
+                "added_at": timestamp,
+            }
+            if p.cosine_score is not None:
+                entry["cosine_score"] = round(p.cosine_score, 4)
+            existing_items.append(entry)
 
         path.write_text(
             json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"

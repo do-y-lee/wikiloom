@@ -60,6 +60,17 @@ class LinkingConfig:
     high_confidence_threshold: int = 95
     medium_confidence_threshold: int = 85
     low_confidence_threshold: int = 70
+    # Hybrid linker knobs. Activated when a configured embedder is
+    # available at link time. When active, fuzzy is just a pre-filter
+    # (returns ``fuzzy_prefilter_top_k`` candidates above
+    # ``fuzzy_prefilter_threshold``) and cosine similarity against
+    # page-body embeddings is the decision. The fuzzy-only thresholds
+    # above stay in place for the no-embedder fallback path.
+    fuzzy_prefilter_top_k: int = 10
+    fuzzy_prefilter_threshold: int = 60
+    cosine_high_threshold: float = 0.75
+    cosine_medium_threshold: float = 0.60
+    cosine_low_threshold: float = 0.50
 
 
 @dataclass

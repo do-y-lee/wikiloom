@@ -486,9 +486,26 @@ def ingest(
             if synthesis_written:
                 click.echo("")
                 click.echo("Linking...")
+                from wikiloom.cache import SQLiteCache
+                from wikiloom.embeddings import load_embedder
                 from wikiloom.linker import LinkingEngine
 
-                linker = LinkingEngine(registry, config=full_cfg.linking)
+                # Hybrid linker deps: when both the embedder and the
+                # SQLite cache are available, the linker uses fuzzy
+                # as a pre-filter and cosine similarity against page
+                # body embeddings as the decision. With either
+                # missing, the linker falls back to the fuzzy-only
+                # path — no config flag needed.
+                _link_embedder = load_embedder(project_root)
+                _link_cache: SQLiteCache | None = None
+                if _link_embedder is not None and registry_dir.exists():
+                    _link_cache = SQLiteCache(registry_dir / "wiki.db")
+                linker = LinkingEngine(
+                    registry,
+                    config=full_cfg.linking,
+                    embedder=_link_embedder,
+                    cache=_link_cache,
+                )
                 linked_pages = linker.link_all(synthesis_written)
                 click.echo(f"  {len(linked_pages)} page(s) linked")
 
@@ -896,7 +913,24 @@ def _run_post_merge_relink(
             click.echo(f"  {check_mark} {done}/{total_inner} pages linked")
 
     registry = Registry(project_root / "_registry")
-    linker = LinkingEngine(registry, config=full_cfg.linking)
+    # Mirror the ingest path: if an embedder is configured, activate
+    # the hybrid linker so the post-merge relink also gets cosine
+    # rerank. Missing embedder → fuzzy-only fallback.
+    from wikiloom.cache import SQLiteCache
+    from wikiloom.embeddings import load_embedder
+
+    _relink_embedder = load_embedder(project_root)
+    _relink_cache = (
+        SQLiteCache(project_root / "_registry" / "wiki.db")
+        if _relink_embedder is not None
+        else None
+    )
+    linker = LinkingEngine(
+        registry,
+        config=full_cfg.linking,
+        embedder=_relink_embedder,
+        cache=_relink_cache,
+    )
     linked = linker.link_all(all_pages, progress=_progress)
 
     backlinks = BacklinkRegistry(project_root / "_registry")

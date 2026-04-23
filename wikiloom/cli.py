@@ -799,7 +799,24 @@ def relink(project: Path | None) -> None:
 
     with FileLock(project):
         registry = Registry(project / "_registry")
-        linker = LinkingEngine(registry, config=linking_cfg)
+        # Hybrid linker activates when an embedder is configured —
+        # matches the ingest path so `wikiloom relink` produces the
+        # same link decisions as a fresh re-ingest would.
+        from wikiloom.cache import SQLiteCache
+        from wikiloom.embeddings import load_embedder
+
+        _relink_embedder = load_embedder(project)
+        _relink_cache = (
+            SQLiteCache(project / "_registry" / "wiki.db")
+            if _relink_embedder is not None
+            else None
+        )
+        linker = LinkingEngine(
+            registry,
+            config=linking_cfg,
+            embedder=_relink_embedder,
+            cache=_relink_cache,
+        )
         linked = linker.link_all(all_pages, progress=_progress)
 
         # Rebuild backlinks after re-linking

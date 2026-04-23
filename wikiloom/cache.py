@@ -659,3 +659,25 @@ class SQLiteCache:
                 "SELECT * FROM pages WHERE page_id = ?", (page_id,)
             ).fetchone()
         return dict(row) if row is not None else None
+
+    def load_page_embeddings(self) -> dict[str, list[float]]:
+        """Return ``{page_id: vector}`` for every page with an embedding.
+
+        Used by the hybrid linker to pre-load all page embeddings once
+        per link session. Pages with NULL embeddings are omitted —
+        they simply can't be reranked against, so callers treat them
+        as out-of-scope for the cosine pass.
+        """
+        from wikiloom.embeddings import deserialize_embedding
+
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT page_id, embedding FROM pages "
+                "WHERE embedding IS NOT NULL"
+            ).fetchall()
+        out: dict[str, list[float]] = {}
+        for row in rows:
+            blob = row["embedding"]
+            if blob:
+                out[row["page_id"]] = deserialize_embedding(blob)
+        return out
