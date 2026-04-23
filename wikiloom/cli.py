@@ -18,7 +18,144 @@ from wikiloom.cli_output import (
 )
 
 
-@click.group()
+# Ordered list of (category, commands) tuples. The main --help uses
+# this to render commands in logical groups instead of one flat
+# alphabetical list. Any command not listed here falls into a trailing
+# "Other" section so the help output never silently drops a command.
+_COMMAND_CATEGORIES: list[tuple[str, list[str]]] = [
+    ("Setup", ["init"]),
+    ("Ingest & write", ["ingest", "save", "merge", "relink"]),
+    (
+        "Read & explore",
+        [
+            "status",
+            "log",
+            "edits",
+            "cost",
+            "links",
+            "show",
+            "orphans",
+            "related",
+            "query",
+            "source",
+        ],
+    ),
+    (
+        "Maintenance",
+        ["duplicates", "dormant", "lint", "protect", "reindex", "rebuild-cache"],
+    ),
+    ("Deprecation", ["deprecate", "purge"]),
+]
+
+
+def _bold(text: str) -> str:
+    """Wrap ``text`` in ANSI bold — shared styling primitive for help output."""
+    return click.style(text, bold=True)
+
+
+def _cyan(text: str) -> str:
+    """Wrap ``text`` in cyan — used for command names and option flags in help.
+
+    Same hue the rest of the CLI uses for page_ids and other user-
+    pointable identifiers, so ``--help`` teaches the same visual
+    rule: cyan = something you type.
+    """
+    return click.style(text, fg="cyan")
+
+
+class _StyledCommand(click.Command):
+    """Command with bold section headers and surrounding blank lines.
+
+    Click's default ``--help`` is cramped: no leading/trailing
+    whitespace, plain section labels. This subclass adds consistent
+    air around the whole block, emphasizes section names, and tints
+    option flags cyan so they stand out from their descriptions.
+    Applied to every command in the group via the
+    ``_CategorizedGroup.command_class`` hook.
+    """
+
+    def format_options(
+        self, ctx: click.Context, formatter: click.HelpFormatter
+    ) -> None:
+        opts: list[tuple[str, str]] = []
+        for param in self.get_params(ctx):
+            rv = param.get_help_record(ctx)
+            if rv is not None:
+                flags, description = rv
+                opts.append((_cyan(flags), description))
+        if opts:
+            with formatter.section(_bold("Options")):
+                formatter.write_dl(opts)
+
+    def get_help(self, ctx: click.Context) -> str:
+        return "\n" + super().get_help(ctx) + "\n"
+
+
+class _CategorizedGroup(click.Group):
+    """Click Group that renders commands in named categories.
+
+    The default Click formatter emits one flat alphabetical list,
+    which doesn't scale past ~10 commands. This override groups
+    commands by purpose so a new user can scan the help and know
+    where to look. Also emits bold section headers and a blank-line
+    frame around the whole help block so every ``--help`` invocation
+    has the same visual shape as the rest of the CLI.
+    """
+
+    command_class = _StyledCommand
+
+    def format_options(
+        self, ctx: click.Context, formatter: click.HelpFormatter
+    ) -> None:
+        # Render the group's own options with a bold header, then
+        # delegate to format_commands (Click's default glues the two
+        # together inside format_options — we have to replicate that
+        # or the command list disappears).
+        opts: list[tuple[str, str]] = []
+        for param in self.get_params(ctx):
+            rv = param.get_help_record(ctx)
+            if rv is not None:
+                flags, description = rv
+                opts.append((_cyan(flags), description))
+        if opts:
+            with formatter.section(_bold("Options")):
+                formatter.write_dl(opts)
+        self.format_commands(ctx, formatter)
+
+    def format_commands(
+        self, ctx: click.Context, formatter: click.HelpFormatter
+    ) -> None:
+        commands: dict[str, click.Command] = {
+            name: self.get_command(ctx, name) for name in self.list_commands(ctx)
+        }
+        listed: set[str] = set()
+
+        for category, names in _COMMAND_CATEGORIES:
+            rows: list[tuple[str, str]] = []
+            for name in names:
+                cmd = commands.get(name)
+                if cmd is None or cmd.hidden:
+                    continue
+                rows.append((_cyan(name), cmd.get_short_help_str(limit=60)))
+                listed.add(name)
+            if rows:
+                with formatter.section(_bold(category)):
+                    formatter.write_dl(rows)
+
+        leftover = [
+            (_cyan(name), cmd.get_short_help_str(limit=60))
+            for name, cmd in commands.items()
+            if name not in listed and not cmd.hidden
+        ]
+        if leftover:
+            with formatter.section(_bold("Other")):
+                formatter.write_dl(leftover)
+
+    def get_help(self, ctx: click.Context) -> str:
+        return "\n" + super().get_help(ctx) + "\n"
+
+
+@click.group(cls=_CategorizedGroup)
 @click.version_option(version="0.1.0", prog_name="wikiloom")
 def main() -> None:
     """WikiLoom — LLM-maintained knowledge bases with deterministic linking."""
@@ -456,7 +593,7 @@ def ingest(
 
     Extracts content, copies local files to raw/, rebuilds backlinks and
     indexes, and commits the result. Re-ingesting an identical local
-    file is a cheap no-op (catalog dedup) unless ``--force`` is passed.
+    file is a cheap no-op (catalog dedup) unless --force is passed.
     """
     from wikiloom.config import ConfigError
     from wikiloom.ingest.errors import IngestError
@@ -570,7 +707,7 @@ def lint(fix: bool, project: Path | None) -> None:
     """Run health checks over a WikiLoom project.
 
     Default behavior prints a report and exits 1 if issues are found.
-    Pass ``--fix`` to apply mechanical repairs (respecting human-edit
+    Pass --fix to apply mechanical repairs (respecting human-edit
     protection).
     """
     from wikiloom.lint import WikiLinter
@@ -648,7 +785,7 @@ def protect(sync: bool, project: Path | None) -> None:
     """Reconcile human-edit flags with git history.
 
     Default behavior scans for pages whose manifest flag disagrees
-    with git and prints a report. ``--sync`` applies the fix: updates
+    with git and prints a report. --sync applies the fix: updates
     the manifest + frontmatter and emits a HUMAN_EDIT event.
     """
     from wikiloom.locking import FileLock
@@ -887,10 +1024,10 @@ def query(
 ) -> None:
     """Ask a question and get an answer grounded in the wiki's content.
 
-    Default output shows just the answer. Use ``--detail`` to include
-    sources, confidence, cost, and suggested follow-ups. Use ``--last-detail``
-    to view detail from the most recent query. Use ``--save-last``
-    to save the most recent answer as a synthesis page.
+    Default output shows just the answer. Use --detail to include
+    sources, confidence, cost, and suggested follow-ups. Use
+    --last-detail to view detail from the most recent query. Use
+    --save-last to save the most recent answer as a synthesis page.
     """
     import json as json_mod
 
@@ -1372,11 +1509,11 @@ def log_cmd(limit: int, project: Path | None) -> None:
     help="Project root.",
 )
 def edits(limit: int, project: Path | None) -> None:
-    """Show recent human edits committed via ``wikiloom save``.
+    """Show recent human edits committed via `wikiloom save`.
 
-    Complements ``wikiloom log`` (LLM / system activity) by surfacing
-    the git history of ``human-edit:`` commits. Useful in multi-user
-    wikis to see who edited what, when. ``git log`` remains the
+    Complements `wikiloom log` (LLM / system activity) by surfacing
+    the git history of human-edit commits. Useful in multi-user
+    wikis to see who edited what, when. `git log` remains the
     exhaustive source of truth.
     """
     from wikiloom.git_ops import GitOps
@@ -2095,7 +2232,7 @@ def orphans(project: Path | None) -> None:
     An orphan is a page nothing in the wiki links to — outbound links
     don't count. Excludes sources (provenance, not meant to be linked
     to), index pages (derived), and deprecated pages (out of flow).
-    Shares the same definition with ``wikiloom lint``.
+    Shares the same definition with `wikiloom lint`.
     """
     from wikiloom.backlinks import BacklinkRegistry
     from wikiloom.lint import find_orphan_page_ids
@@ -3526,7 +3663,7 @@ def _run_pending_review(project: Path, page_id: str) -> None:
 def source(chunk_id: str, project: Path | None) -> None:
     """Show the raw source text for a chunk referenced by a wiki page.
 
-    Pages synthesized via ``wikiloom ingest`` carry ``chunk_ids`` in
+    Pages synthesized via `wikiloom ingest` carry chunk_ids in
     their frontmatter. Pass one of those ids here to see the exact
     text the LLM saw when it produced that page — structural
     provenance click-through without trusting the LLM's self-
@@ -3600,8 +3737,8 @@ def source(chunk_id: str, project: Path | None) -> None:
 def save(message: str | None, dry_run: bool, project: Path | None) -> None:
     """Commit manual edits with a human-edit: prefix.
 
-    Picks up edits to pages under ``wiki/``, plus ``wikiloom.toml`` and
-    ``.wikiloom/prompts/*.md``. The resulting commit is classified as
+    Picks up edits to pages under `wiki/`, plus `wikiloom.toml` and
+    `.wikiloom/prompts/*.md`. The resulting commit is classified as
     human-authored so auto-tools (lint --fix, re-ingest) leave the
     affected pages alone.
     """
@@ -3775,7 +3912,7 @@ def _bump_modified_and_freshen(project: Path, paths: list[Path]) -> int:
 def rebuild_cache(project: Path | None) -> None:
     """Regenerate the SQLite query cache from manifest + backlinks.
 
-    The cache at ``_registry/wiki.db`` is a git-ignored derived index.
+    The cache at `_registry/wiki.db` is a git-ignored derived index.
     Run this if it's missing, corrupt, or suspected to be out of sync.
     """
     import time as _time
