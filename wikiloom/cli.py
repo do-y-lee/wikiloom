@@ -3143,13 +3143,22 @@ def source(chunk_id: str, project: Path | None) -> None:
     catalog = SourceCatalog(project / "_registry")
     source_entry = catalog.get(chunk.source_hash)
     source_name = source_entry.name if source_entry else "<unknown source>"
-    raw_path = (
-        source_entry.raw_path if source_entry and source_entry.raw_path else "—"
-    )
+    # URL sources carry no raw_path (nothing on disk) but do carry
+    # ``url``. Surface whichever the catalog has so the click-through
+    # points to the real origin rather than the em-dash placeholder.
+    if source_entry and source_entry.raw_path:
+        origin_label = "raw_path"
+        origin_value = source_entry.raw_path
+    elif source_entry and source_entry.url:
+        origin_label = "url"
+        origin_value = source_entry.url
+    else:
+        origin_label = "raw_path"
+        origin_value = "—"
 
     click.echo(f"chunk_id:     {chunk.chunk_id}")
     click.echo(f"source:       {source_name}")
-    click.echo(f"raw_path:     {raw_path}")
+    click.echo(f"{origin_label + ':':<13} {origin_value}")
     click.echo(f"chunk:        {chunk.chunk_index + 1} of {chunk.chunk_total}")
     click.echo(f"content_type: {chunk.content_type}")
     click.echo(f"tokens:       {chunk.token_estimate}")

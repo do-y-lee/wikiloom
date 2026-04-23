@@ -212,7 +212,7 @@ Run `wikiloom --help` for the command list and `wikiloom <command> --help` for a
 - Paywalled or login-gated content
 - Sites with bot protection / WAF (most banks, Cloudflare-protected sites)
 
-For unsupported pages, download as PDF and ingest the PDF instead. URL ingests currently produce a source summary page but don't synthesize the content into concept/entity pages — that's a planned v1.1 upgrade.
+For unsupported pages, download as PDF and ingest the PDF instead. URL ingests go through the same extract → synthesize → link → commit pipeline as files; dedup keys on the hash of the extracted text so re-ingesting the same URL with unchanged content is a cheap no-op.
 
 ### Reading and exploring
 

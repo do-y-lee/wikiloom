@@ -412,6 +412,113 @@ def test_ingest_populates_event_log_with_real_tokens(
     assert "**Cost**" in log_content
 
 
+def test_ingest_url_writes_pages_and_records_catalog_entry(
+    project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """URL ingests go through the same extract→synthesize→write path as files.
+
+    Regression guard: the synthesis block used to be gated on
+    ``not is_url and source_path.is_file()``, so URL ingests silently
+    produced zero pages and an empty commit. Lifting the gate — plus
+    hashing the extracted text at step 1b — should make URLs behave
+    like any other source, including writing synthesized pages,
+    recording a catalog entry keyed by content hash, and carrying the
+    ``url`` field on that entry.
+    """
+    _install_mock_llm(monkeypatch, response_builder=_populated_llm_response)
+
+    # Stub WebExtractor so the test doesn't hit the network. Returns a
+    # fixed ExtractedContent — enough tokens to exercise the chunker
+    # without triggering it.
+    from wikiloom.ingest.extractors.base import ExtractedContent
+
+    def _fake_extract(self: Any, path: Any) -> ExtractedContent:
+        return ExtractedContent(
+            text="Some text about Topic X and Org Y on a web page.",
+            metadata={"url": str(path)},
+            source_path=Path(str(path)),
+            content_type="web",
+            extraction_method="stub",
+            token_estimate=20,
+        )
+
+    monkeypatch.setattr(
+        "wikiloom.ingest.extractors.web_ext.WebExtractor.extract",
+        _fake_extract,
+    )
+
+    url = "https://example.com/test-page"
+    result = ingest(url, project_root=project)
+
+    # Synthesis produced pages on disk
+    topic_x = project / "wiki" / "concepts" / "topic-x.md"
+    org_y = project / "wiki" / "entities" / "org-y.md"
+    assert topic_x.exists()
+    assert org_y.exists()
+    assert "concepts/topic-x" in result.pages_created
+    assert "entities/org-y" in result.pages_created
+
+    # Catalog entry exists, keyed by the hash of the extracted text,
+    # and carries the URL (no raw_path since nothing was copied).
+    from wikiloom.source_catalog import SourceCatalog, hash_text
+
+    catalog = SourceCatalog(project / "_registry")
+    expected_hash = hash_text(
+        "Some text about Topic X and Org Y on a web page."
+    )
+    entry = catalog.get(expected_hash)
+    assert entry is not None
+    assert entry.url == url
+    assert entry.raw_path is None
+    assert entry.content_type == "web"
+    assert set(entry.pages_produced) >= {"concepts/topic-x", "entities/org-y"}
+
+
+def test_ingest_url_is_reentrant_on_identical_content(
+    project: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Re-ingesting the same URL with unchanged content is a cheap no-op.
+
+    Dedup key is the hash of the extracted text, so if trafilatura
+    returns the same text on the second fetch, the second ingest
+    bumps ingest_count without re-running synthesis.
+    """
+    from wikiloom.ingest.extractors.base import ExtractedContent
+
+    calls = {"extract": 0}
+
+    def _fake_extract(self: Any, path: Any) -> ExtractedContent:
+        calls["extract"] += 1
+        return ExtractedContent(
+            text="Stable content for dedup test.",
+            metadata={"url": str(path)},
+            source_path=Path(str(path)),
+            content_type="web",
+            extraction_method="stub",
+            token_estimate=8,
+        )
+
+    monkeypatch.setattr(
+        "wikiloom.ingest.extractors.web_ext.WebExtractor.extract",
+        _fake_extract,
+    )
+    llm_mock = _install_mock_llm(
+        monkeypatch, response_builder=_populated_llm_response
+    )
+
+    url = "https://example.com/stable"
+    ingest(url, project_root=project)
+    synth_calls_first = llm_mock.call_count
+    ingest(url, project_root=project)
+
+    # Second ingest still hits the extractor (needed to hash), but
+    # should skip synthesis entirely once the catalog dedup fires.
+    assert llm_mock.call_count == synth_calls_first
+    assert calls["extract"] == 2
+
+
 def test_post_merge_relink_scopes_cache_sync_to_linked_pages(
     project: Path,
     monkeypatch: pytest.MonkeyPatch,

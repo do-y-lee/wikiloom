@@ -42,7 +42,7 @@ from wikiloom.llm import LLMClient, estimate_cost
 from wikiloom.locking import FileLock
 from wikiloom.registry import Registry
 from wikiloom.search import IndexUpdater
-from wikiloom.source_catalog import SourceCatalog, SourceEntry, hash_file
+from wikiloom.source_catalog import SourceCatalog, SourceEntry, hash_file, hash_text
 from wikiloom.synthesis import run_synthesis
 from wikiloom.utils import now_iso
 
@@ -215,10 +215,12 @@ def ingest(
         IngestResult describing what happened. Holds the lock for the
         duration of the operation so concurrent runs are serialized.
 
-    URL sources: URLs are passed through to the WebExtractor and work
-    end-to-end for extraction, but they bypass the raw/ copy (nothing
-    to copy) and the content-hash dedup (we'd have to fetch before we
-    could hash). URL dedup lands alongside Component 20.
+    URL sources: URLs are passed through to the WebExtractor and run
+    through the full pipeline (extract → synthesize → write pages).
+    They bypass the raw/ copy (nothing on disk to copy) and their
+    dedup key is the SHA-256 of the extracted text rather than of the
+    raw fetched bytes, since trafilatura output is stable while raw
+    HTML can vary per fetch.
     """
     project_root = Path(project_root)
     is_url = isinstance(source, str) and source.startswith(("http://", "https://"))
@@ -239,9 +241,10 @@ def ingest(
         _guard_file_size(source_path, ingest_cfg)
 
     with FileLock(project_root):
-        # 0. Dedup check — only for local files. Cheap hash before we
-        # pay the extraction cost (which will matter a lot more when
-        # Component 20 wires LLM synthesis into the pipeline).
+        # 0. Dedup check — local files only at this stage. Cheap file
+        # hash before we pay the extraction cost. URL dedup runs at
+        # step 1b once the content has been fetched (can't hash what
+        # we haven't fetched).
         catalog: SourceCatalog | None = None
         content_hash: str | None = None
         registry_dir = project_root / "_registry"
@@ -281,6 +284,23 @@ def ingest(
             f"  {content.content_type}, "
             f"{content.token_estimate:,} tokens estimated"
         )
+
+        # 1b. URL dedup. Files are hashed + deduped at step 0 before the
+        # extraction cost; URLs can only be hashed *after* fetching, so
+        # their dedup lands here. Hash the extracted text (not the raw
+        # HTML) so trivial fetch-time differences don't create new
+        # catalog entries.
+        if is_url and registry_dir.exists():
+            if catalog is None:
+                catalog = SourceCatalog(registry_dir)
+            content_hash = hash_text(content.text)
+            if catalog.has(content_hash) and not force:
+                catalog.touch(content_hash)
+                catalog.save()
+                existing = catalog.get(content_hash)
+                return _already_ingested_result(
+                    source_path, existing, content_hash
+                )
 
         # 2. Copy to raw/
         raw_path = copy_to_raw(source_path, content, project_root)
@@ -327,19 +347,14 @@ def ingest(
             budget=budget,
         )
 
-        # 5. LLM synthesis + page writing. File sources only for now;
-        # URL sources bypass the chunk store until NOTES.local.md
-        # item F lands. An empty synthesis run (all chunks failed)
-        # still produces a commit for backlinks/manifest/indexes but
-        # yields zero new pages.
+        # 5. LLM synthesis + page writing. Runs for any source with a
+        # content_hash — files get theirs at step 0, URLs at step 1b.
+        # An empty synthesis run (all chunks failed) still produces a
+        # commit for backlinks/manifest/indexes but yields zero new
+        # pages.
         registry: Registry | None = None
         synthesis_written: list[Path] = []
-        if (
-            registry_dir.exists()
-            and not is_url
-            and content_hash is not None
-            and source_path.is_file()
-        ):
+        if registry_dir.exists() and content_hash is not None:
             # 5a. Pre-flight budget check — refuse before the LLM loop
             # if the estimated cost would breach the monthly budget.
             # Silent on the happy path; raises if the estimate exceeds.
@@ -443,6 +458,7 @@ def ingest(
                     raw_path=raw_rel,
                     first_ingested_at=now_iso(),
                     last_ingested_at=now_iso(),
+                    url=source if is_url else None,
                 )
 
             click.echo("Writing pages...")
@@ -560,8 +576,8 @@ def ingest(
             )
 
         # 12b. Record / update the source catalog so future ingests of
-        # the same content are cheap no-ops. URL sources skip this —
-        # see the docstring note on URL dedup.
+        # the same content are cheap no-ops. URLs key on the hash of
+        # the extracted text; files key on the hash of raw bytes.
         if catalog is not None and content_hash is not None:
             existing = catalog.get(content_hash)
             if existing is None:
@@ -581,6 +597,7 @@ def ingest(
                         first_ingested_at=now_iso(),
                         last_ingested_at=now_iso(),
                         ingest_count=1,
+                        url=source if is_url else None,
                         pages_produced=list(
                             result.pages_created + result.pages_updated
                         ),

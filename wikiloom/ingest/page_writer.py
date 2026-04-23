@@ -43,11 +43,17 @@ class PageWriteResult:
 
     @property
     def created_page_ids(self) -> list[str]:
-        return [_path_to_page_id(p, _wiki_root_of(p)) for p in self.created_paths]
+        return _unique_page_ids(self.created_paths)
 
     @property
     def updated_page_ids(self) -> list[str]:
-        return [_path_to_page_id(p, _wiki_root_of(p)) for p in self.updated_paths]
+        # When multiple chunks each emit an update proposal targeting
+        # the same existing page, the writer appends each one to disk
+        # (intentional — each chunk contributes distinct content) but
+        # the resulting paths list carries the same path repeatedly.
+        # Callers that care about *which* pages were touched want each
+        # id once, so dedup while preserving encounter order.
+        return _unique_page_ids(self.updated_paths)
 
 
 def _wiki_root_of(page_path: Path) -> Path:
@@ -61,6 +67,18 @@ def _wiki_root_of(page_path: Path) -> Path:
 def _path_to_page_id(path: Path, wiki_root: Path) -> str:
     rel = path.resolve().relative_to(wiki_root.resolve())
     return rel.with_suffix("").as_posix()
+
+
+def _unique_page_ids(paths: list[Path]) -> list[str]:
+    """Map ``paths`` to page_ids, dropping duplicates in encounter order."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for p in paths:
+        pid = _path_to_page_id(p, _wiki_root_of(p))
+        if pid not in seen:
+            seen.add(pid)
+            out.append(pid)
+    return out
 
 
 class PageWriter:

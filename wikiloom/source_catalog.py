@@ -24,6 +24,17 @@ def hash_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def hash_text(text: str) -> str:
+    """Compute SHA-256 of a string's UTF-8 bytes.
+
+    Mirror of ``hash_file`` for sources that live only in memory — notably
+    URL ingests where there's no file on disk to stream. The resulting
+    hash is used as the content_hash key in the catalog so re-ingesting
+    the same URL (with unchanged content) is a cheap no-op.
+    """
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 @dataclass
 class SourceEntry:
     """One row in the source catalog."""
