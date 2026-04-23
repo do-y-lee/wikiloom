@@ -1615,15 +1615,48 @@ def show(
 
 
 @main.command("links")
-@click.argument("page_id")
+@click.argument("page_id", required=False)
+@click.option(
+    "--review",
+    is_flag=True,
+    default=False,
+    help="Switch to pending-link review mode (lists low-confidence "
+         "candidates awaiting action). Combine with --accept-all or "
+         "--clear for batch actions.",
+)
+@click.option(
+    "--accept-all",
+    is_flag=True,
+    default=False,
+    help="Under --review: accept every pending link without prompting.",
+)
+@click.option(
+    "--clear",
+    is_flag=True,
+    default=False,
+    help="Under --review: discard all pending links without inserting any.",
+)
 @click.option(
     "--project",
     type=click.Path(path_type=Path),
     default=None,
     help="Project root.",
 )
-def links(page_id: str, project: Path | None) -> None:
-    """Show all pages linked to and from a given page."""
+def links(
+    page_id: str | None,
+    review: bool,
+    accept_all: bool,
+    clear: bool,
+    project: Path | None,
+) -> None:
+    """Show links for a page, or review pending link candidates.
+
+    Default: ``wikiloom links <page_id>`` lists the page's inbound and
+    outbound wikilinks. With ``--review``, instead lists the project's
+    low-confidence link candidates deferred by the linker to
+    ``_registry/pending.json`` — add ``--accept-all`` or ``--clear``
+    to act on the whole list at once.
+    """
     from wikiloom.backlinks import BacklinkRegistry
     from wikiloom.registry import Registry
 
@@ -1633,6 +1666,24 @@ def links(page_id: str, project: Path | None) -> None:
             raise click.ClickException(
                 "Could not find a WikiLoom project (no wikiloom.toml found)."
             )
+
+    if review:
+        if page_id:
+            raise click.UsageError(
+                "--review operates on the whole project; don't pass a page_id."
+            )
+        _run_pending_review(project, accept_all=accept_all, clear=clear)
+        return
+
+    if accept_all or clear:
+        raise click.UsageError(
+            "--accept-all and --clear only apply with --review."
+        )
+    if not page_id:
+        raise click.UsageError(
+            "Pass a page_id to inspect its links, or use --review "
+            "to triage pending link candidates."
+        )
 
     _warn_if_dirty(project)
 
@@ -2978,34 +3029,15 @@ def purge(page_id: str, yes: bool, project: Path | None) -> None:
     click.echo("")
 
 
-@main.command("review")
-@click.option(
-    "--accept-all",
-    is_flag=True,
-    default=False,
-    help="Accept every pending link without prompting.",
-)
-@click.option(
-    "--clear",
-    is_flag=True,
-    default=False,
-    help="Discard all pending links without inserting any.",
-)
-@click.option(
-    "--project",
-    type=click.Path(path_type=Path),
-    default=None,
-    help="Project root. Defaults to walking upward from the current directory.",
-)
-def review(accept_all: bool, clear: bool, project: Path | None) -> None:
-    """Review and action low-confidence link candidates.
+def _run_pending_review(
+    project: Path, *, accept_all: bool, clear: bool
+) -> None:
+    """Back-end for ``wikiloom links --review``.
 
-    The linking engine defers links below the medium-confidence
-    threshold to ``_registry/pending.json`` instead of auto-inserting
-    them. This command lets you batch-accept or batch-clear those
-    candidates. ``--accept-all`` inserts every pending link into its
-    source page; ``--clear`` discards them. Without flags, prints the
-    list for manual inspection.
+    Lists or actions low-confidence link candidates sitting in
+    ``_registry/pending.json``. Split out of the old ``wikiloom review``
+    command so the new ``links --review`` surface and the deprecated
+    ``review`` alias share one implementation.
     """
     import json
 
@@ -3015,13 +3047,6 @@ def review(accept_all: bool, clear: bool, project: Path | None) -> None:
     if accept_all and clear:
         raise click.UsageError(
             "--accept-all and --clear are mutually exclusive.")
-
-    if project is None:
-        project = _find_project_root(Path.cwd())
-        if project is None:
-            raise click.ClickException(
-                "Could not find a WikiLoom project (no wikiloom.toml found)."
-            )
 
     pending_path = project / "_registry" / "pending.json"
     if not pending_path.exists():
@@ -3035,7 +3060,7 @@ def review(accept_all: bool, clear: bool, project: Path | None) -> None:
         return
 
     if clear:
-        _require_clean_tree(project, "review --clear")
+        _require_clean_tree(project, "links --review --clear")
         with FileLock(project):
             data["pending"] = []
             pending_path.write_text(
@@ -3063,7 +3088,7 @@ def review(accept_all: bool, clear: bool, project: Path | None) -> None:
         return
 
     # --accept-all: insert each pending link into its source page.
-    _require_clean_tree(project, "review --accept-all")
+    _require_clean_tree(project, "links --review --accept-all")
     wiki_dir = project / "wiki"
     inserted = 0
     with FileLock(project):
@@ -3103,6 +3128,8 @@ def review(accept_all: bool, clear: bool, project: Path | None) -> None:
             )
 
     click.echo(f"Inserted {inserted} link(s), cleared pending list.")
+
+
 
 
 @main.command("source")
