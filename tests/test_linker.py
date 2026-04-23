@@ -74,11 +74,56 @@ def registry(project: Path) -> Registry:
     return reg
 
 
+class _StubEmbedder:
+    """Cheapest possible embedder — returns a fixed vector for any input.
+
+    The linker requires an embedder, but most tests don't actually
+    exercise the cosine rerank path — they poke helpers like
+    ``_resolve`` or ``_compute_safe_zones`` directly, or they
+    exercise exact-alias hits that short-circuit before the embedder
+    runs. This stub satisfies the constructor without pulling any
+    real model.
+    """
+
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        return [[1.0, 0.0, 0.0] for _ in texts]
+
+
+class _StubCache:
+    """Matches the SQLiteCache surface the linker actually touches.
+
+    When ``from_registry`` is passed, every registered page gets a
+    unit vector so cosine rerank picks up the fuzzy top-1. That's
+    what most non-hybrid-specific tests want — they only care about
+    which bucket the match lands in, not the numerical cosine value.
+    Tests exercising the rerank logic pass explicit vectors instead.
+    """
+
+    def __init__(
+        self,
+        embeddings: dict[str, list[float]] | None = None,
+        *,
+        from_registry: Registry | None = None,
+    ) -> None:
+        self._embeddings = dict(embeddings or {})
+        if from_registry is not None:
+            for page_id in from_registry.pages:
+                self._embeddings.setdefault(page_id, [1.0, 0.0, 0.0])
+
+    def load_page_embeddings(self) -> dict[str, list[float]]:
+        return dict(self._embeddings)
+
+
 @pytest.fixture
 def engine(registry: Registry) -> LinkingEngine:
     if not HAS_MODEL:
         pytest.skip("en_core_web_sm not installed")
-    return LinkingEngine(registry, LinkingConfig(auto_create_stubs=False))
+    return LinkingEngine(
+        registry,
+        embedder=_StubEmbedder(),
+        cache=_StubCache(from_registry=registry),
+        config=LinkingConfig(auto_create_stubs=False),
+    )
 
 
 # ----------------------------------------------------------------------
@@ -215,7 +260,12 @@ def test_first_mention_variant_does_not_create_duplicate_stub(
     registry: Registry, project: Path
 ) -> None:
     """A second surface form of an already-linked entity must not become a stub."""
-    eng = LinkingEngine(registry, LinkingConfig(auto_create_stubs=True))
+    eng = LinkingEngine(
+        registry,
+        embedder=_StubEmbedder(),
+        cache=_StubCache(from_registry=registry),
+        config=LinkingConfig(auto_create_stubs=True),
+    )
     body = (
         "Flash Attention is fast. We benchmarked Flash Attentions on long sequences."
     )
@@ -229,7 +279,12 @@ def test_self_mention_variant_does_not_create_duplicate_stub(
     registry: Registry,
 ) -> None:
     """The page about an entity must not generate a stub for its own variants."""
-    eng = LinkingEngine(registry, LinkingConfig(auto_create_stubs=True))
+    eng = LinkingEngine(
+        registry,
+        embedder=_StubEmbedder(),
+        cache=_StubCache(from_registry=registry),
+        config=LinkingConfig(auto_create_stubs=True),
+    )
     body = "Flash Attention is fast. People also call it flash-attn."
     result = eng._link_text(body, source_page_id="concepts/flash-attention")
     # Neither variant of Flash Attention should be unresolved
@@ -367,7 +422,12 @@ def test_save_pending_appends(engine: LinkingEngine, project: Path) -> None:
 
 @requires_model
 def test_create_stubs_writes_files_and_registers(registry: Registry, project: Path) -> None:
-    eng = LinkingEngine(registry, LinkingConfig(auto_create_stubs=True))
+    eng = LinkingEngine(
+        registry,
+        embedder=_StubEmbedder(),
+        cache=_StubCache(from_registry=registry),
+        config=LinkingConfig(auto_create_stubs=True),
+    )
     unresolved = [UnresolvedEntity(text="LoRA", label="ORG")]
     created = eng._create_stubs(unresolved)
     assert created == 1
@@ -543,7 +603,12 @@ def test_hybrid_exact_alias_skips_cosine(
 
 @requires_model
 def test_link_page_writes_back_with_frontmatter(registry: Registry, project: Path) -> None:
-    eng = LinkingEngine(registry, LinkingConfig(auto_create_stubs=False))
+    eng = LinkingEngine(
+        registry,
+        embedder=_StubEmbedder(),
+        cache=_StubCache(from_registry=registry),
+        config=LinkingConfig(auto_create_stubs=False),
+    )
 
     page_path = project / "wiki" / "sources" / "paper.md"
     page_path.parent.mkdir(parents=True, exist_ok=True)

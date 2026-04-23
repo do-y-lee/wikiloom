@@ -1,8 +1,18 @@
-"""Deterministic linking engine.
+"""Hybrid linking engine.
 
-Inserts [[wikilinks]] into page bodies using spaCy NER + rapidfuzz
-fuzzy matching against the manifest. Tiered confidence: high
-auto-links, medium flags, low defers to pending.json.
+For each span extracted by spaCy NER + noun chunks, matches it to
+an existing page in two stages:
+
+1. Fuzzy pre-filter — shortlists up to ``fuzzy_prefilter_top_k``
+   candidate pages by rapidfuzz string similarity against titles
+   and aliases.
+2. Cosine rerank — embeds the span's context window and picks the
+   candidate whose page-body embedding has the highest cosine.
+
+Cosine thresholds (auto / medium / pending / drop) decide what
+happens to the match. An embedder and a SQLite cache with
+populated page embeddings are required — the linker has no pure-
+fuzzy fallback path by design.
 """
 
 from __future__ import annotations
@@ -105,16 +115,14 @@ class LinkingEngine:
         registry: Registry,
         config: LinkingConfig | None = None,
         nlp: "spacy.language.Language | None" = None,
-        embedder: "Embedder | None" = None,
-        cache: "SQLiteCache | None" = None,
+        *,
+        embedder: "Embedder",
+        cache: "SQLiteCache",
     ) -> None:
         import spacy  # imported lazily so tests that don't need NER stay fast
 
         self.registry = registry
         self.config = config or LinkingConfig()
-        self.high_threshold = self.config.high_confidence_threshold
-        self.medium_threshold = self.config.medium_confidence_threshold
-        self.low_threshold = self.config.low_confidence_threshold
 
         if nlp is None:
             self.nlp = spacy.load(self.config.ner_model)
@@ -124,10 +132,10 @@ class LinkingEngine:
         self.alias_map: dict[str, str] = registry.get_all_aliases()
         self._build_entity_ruler()
 
-        # Hybrid-rerank dependencies. When both are present, the linker
-        # uses fuzzy as a pre-filter and cosine similarity against page
-        # body embeddings as the decision. Loaded lazily so the old
-        # fuzzy-only path pays no setup cost.
+        # Hybrid is the only path; both dependencies are required. Call
+        # sites that might be invoked without embeddings (disabled in
+        # config, failed backend load) must guard themselves before
+        # constructing the engine.
         self.embedder = embedder
         self.cache = cache
         self._page_embeddings: dict[str, list[float]] | None = None
@@ -266,12 +274,8 @@ class LinkingEngine:
         linked_targets: set[str] = set()
         resolved_or_pending_texts: set[str] = set()
 
-        hybrid = self._hybrid_enabled()
         for text, label, start, end in candidates:
-            if hybrid:
-                match = self._resolve_with_rerank(text, body, start, end)
-            else:
-                match = self._resolve(text)
+            match = self._resolve_with_rerank(text, body, start, end)
             if not match:
                 continue
             if match.page_id == source_page_id:
@@ -350,10 +354,12 @@ class LinkingEngine:
     # ------------------------------------------------------------------
 
     def _resolve(self, text: str) -> MatchResult | None:
-        """Resolve entity text to a manifest page.
+        """Resolve entity text to a manifest page by exact or fuzzy match.
 
-        Step 1: exact match against alias map.
-        Step 2: rapidfuzz token_sort_ratio against all aliases.
+        Returns the best fuzzy match at or above the pre-filter cutoff;
+        exact alias hits short-circuit with score 100. Used directly by
+        tests; the production link path goes through
+        ``_resolve_with_rerank``.
         """
         normalized = text.lower().strip()
         if not normalized:
@@ -368,7 +374,7 @@ class LinkingEngine:
             normalized,
             list(self.alias_map.keys()),
             scorer=fuzz.token_sort_ratio,
-            score_cutoff=self.low_threshold,
+            score_cutoff=self.config.fuzzy_prefilter_threshold,
         )
         if best is None:
             return None
@@ -414,18 +420,20 @@ class LinkingEngine:
 
         Steps:
 
-        1. Fuzzy top-K against the alias map at a relaxed cutoff.
-        2. Build a context window (~200 chars either side of the span)
+        1. Exact alias hit short-circuits with ``method="exact"``.
+        2. Fuzzy top-K against the alias map at a relaxed cutoff.
+        3. Build a context window (~200 chars either side of the span)
            and embed it. The span alone is often too terse — "account"
            on its own cosine-matches every account-related page — so
-           we feed surrounding context to give the embedder real
-           signal about *which* target fits this mention.
-        3. Cosine-compare the context embedding against each
+           surrounding context gives the embedder real signal about
+           which target fits this mention.
+        4. Cosine-compare the context embedding against each
            candidate's pre-loaded page embedding; return the best.
 
-        Falls back to ``_resolve`` when prerequisites are missing
-        (candidate has no embedding, embedder unavailable, etc.) so a
-        partially-embedded wiki still produces some links.
+        Returns ``None`` when we can't produce a cosine score —
+        either no candidates, no embeddings on any candidate, or the
+        embedder raised. In those cases the span is dropped rather
+        than linked; there's no fuzzy-only fallback by design.
         """
         from wikiloom.embeddings import cosine_similarity
 
@@ -450,17 +458,15 @@ class LinkingEngine:
         embeddings = self._page_embeddings or {}
         usable = [(pid, fscore) for pid, fscore in candidates if pid in embeddings]
         if not usable:
-            # No embedding coverage for any top-K candidate — fall back
-            # to plain fuzzy so the bucket logic can still decide.
-            return self._resolve(text)
+            return None
 
         context = self._context_window(body, start, end)
         try:
             span_vectors = self.embedder.embed_texts([context])
         except Exception:  # noqa: BLE001 — degrade rather than crash a link pass
-            return self._resolve(text)
+            return None
         if not span_vectors:
-            return self._resolve(text)
+            return None
         span_vec = span_vectors[0]
 
         best_page_id: str | None = None
@@ -482,35 +488,26 @@ class LinkingEngine:
             cosine_score=best_cosine,
         )
 
-    def _hybrid_enabled(self) -> bool:
-        return self.embedder is not None and self.cache is not None
-
     def _bucket_for(self, match: MatchResult) -> str:
         """Map a MatchResult to ``"high" | "medium" | "pending" | "drop"``.
 
-        On the hybrid path (cosine_score is populated), cosine is the
-        decision metric — fuzzy is just a pre-filter breadcrumb. On
-        the pure-fuzzy fallback, the original integer thresholds
-        decide. Exact alias hits always land in ``"high"`` since they
-        carry no cosine and no ambiguity.
+        Cosine is the decision metric; fuzzy score is a breadcrumb.
+        Exact alias hits always land in ``"high"`` — they're
+        unambiguous and skip the cosine step.
         """
         if match.method == "exact":
             return "high"
-        if match.cosine_score is not None:
-            c = match.cosine_score
-            if c >= self.config.cosine_high_threshold:
-                return "high"
-            if c >= self.config.cosine_medium_threshold:
-                return "medium"
-            if c >= self.config.cosine_low_threshold:
-                return "pending"
+        c = match.cosine_score
+        if c is None:
+            # _resolve_with_rerank only returns a MatchResult when it
+            # successfully produced a cosine score. Anything else is a
+            # programming error, not a runtime case.
             return "drop"
-        # Fuzzy-only fallback — current v1 thresholds.
-        if match.score >= self.high_threshold:
+        if c >= self.config.cosine_high_threshold:
             return "high"
-        if match.score >= self.medium_threshold:
+        if c >= self.config.cosine_medium_threshold:
             return "medium"
-        if match.score >= self.low_threshold:
+        if c >= self.config.cosine_low_threshold:
             return "pending"
         return "drop"
 

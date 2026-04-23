@@ -490,24 +490,27 @@ def ingest(
                 from wikiloom.embeddings import load_embedder
                 from wikiloom.linker import LinkingEngine
 
-                # Hybrid linker deps: when both the embedder and the
-                # SQLite cache are available, the linker uses fuzzy
-                # as a pre-filter and cosine similarity against page
-                # body embeddings as the decision. With either
-                # missing, the linker falls back to the fuzzy-only
-                # path — no config flag needed.
+                # Linking is a hybrid fuzzy + cosine pass and needs an
+                # embedder. If one can't load (embeddings disabled in
+                # config, backend missing), skip linking with a clear
+                # note rather than failing the ingest.
                 _link_embedder = load_embedder(project_root)
-                _link_cache: SQLiteCache | None = None
-                if _link_embedder is not None and registry_dir.exists():
-                    _link_cache = SQLiteCache(registry_dir / "wiki.db")
-                linker = LinkingEngine(
-                    registry,
-                    config=full_cfg.linking,
-                    embedder=_link_embedder,
-                    cache=_link_cache,
-                )
-                linked_pages = linker.link_all(synthesis_written)
-                click.echo(f"  {len(linked_pages)} page(s) linked")
+                if _link_embedder is None or not registry_dir.exists():
+                    click.echo(
+                        _dim(
+                            "  skipped (linking requires an embedder; "
+                            "enable [embeddings] in wikiloom.toml)"
+                        )
+                    )
+                else:
+                    linker = LinkingEngine(
+                        registry,
+                        embedder=_link_embedder,
+                        cache=SQLiteCache(registry_dir / "wiki.db"),
+                        config=full_cfg.linking,
+                    )
+                    linked_pages = linker.link_all(synthesis_written)
+                    click.echo(f"  {len(linked_pages)} page(s) linked")
 
                 # Stubs created by the linker are new files that need
                 # to be staged in the commit. Scan the wiki dir for
@@ -913,23 +916,25 @@ def _run_post_merge_relink(
             click.echo(f"  {check_mark} {done}/{total_inner} pages linked")
 
     registry = Registry(project_root / "_registry")
-    # Mirror the ingest path: if an embedder is configured, activate
-    # the hybrid linker so the post-merge relink also gets cosine
-    # rerank. Missing embedder → fuzzy-only fallback.
+    # Linking requires an embedder. If none is configured, skip the
+    # relink pass rather than fail the post-merge flow.
     from wikiloom.cache import SQLiteCache
     from wikiloom.embeddings import load_embedder
 
     _relink_embedder = load_embedder(project_root)
-    _relink_cache = (
-        SQLiteCache(project_root / "_registry" / "wiki.db")
-        if _relink_embedder is not None
-        else None
-    )
+    if _relink_embedder is None:
+        click.echo(
+            _dim(
+                "  skipped (linking requires an embedder; "
+                "enable [embeddings] in wikiloom.toml)"
+            )
+        )
+        return
     linker = LinkingEngine(
         registry,
-        config=full_cfg.linking,
         embedder=_relink_embedder,
-        cache=_relink_cache,
+        cache=SQLiteCache(project_root / "_registry" / "wiki.db"),
+        config=full_cfg.linking,
     )
     linked = linker.link_all(all_pages, progress=_progress)
 

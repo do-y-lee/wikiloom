@@ -55,17 +55,29 @@ class LLMConfig:
 
 @dataclass
 class LinkingConfig:
+    """Hybrid linker knobs.
+
+    The linker matches each span against existing pages in two
+    stages: fuzzy pre-filter (cheap shortlist of up to
+    ``fuzzy_prefilter_top_k`` candidates at ``fuzzy_prefilter_
+    threshold`` or above), then cosine similarity of the span's
+    context window against each shortlisted page's body embedding.
+    Cosine is the decision metric; fuzzy is plumbing.
+
+    Cosine thresholds partition outcomes:
+
+    - ``>= cosine_high_threshold``   → auto-link.
+    - ``>= cosine_medium_threshold`` → auto-link, flagged medium.
+    - ``>= cosine_low_threshold``    → defer to ``pending.json``.
+    - ``<  cosine_low_threshold``    → drop.
+
+    Defaults calibrated for sentence-transformer / fastembed
+    defaults where related content typically lands 0.6–0.85 and
+    unrelated lands 0.2–0.4.
+    """
+
     ner_model: str = "en_core_web_sm"
     auto_create_stubs: bool = False
-    high_confidence_threshold: int = 95
-    medium_confidence_threshold: int = 85
-    low_confidence_threshold: int = 70
-    # Hybrid linker knobs. Activated when a configured embedder is
-    # available at link time. When active, fuzzy is just a pre-filter
-    # (returns ``fuzzy_prefilter_top_k`` candidates above
-    # ``fuzzy_prefilter_threshold``) and cosine similarity against
-    # page-body embeddings is the decision. The fuzzy-only thresholds
-    # above stay in place for the no-embedder fallback path.
     fuzzy_prefilter_top_k: int = 10
     fuzzy_prefilter_threshold: int = 60
     cosine_high_threshold: float = 0.75
