@@ -1634,24 +1634,42 @@ def show(
 @main.command("links")
 @click.argument("page_id", required=False)
 @click.option(
+    "--list",
+    "list_mode",
+    is_flag=True,
+    default=False,
+    help="List every pending link candidate across the project.",
+)
+@click.option(
     "--review",
     is_flag=True,
     default=False,
-    help="Switch to pending-link review mode (lists low-confidence "
-         "candidates awaiting action). Combine with --accept-all or "
-         "--clear for batch actions.",
+    help="Interactively walk one page's pending candidates (y/n/q). "
+         "Requires a page_id.",
 )
 @click.option(
     "--accept-all",
     is_flag=True,
     default=False,
-    help="Under --review: accept every pending link without prompting.",
+    help="Accept every pending link without prompting. Implies --list.",
 )
 @click.option(
     "--clear",
     is_flag=True,
     default=False,
-    help="Under --review: discard all pending links without inserting any.",
+    help="Discard all pending links without inserting any. Implies --list.",
+)
+@click.option(
+    "--limit",
+    type=int,
+    default=None,
+    help="Cap how many rows --list prints.",
+)
+@click.option(
+    "--min-similarity",
+    type=float,
+    default=None,
+    help="Only --list rows whose cosine score is >= this value (0-1).",
 )
 @click.option(
     "--project",
@@ -1661,22 +1679,30 @@ def show(
 )
 def links(
     page_id: str | None,
+    list_mode: bool,
     review: bool,
     accept_all: bool,
     clear: bool,
+    limit: int | None,
+    min_similarity: float | None,
     project: Path | None,
 ) -> None:
-    """Show links for a page, or review pending link candidates.
+    """Inspect links, review pending candidates, or see a project summary.
 
-    Default: ``wikiloom links <page_id>`` lists the page's inbound and
-    outbound wikilinks. With ``--review``, instead lists the project's
-    low-confidence link candidates deferred by the linker to
-    ``_registry/pending.json`` — add ``--accept-all`` or ``--clear``
-    to act on the whole list at once.
+    \b
+    Modes:
+      wikiloom links                       project summary
+      wikiloom links <page_id>             inbound + outbound for one page
+      wikiloom links --list                dump every pending candidate
+      wikiloom links --accept-all          accept all pending (batch)
+      wikiloom links --clear               discard all pending (batch)
+      wikiloom links --review <page_id>    interactive y/n/q walkthrough
+
+    \b
+    --list filters (optional):
+      --limit N              cap rows printed
+      --min-similarity 0.65  cosine floor (hybrid pending entries only)
     """
-    from wikiloom.backlinks import BacklinkRegistry
-    from wikiloom.registry import Registry
-
     if project is None:
         project = _find_project_root(Path.cwd())
         if project is None:
@@ -1684,29 +1710,66 @@ def links(
                 "Could not find a WikiLoom project (no wikiloom.toml found)."
             )
 
-    if review:
+    if list_mode and review:
+        raise click.UsageError("--list and --review are mutually exclusive.")
+
+    # --accept-all and --clear imply --list (they operate on the whole
+    # pending queue). Users don't have to type both.
+    batch_action = accept_all or clear
+    if batch_action and review:
+        raise click.UsageError(
+            "--accept-all / --clear cannot be combined with --review."
+        )
+
+    if list_mode or batch_action:
         if page_id:
             raise click.UsageError(
-                "--review operates on the whole project; don't pass a page_id."
+                "--list / --accept-all / --clear operate on the whole "
+                "project; don't pass a page_id."
             )
-        _run_pending_review(project, accept_all=accept_all, clear=clear)
+        _run_pending_list(
+            project,
+            accept_all=accept_all,
+            clear=clear,
+            limit=limit,
+            min_similarity=min_similarity,
+        )
         return
 
-    if accept_all or clear:
+    if review:
+        if not page_id:
+            raise click.UsageError(
+                "--review requires a page_id. "
+                "Run `wikiloom links` to see pages with pending candidates."
+            )
+        _run_pending_review(project, page_id=_normalize_page_id(page_id))
+        return
+
+    if limit is not None or min_similarity is not None:
         raise click.UsageError(
-            "--accept-all and --clear only apply with --review."
-        )
-    if not page_id:
-        raise click.UsageError(
-            "Pass a page_id to inspect its links, or use --review "
-            "to triage pending link candidates."
+            "--limit and --min-similarity only apply with --list."
         )
 
-    _warn_if_dirty(project)
+    if page_id:
+        _run_page_links(project, _normalize_page_id(page_id))
+        return
 
+    _run_links_summary(project)
+
+
+def _normalize_page_id(page_id: str) -> str:
     page_id = page_id.replace(".md", "").strip("/")
     if page_id.startswith("wiki/"):
         page_id = page_id[len("wiki/"):]
+    return page_id
+
+
+def _run_page_links(project: Path, page_id: str) -> None:
+    """Show inbound and outbound wikilinks for a single page."""
+    from wikiloom.backlinks import BacklinkRegistry
+    from wikiloom.registry import Registry
+
+    _warn_if_dirty(project)
 
     registry = Registry(project / "_registry")
     page = registry.get_page(page_id)
@@ -1715,40 +1778,130 @@ def links(
 
     bl = BacklinkRegistry(project / "_registry")
 
-    outbound = []
-    inbound = []
-    for edge in bl.edges:
-        if edge.source == page_id:
-            outbound.append(edge)
-        if edge.target == page_id:
-            inbound.append(edge)
+    outbound = [e for e in bl.edges if e.source == page_id]
+    inbound = [e for e in bl.edges if e.target == page_id]
 
-    click.echo(f"Links for: {page.title} ({page_id})\n")
+    click.echo("")
+    click.echo(
+        f"Links for {click.style(page_id, fg='cyan', bold=True)}  "
+        f"{_dim(f'({page.title})')}"
+    )
+    click.echo("")
 
+    click.echo(click.style(f"Outbound ({len(outbound)})", bold=True))
     if outbound:
-        click.echo(f"Outbound ({len(outbound)}):")
         for edge in outbound:
             target = registry.get_page(edge.target)
             title = target.title if target else edge.target
-            click.echo(f"  → {title}")
-            click.echo(f"    {edge.target}.md")
+            click.echo(
+                f"  → {click.style(edge.target, fg='cyan')}  "
+                f"{_dim(f'({title})')}"
+            )
     else:
-        click.echo("Outbound: none")
-
+        click.echo(_dim("  (none)"))
     click.echo("")
 
+    click.echo(click.style(f"Inbound ({len(inbound)})", bold=True))
     if inbound:
-        click.echo(f"Inbound ({len(inbound)}):")
         for edge in inbound:
             source = registry.get_page(edge.source)
             title = source.title if source else edge.source
-            click.echo(f"  ← {title}")
-            click.echo(f"    {edge.source}.md")
+            click.echo(
+                f"  ← {click.style(edge.source, fg='cyan')}  "
+                f"{_dim(f'({title})')}"
+            )
     else:
-        click.echo("Inbound: none")
+        click.echo(_dim("  (none)"))
+    click.echo("")
 
     total = len(outbound) + len(inbound)
-    click.echo(f"\nTotal: {total} link(s)")
+    click.echo(_dim(f"Total: {total} link(s)"))
+    click.echo("")
+
+
+def _run_links_summary(project: Path) -> None:
+    """Project-level links summary: edges, pending, top source pages.
+
+    The default when ``wikiloom links`` is invoked without a page_id
+    or any flag. Mirrors ``wikiloom status`` in shape — headline
+    numbers, a short drill-in list, and tips pointing at the other
+    modes.
+    """
+    import json
+    from collections import Counter
+
+    from wikiloom.backlinks import BacklinkRegistry
+
+    sep = _dim("•")
+
+    bl = BacklinkRegistry(project / "_registry")
+    edge_count = len(bl.edges)
+    linked_pages = {e.source for e in bl.edges} | {e.target for e in bl.edges}
+
+    pending_items: list[dict] = []
+    pending_path = project / "_registry" / "pending.json"
+    if pending_path.exists():
+        try:
+            data = json.loads(pending_path.read_text(encoding="utf-8"))
+            pending_items = (
+                data.get("pending", []) if isinstance(data, dict) else data
+            )
+        except json.JSONDecodeError:
+            pending_items = []
+
+    click.echo("")
+    click.echo(click.style("Links", bold=True))
+    click.echo(
+        f"  Backlinks: {edge_count} edges  {sep}  "
+        f"{len(linked_pages)} pages linked"
+    )
+
+    band_label = _format_pending_band(pending_items)
+    click.echo(f"  Pending:   {len(pending_items)} candidates{band_label}")
+
+    # Top source pages with pending — gives the user an actionable
+    # starting point for `links --review <page_id>`.
+    if pending_items:
+        counts = Counter(
+            item.get("source_page", "") for item in pending_items
+            if item.get("source_page")
+        )
+        top = counts.most_common(5)
+        if top:
+            click.echo("")
+            click.echo(click.style("Top pages with pending", bold=True))
+            for pid, n in top:
+                click.echo(
+                    f"  {click.style(pid, fg='cyan')}  {_dim(f'({n} candidates)')}"
+                )
+
+    click.echo("")
+    click.echo(click.style("Tips", bold=True))
+    click.echo(
+        f"  {_dim('wikiloom links <page_id>')}          "
+        f"inspect one page's links"
+    )
+    click.echo(
+        f"  {_dim('wikiloom links --review <page_id>')} "
+        f"walk a page's pending candidates"
+    )
+    click.echo(
+        f"  {_dim('wikiloom links --list')}             "
+        f"dump all pending candidates"
+    )
+    click.echo("")
+
+
+def _format_pending_band(items: list[dict]) -> str:
+    """Return a ``  (cosine 0.50–0.74)`` suffix, or empty when unavailable."""
+    scores = [
+        float(i["cosine_score"])
+        for i in items
+        if isinstance(i.get("cosine_score"), (int, float))
+    ]
+    if scores:
+        return _dim(f"  (cosine {min(scores):.2f}–{max(scores):.2f})")
+    return ""
 
 
 @main.command("related")
@@ -3046,105 +3199,318 @@ def purge(page_id: str, yes: bool, project: Path | None) -> None:
     click.echo("")
 
 
-def _run_pending_review(
-    project: Path, *, accept_all: bool, clear: bool
-) -> None:
-    """Back-end for ``wikiloom links --review``.
+def _load_pending(project: Path) -> tuple[dict, list[dict]]:
+    """Return ``(full_data, items_list)`` from ``_registry/pending.json``.
 
-    Lists or actions low-confidence link candidates sitting in
-    ``_registry/pending.json``. Split out of the old ``wikiloom review``
-    command so the new ``links --review`` surface and the deprecated
-    ``review`` alias share one implementation.
+    Tolerates a missing file (returns an empty shell) and a bare-list
+    form (legacy shape). Keeping the load shared means every pending
+    helper agrees on what "no pending" means.
     """
     import json
 
+    pending_path = project / "_registry" / "pending.json"
+    if not pending_path.exists():
+        return {"version": 1, "pending": []}, []
+    try:
+        data = json.loads(pending_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {"version": 1, "pending": []}, []
+    if isinstance(data, list):
+        data = {"version": 1, "pending": data}
+    items = data.get("pending", []) if isinstance(data, dict) else []
+    return data, items
+
+
+def _write_pending(project: Path, data: dict) -> None:
+    import json
+
+    pending_path = project / "_registry" / "pending.json"
+    pending_path.write_text(
+        json.dumps(data, indent=2) + "\n", encoding="utf-8"
+    )
+
+
+def _format_pending_row(item: dict) -> str:
+    """Render one pending.json entry as a single line with both scores.
+
+    Shows cosine as the decision metric and fuzzy as a breadcrumb for
+    context. Rows without a cosine score (written by a pre-hybrid link
+    pass or a project with embeddings disabled at the time) omit the
+    cosine cell.
+    """
+    source = item.get("source_page", "?")
+    target = item.get("candidate_page_id", "?")
+    matched = item.get("matched_text", "?")
+    fuzzy = item.get("score", "?")
+    cosine = item.get("cosine_score")
+    cosine_bit = f"cos {cosine:.2f}, " if isinstance(cosine, (int, float)) else ""
+    return (
+        f"  {click.style(source, fg='cyan')} → "
+        f"[[{click.style(target, fg='cyan')}]]  "
+        f"{_dim(f'({cosine_bit}fuzzy {fuzzy}, matched {matched!r})')}"
+    )
+
+
+def _apply_pending_link(wiki_dir: Path, item: dict) -> bool:
+    """Insert one pending link into its source page. Returns True on change.
+
+    Skips silently on missing fields or a missing file so a batch
+    operation can continue through partial breakage.
+    """
     from wikiloom.frontmatter import parse_frontmatter, render_frontmatter
+
+    source_page = item.get("source_page", "")
+    target = item.get("candidate_page_id", "")
+    matched_text = item.get("matched_text", "")
+    if not source_page or not target or not matched_text:
+        return False
+
+    page_path = wiki_dir / f"{source_page}.md"
+    if not page_path.exists():
+        return False
+
+    text = page_path.read_text(encoding="utf-8")
+    fm, body = parse_frontmatter(text)
+    wikilink = f"[[{target}|{matched_text}]]"
+    new_body = body.replace(matched_text, wikilink, 1)
+    if new_body == body:
+        return False
+    if fm is not None:
+        page_path.write_text(
+            render_frontmatter(fm) + "\n" + new_body,
+            encoding="utf-8",
+        )
+    else:
+        page_path.write_text(new_body, encoding="utf-8")
+    return True
+
+
+def _run_pending_list(
+    project: Path,
+    *,
+    accept_all: bool,
+    clear: bool,
+    limit: int | None,
+    min_similarity: float | None,
+) -> None:
+    """Back-end for ``wikiloom links --list``.
+
+    Dumps the full pending queue with optional filters, or batch-
+    actions via ``--accept-all`` / ``--clear``. ``--min-similarity``
+    filters rows whose cosine score falls below the threshold; rows
+    without a cosine score (pre-hybrid) always pass through so the
+    filter never silently hides them.
+    """
     from wikiloom.locking import FileLock
 
     if accept_all and clear:
         raise click.UsageError(
-            "--accept-all and --clear are mutually exclusive.")
+            "--accept-all and --clear are mutually exclusive."
+        )
 
-    pending_path = project / "_registry" / "pending.json"
-    if not pending_path.exists():
-        click.echo("No pending links.")
-        return
-
-    data = json.loads(pending_path.read_text(encoding="utf-8"))
-    items = data.get("pending", []) if isinstance(data, dict) else data
+    data, items = _load_pending(project)
     if not items:
-        click.echo("No pending links.")
+        click.echo("")
+        click.echo(_dim("No pending links."))
+        click.echo("")
         return
 
     if clear:
-        _require_clean_tree(project, "links --review --clear")
+        _require_clean_tree(project, "links --list --clear")
         with FileLock(project):
             data["pending"] = []
-            pending_path.write_text(
-                json.dumps(data, indent=2) + "\n", encoding="utf-8"
-            )
+            _write_pending(project, data)
             _auto_commit(
                 project, "review", f"cleared {len(items)} pending link(s)"
             )
-        click.echo(f"Cleared {len(items)} pending link(s).")
+        click.echo("")
+        click.echo(done_summary([f"{len(items)} cleared"]))
+        click.echo("")
         return
 
-    if not accept_all:
-        click.echo(f"Pending links ({len(items)}):")
-        for item in items:
-            click.echo(
-                f"  {item.get('source_page', '?')} → "
-                f"[[{item.get('candidate_page_id', '?')}]] "
-                f"(matched: {item.get('matched_text', '?')!r}, "
-                f"score: {item.get('score', '?')})"
-            )
+    if accept_all:
+        _require_clean_tree(project, "links --list --accept-all")
+        wiki_dir = project / "wiki"
+        inserted = 0
+        with FileLock(project):
+            for item in items:
+                if _apply_pending_link(wiki_dir, item):
+                    inserted += 1
+            data["pending"] = []
+            _write_pending(project, data)
+            if inserted:
+                _sync_cache(project)
+                _auto_commit(
+                    project, "review", f"accepted {inserted} pending link(s)"
+                )
         click.echo("")
         click.echo(
-            "Run with --accept-all to insert all, or --clear to discard."
+            done_summary([f"{inserted} accepted", f"{len(items)} cleared"])
         )
+        click.echo("")
         return
 
-    # --accept-all: insert each pending link into its source page.
-    _require_clean_tree(project, "links --review --accept-all")
-    wiki_dir = project / "wiki"
-    inserted = 0
-    with FileLock(project):
-        for item in items:
-            source_page = item.get("source_page", "")
-            target = item.get("candidate_page_id", "")
-            matched_text = item.get("matched_text", "")
-            if not source_page or not target or not matched_text:
-                continue
+    # Plain --list: print rows with optional filters.
+    filtered = items
+    if min_similarity is not None:
+        filtered = [
+            i for i in filtered
+            if not isinstance(i.get("cosine_score"), (int, float))
+            or float(i["cosine_score"]) >= min_similarity
+        ]
+    total_filtered = len(filtered)
+    truncated = False
+    if limit is not None and total_filtered > limit:
+        filtered = filtered[:limit]
+        truncated = True
 
-            page_path = wiki_dir / f"{source_page}.md"
-            if not page_path.exists():
-                continue
-
-            text = page_path.read_text(encoding="utf-8")
-            fm, body = parse_frontmatter(text)
-            wikilink = f"[[{target}|{matched_text}]]"
-            new_body = body.replace(matched_text, wikilink, 1)
-            if new_body != body:
-                if fm is not None:
-                    page_path.write_text(
-                        render_frontmatter(fm) + "\n" + new_body,
-                        encoding="utf-8",
-                    )
-                else:
-                    page_path.write_text(new_body, encoding="utf-8")
-                inserted += 1
-
-        data["pending"] = []
-        pending_path.write_text(
-            json.dumps(data, indent=2) + "\n", encoding="utf-8"
+    click.echo("")
+    header = f"Pending links ({total_filtered}"
+    if min_similarity is not None:
+        header += f", cosine ≥ {min_similarity:.2f}"
+    header += ")"
+    click.echo(click.style(header, bold=True))
+    for item in filtered:
+        click.echo(_format_pending_row(item))
+    if truncated:
+        click.echo("")
+        click.echo(
+            _dim(
+                f"Showing {len(filtered)} of {total_filtered}. "
+                f"Raise --limit to see more."
+            )
         )
-        if inserted:
+    click.echo("")
+    click.echo(
+        _dim(
+            "Tip: `--accept-all` to insert every row, `--clear` to "
+            "discard, or `wikiloom links --review <page_id>` to walk "
+            "one page's candidates."
+        )
+    )
+    click.echo("")
+
+
+def _run_pending_review(project: Path, page_id: str) -> None:
+    """Interactive y/s/n/q walkthrough of one page's pending candidates.
+
+    Scope is a single page so every decision is made in the context
+    of the reviewer's mental model of that page. Changes land in one
+    commit after the walkthrough, so a quit mid-review commits only
+    the candidates already accepted.
+    """
+    import time as _time
+
+    from wikiloom.locking import FileLock
+    from wikiloom.registry import Registry
+
+    registry = Registry(project / "_registry")
+    if registry.get_page(page_id) is None:
+        raise click.ClickException(_page_not_found_message(page_id))
+
+    data, items = _load_pending(project)
+    scoped = [i for i in items if i.get("source_page") == page_id]
+    if not scoped:
+        click.echo("")
+        click.echo(_dim(f"No pending candidates for {page_id}."))
+        click.echo("")
+        return
+
+    _require_clean_tree(project, "links --review")
+
+    accepted = 0
+    skipped = 0
+    quit_early = False
+    index_map: dict[int, int] = {}  # scoped_index -> items_index
+    for i, it in enumerate(items):
+        if it.get("source_page") == page_id:
+            index_map[len(index_map)] = i
+
+    wiki_dir = project / "wiki"
+    check_mark = _check()
+    skip_glyph = _skip_mark()
+    cross_mark = _cross()
+
+    click.echo("")
+    click.echo(
+        f"Reviewing {len(scoped)} pending candidate(s) for "
+        f"{click.style(page_id, fg='cyan')}"
+    )
+    click.echo(_dim("  [y] accept / [n] skip / [q] quit"))
+    click.echo("")
+
+    start = _time.monotonic()
+    accepted_scoped_indices: set[int] = set()
+
+    with FileLock(project):
+        for scoped_idx, item in enumerate(scoped):
+            target = item.get("candidate_page_id", "?")
+            matched = item.get("matched_text", "?")
+            fuzzy = item.get("score", "?")
+            cosine = item.get("cosine_score")
+            cosine_bit = (
+                f"cos {cosine:.2f}, " if isinstance(cosine, (int, float)) else ""
+            )
+            click.echo(
+                f"  {_dim(f'--- {scoped_idx + 1}/{len(scoped)}')}  "
+                f"{_dim(f'({cosine_bit}fuzzy {fuzzy})')}"
+            )
+            click.echo(
+                f"    → [[{click.style(target, fg='cyan')}]]  "
+                f"{_dim(f'matched {matched!r}')}"
+            )
+            choice = click.prompt(
+                "  Action",
+                type=click.Choice(["y", "n", "q"], case_sensitive=False),
+                default="n",
+                show_choices=True,
+                show_default=True,
+            ).lower()
+
+            if choice == "q":
+                click.echo(f"  {_dim('quit')}")
+                quit_early = True
+                break
+            if choice == "n":
+                click.echo(f"  {skip_glyph} skipped\n")
+                skipped += 1
+                continue
+
+            if _apply_pending_link(wiki_dir, item):
+                accepted += 1
+                accepted_scoped_indices.add(scoped_idx)
+                click.echo(f"  {check_mark} accepted\n")
+            else:
+                click.echo(f"  {cross_mark} could not apply (missing file or text)\n")
+                skipped += 1
+
+        # Rewrite pending.json without the accepted rows. Skipped rows
+        # stay — running --review again picks up where you left off.
+        if accepted_scoped_indices:
+            accepted_items_indices = {
+                index_map[s] for s in accepted_scoped_indices
+            }
+            data["pending"] = [
+                it for i, it in enumerate(items)
+                if i not in accepted_items_indices
+            ]
+            _write_pending(project, data)
             _sync_cache(project)
             _auto_commit(
-                project, "review", f"accepted {inserted} pending link(s)"
+                project,
+                "review",
+                f"accepted {accepted} link(s) on {page_id}",
             )
 
-    click.echo(f"Inserted {inserted} link(s), cleared pending list.")
+    tail = done_summary(
+        [f"{accepted} accepted", f"{skipped} skipped"],
+        elapsed=_time.monotonic() - start,
+    )
+    if quit_early:
+        tail = f"{tail}  {_dim('(quit early)')}"
+    click.echo("")
+    click.echo(tail)
+    click.echo("")
 
 
 
