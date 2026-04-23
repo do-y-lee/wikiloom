@@ -227,6 +227,12 @@ def ingest(
     # Read ingest config before acquiring the lock; it's pure file I/O
     # and lets the boundary guards consult user settings.
     ingest_cfg = _load_ingest_config(project_root)
+    # Full config is used later by the post-ingest merge hook, which
+    # can run for both file and URL ingests. Load it here so the
+    # variable is always defined — previous versions only set it
+    # inside the file-synthesis block, so URL ingests crashed at
+    # step 17 with UnboundLocalError.
+    full_cfg = _load_full_config(project_root)
 
     # Guard 1: file-size cap. URLs skip this — nothing on disk to stat.
     if not is_url:
@@ -334,8 +340,6 @@ def ingest(
             and content_hash is not None
             and source_path.is_file()
         ):
-            full_cfg = _load_full_config(project_root)
-
             # 5a. Pre-flight budget check — refuse before the LLM loop
             # if the estimated cost would breach the monthly budget.
             # Silent on the happy path; raises if the estimate exceeds.

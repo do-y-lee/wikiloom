@@ -202,7 +202,17 @@ Run `wikiloom --help` for the command list and `wikiloom <command> --help` for a
 |---|---|
 | `wikiloom ingest <file-or-url> [--force] [--no-page-context]` | Ingest a source, synthesize pages, link, commit. `--force` re-runs even if the source was already ingested. `--no-page-context` disables per-chunk semantic retrieval for this run |
 
-Supports markdown, PDF (text + scanned via OCR), code files, common office docs, images (vision model), and URLs.
+**Best inputs:** markdown, plain text, PDFs with a text layer (research papers, contracts, documentation, reference manuals). Prose-heavy sources synthesize into useful wiki pages consistently.
+
+**Supported with caveats:** code files, office docs (`.docx`), scanned PDFs (no OCR yet — will extract as empty). Structured data (spreadsheets, CSVs) works as plain text but rarely produces useful concept pages.
+
+**URL ingestion:** `wikiloom ingest https://example.com/page` works on **static HTML sites** — documentation, blog posts, Wikipedia, most MkDocs/Docusaurus/Sphinx-rendered docs. It **does not work** on:
+
+- JavaScript-rendered pages (React / Vue / Next.js client-side apps, most modern product pages)
+- Paywalled or login-gated content
+- Sites with bot protection / WAF (most banks, Cloudflare-protected sites)
+
+For unsupported pages, download as PDF and ingest the PDF instead. URL ingests currently produce a source summary page but don't synthesize the content into concept/entity pages — that's a planned v1.1 upgrade.
 
 ### Reading and exploring
 
