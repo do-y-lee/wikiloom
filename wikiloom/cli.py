@@ -77,7 +77,11 @@ class _StyledCommand(click.Command):
     def format_usage(
         self, ctx: click.Context, formatter: click.HelpFormatter
     ) -> None:
-        pieces = self.collect_usage_pieces(ctx)
+        # Click's default pushes ``[OPTIONS]`` to the front — standard
+        # CLI genre convention. We reorder so positional args come
+        # first and ``[OPTIONS]`` trails, matching the shape every
+        # command's Examples block teaches.
+        pieces = _usage_pieces_positional_first(self, ctx)
         formatter.write_usage(
             ctx.command_path, " ".join(pieces), prefix=_bold("Usage:") + " "
         )
@@ -99,6 +103,27 @@ class _StyledCommand(click.Command):
         return "\n" + super().get_help(ctx) + "\n"
 
 
+def _usage_pieces_positional_first(
+    cmd: click.Command, ctx: click.Context
+) -> list[str]:
+    """Reorder Click's usage pieces so positionals come before ``[OPTIONS]``.
+
+    Click's default puts ``[OPTIONS]`` at index 0, producing
+    ``[OPTIONS] SOURCE``. The rule here is plain: keep every other
+    piece in its original order and move ``[OPTIONS]`` to the end.
+    That gives ``SOURCE [OPTIONS]`` for leaf commands with a
+    positional, ``COMMAND [ARGS]... [OPTIONS]`` for the top-level
+    group, and ``[OPTIONS]`` alone for commands without positionals.
+    """
+    raw = list(cmd.collect_usage_pieces(ctx))
+    options_metavar = cmd.options_metavar or "[OPTIONS]"
+    if options_metavar not in raw:
+        return raw
+    raw.remove(options_metavar)
+    raw.append(options_metavar)
+    return raw
+
+
 class _CategorizedGroup(click.Group):
     """Click Group that renders commands in named categories.
 
@@ -115,10 +140,14 @@ class _CategorizedGroup(click.Group):
     def format_usage(
         self, ctx: click.Context, formatter: click.HelpFormatter
     ) -> None:
-        pieces = self.collect_usage_pieces(ctx)
-        formatter.write_usage(
-            ctx.command_path, " ".join(pieces), prefix=_bold("Usage:") + " "
-        )
+        # Two-line Usage so the distinction between top-level flags
+        # (wikiloom --version / --help) and subcommand invocations
+        # (wikiloom ingest SOURCE --force) is visible up front. Leaf
+        # commands still use the single-line reorder via
+        # ``_StyledCommand.format_usage``.
+        prog = ctx.command_path
+        formatter.write(f"{_bold('Usage:')} {prog} [OPTIONS]\n")
+        formatter.write(f"   or: {prog} COMMAND [ARGS]... [OPTIONS]\n")
 
     def format_options(
         self, ctx: click.Context, formatter: click.HelpFormatter
@@ -295,12 +324,17 @@ def init(
     config_path = project_dir / "wikiloom.toml"
     domain_line = domain if domain else "(not set — edit the prompt to add one)"
 
-    click.echo(f"✓ Initialized WikiLoom project at {project_dir}")
     click.echo("")
-    click.echo(f"  Domain:   {domain_line}")
-    click.echo(f"  Provider: {preset['label']}")
-    click.echo(f"  Model:    {chosen_model}")
-    click.echo(f"  Budget:   ${DEFAULT_MONTHLY_BUDGET_USD:g}/month")
+    click.echo(
+        f"{_check()} Initialized WikiLoom project at "
+        f"{click.style(str(project_dir), fg='cyan')}"
+    )
+    click.echo("")
+    click.echo(click.style("Project", bold=True))
+    click.echo(f"  {_dim('Domain:')}   {domain_line}")
+    click.echo(f"  {_dim('Provider:')} {preset['label']}")
+    click.echo(f"  {_dim('Model:')}    {click.style(chosen_model, fg='cyan')}")
+    click.echo(f"  {_dim('Budget:')}   ${DEFAULT_MONTHLY_BUDGET_USD:g}/month")
     click.echo("")
 
     api_key_env = preset["api_key_env"]
@@ -311,45 +345,53 @@ def init(
         no_interactive=no_interactive,
     )
 
-    click.echo("Next steps:")
+    click.echo(click.style("Next steps", bold=True))
     click.echo("")
 
     if api_key_env:
         click.echo("  1. API key")
         if env_status == "saved":
-            click.echo(f"     ✓ {api_key_env} saved to {project_dir}/.env")
+            click.echo(
+                f"     {_check()} {api_key_env} saved to {project_dir}/.env"
+            )
         elif env_status == "empty":
             click.echo(
                 f"     Edit {project_dir}/.env and set {api_key_env}=...")
-            click.echo(f"     ({preset['api_key_hint']})")
+            click.echo(_dim(f"     ({preset['api_key_hint']})"))
         else:
             click.echo(f"     cd {project_dir.name} && cp .env.example .env")
             click.echo(f"     Edit .env and set {api_key_env}=...")
-            click.echo(f"     ({preset['api_key_hint']})")
+            click.echo(_dim(f"     ({preset['api_key_hint']})"))
     else:
         click.echo("  1. Start your local LLM runtime")
-        click.echo(f"     {preset['api_key_hint']}")
+        click.echo(_dim(f"     {preset['api_key_hint']}"))
     click.echo("")
 
     click.echo(
         "  2. (Recommended) Review the synthesis prompt — shapes every page WikiLoom writes")
-    click.echo(f"     {prompt_path}")
+    click.echo(f"     {click.style(str(prompt_path), fg='cyan')}")
     click.echo("")
 
     click.echo("  3. (Optional) Adjust LLM model, budget, or dormant windows")
-    click.echo(f"     {config_path}")
+    click.echo(f"     {click.style(str(config_path), fg='cyan')}")
     cheap_model = preset["cheap_model"]
     if cheap_model:
-        click.echo(f"     Tip: switch to {cheap_model} for cheap iteration,")
         click.echo(
-            f"          back to {chosen_model} once the prompt feels right.")
+            _dim(
+                f"     Tip: switch to {cheap_model} for cheap iteration, "
+                f"back to {chosen_model} once the prompt feels right."
+            )
+        )
     click.echo("")
 
     click.echo("  4. Ingest your first file")
     click.echo(f"     cd {project_dir.name}")
-    click.echo("     wikiloom ingest path/to/doc.pdf")
+    click.echo(
+        f"     {click.style('wikiloom ingest path/to/doc.pdf', fg='cyan')}"
+    )
     click.echo("")
-    click.echo("Run `wikiloom --help` to see all commands.")
+    click.echo(_dim("Run `wikiloom --help` to see all commands."))
+    click.echo("")
 
 
 def _find_project_root(start: Path) -> Path | None:
@@ -610,6 +652,12 @@ def ingest(
     Extracts content, copies local files to raw/, rebuilds backlinks and
     indexes, and commits the result. Re-ingesting an identical local
     file is a cheap no-op (catalog dedup) unless --force is passed.
+
+    \b
+    Examples:
+      \x1b[36mwikiloom ingest ~/docs/paper.pdf\x1b[0m
+      \x1b[36mwikiloom ingest https://en.wikipedia.org/wiki/Chase_Bank\x1b[0m
+      \x1b[36mwikiloom ingest ~/docs/paper.pdf --force\x1b[0m
     """
     from wikiloom.config import ConfigError
     from wikiloom.ingest.errors import IngestError
@@ -836,17 +884,25 @@ def protect(sync: bool, project: Path | None) -> None:
         drifted = pp.scan()
 
     if not drifted:
-        click.echo("Human-edit flags are in sync with git.")
+        click.echo("")
+        click.echo(_dim("Human-edit flags are in sync with git."))
+        click.echo("")
         return
 
-    verb = "Reclassified" if sync else "Drift detected on"
-    click.echo(f"{verb} {len(drifted)} page(s):")
+    click.echo("")
+    heading = "Reclassified" if sync else "Drift detected"
+    click.echo(
+        click.style(heading, bold=True)
+        + f"  {_dim('(' + str(len(drifted)) + ')')}"
+    )
     for page in drifted:
         arrow = "→" if page.git_says else "←"
         click.echo(
-            f"  {page.page_id} {arrow} human_edited={page.git_says} "
-            f"(last commit: {page.last_commit_type})"
+            f"  {click.style(page.page_id, fg='cyan')} {arrow} "
+            f"human_edited={page.git_says}  "
+            f"{_dim(f'(last commit: {page.last_commit_type})')}"
         )
+    click.echo("")
     if not sync:
         raise click.exceptions.Exit(code=1)
 
@@ -1044,6 +1100,13 @@ def query(
     sources, confidence, cost, and suggested follow-ups. Use
     --last-detail to view detail from the most recent query. Use
     --save-last to save the most recent answer as a synthesis page.
+
+    \b
+    Examples:
+      \x1b[36mwikiloom query "What is Chase Bank's history?"\x1b[0m
+      \x1b[36mwikiloom query "What is Chase Bank's history?" --detail\x1b[0m
+      \x1b[36mwikiloom query --last-detail\x1b[0m
+      \x1b[36mwikiloom query --save-last\x1b[0m
     """
     import json as json_mod
 
@@ -1700,6 +1763,12 @@ def show(
     Default mode pretty-prints the full frontmatter. Use --field to
     extract a single field; chunk_ids is computed by flattening every
     source's chunk_ids list.
+
+    \b
+    Examples:
+      \x1b[36mwikiloom show concepts/transformer\x1b[0m
+      \x1b[36mwikiloom show sources/chase-bank --field chunk_ids\x1b[0m
+      \x1b[36mwikiloom show entities/openai --json\x1b[0m
     """
     import json as json_mod
 
@@ -1896,10 +1965,10 @@ def links(
     Modes:
       wikiloom links                       project summary
       wikiloom links <page_id>             inbound + outbound for one page
+      wikiloom links <page_id> --review    interactive y/n/q walkthrough
       wikiloom links --list                dump every pending candidate
       wikiloom links --accept-all          accept all pending (batch)
       wikiloom links --clear               discard all pending (batch)
-      wikiloom links --review <page_id>    interactive y/n/q walkthrough
 
     \b
     --list filters (optional):
@@ -2085,7 +2154,7 @@ def _run_links_summary(project: Path) -> None:
         f"inspect one page's links"
     )
     click.echo(
-        f"  {_dim('wikiloom links --review <page_id>')} "
+        f"  {_dim('wikiloom links <page_id> --review')} "
         f"walk a page's pending candidates"
     )
     click.echo(
@@ -2123,6 +2192,12 @@ def related(page_id: str, limit: int, save: bool, link: bool, project: Path | No
 
     Uses embedding cosine similarity to find related pages that may
     not have explicit wikilinks between them.
+
+    \b
+    Examples:
+      \x1b[36mwikiloom related concepts/transformer\x1b[0m
+      \x1b[36mwikiloom related concepts/transformer -n 10\x1b[0m
+      \x1b[36mwikiloom related concepts/transformer --save --link\x1b[0m
     """
     from wikiloom.cache import SQLiteCache
     from wikiloom.embeddings import deserialize_embedding
@@ -3093,6 +3168,11 @@ def merge(winner: str, loser: str, yes: bool, project: Path | None) -> None:
     for human reconciliation), unions aliases/sources/chunk_ids,
     rewrites inbound [[loser]] wikilinks to [[winner]], deprecates the
     loser to wiki/archive/, and commits with a merge: prefix.
+
+    \b
+    Examples:
+      \x1b[36mwikiloom merge concepts/transformer concepts/transformers\x1b[0m
+      \x1b[36mwikiloom merge entities/openai entities/open-ai --yes\x1b[0m
     """
     from wikiloom.locking import FileLock
     from wikiloom.merge import merge_pages
@@ -3226,6 +3306,12 @@ def deprecate(
 
     To undo: `git revert` the deprecate commit.
     To remove permanently: `wikiloom purge <page_id>` after deprecation.
+
+    \b
+    Examples:
+      \x1b[36mwikiloom deprecate concepts/old-page\x1b[0m
+      \x1b[36mwikiloom deprecate concepts/old-page --superseded-by concepts/new-page\x1b[0m
+      \x1b[36mwikiloom deprecate concepts/old-page --yes\x1b[0m
     """
     from wikiloom.locking import FileLock
     from wikiloom.registry import Registry
@@ -3331,6 +3417,11 @@ def purge(page_id: str, yes: bool, project: Path | None) -> None:
 
     Refuses to run on active pages — deprecate them first with
     `wikiloom deprecate <page_id>`.
+
+    \b
+    Examples:
+      \x1b[36mwikiloom purge concepts/old-page\x1b[0m
+      \x1b[36mwikiloom purge concepts/old-page --yes\x1b[0m
     """
     from wikiloom.locking import FileLock
     from wikiloom.registry import Registry
@@ -3587,7 +3678,7 @@ def _run_pending_list(
     click.echo(
         _dim(
             "Tip: `--accept-all` to insert every row, `--clear` to "
-            "discard, or `wikiloom links --review <page_id>` to walk "
+            "discard, or `wikiloom links <page_id> --review` to walk "
             "one page's candidates."
         )
     )
@@ -3739,7 +3830,7 @@ def source(chunk_id: str, project: Path | None) -> None:
     \b
     Examples:
       \x1b[36mwikiloom source 9f2e1c4a3b8d7e02\x1b[0m
-      \x1b[36mwikiloom source --project ~/projects/kb 9f2e1c4a3b8d7e02\x1b[0m
+      \x1b[36mwikiloom source 9f2e1c4a3b8d7e02 --project ~/projects/kb\x1b[0m
       \x1b[36mwikiloom source --help\x1b[0m
 
     \b
@@ -3860,15 +3951,23 @@ def save(message: str | None, dry_run: bool, project: Path | None) -> None:
 
     dirty = git.dirty_human_paths()
     if not dirty:
-        click.echo("Nothing to save — working tree is clean.")
+        click.echo("")
+        click.echo(_dim("Nothing to save — working tree is clean."))
+        click.echo("")
         return
 
     if dry_run:
-        click.echo(f"Would commit {len(dirty)} file(s):")
+        click.echo("")
+        click.echo(
+            click.style("Would commit", bold=True)
+            + f"  {_dim('(' + str(len(dirty)) + ')')}"
+        )
         for p in dirty:
-            click.echo(f"  {p}")
+            click.echo(f"  {click.style(str(p), fg='cyan')}")
         default_msg = message or f"human-edit: {len(dirty)} file(s) [protected]"
-        click.echo(f"\nMessage: {default_msg}")
+        click.echo("")
+        click.echo(f"{_dim('Message:')} {default_msg}")
+        click.echo("")
         return
 
     commit_msg = message or f"human-edit: {len(dirty)} file(s) [protected]"
