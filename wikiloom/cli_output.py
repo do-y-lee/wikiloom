@@ -9,7 +9,22 @@ in one module means writer commands don't drift visually.
 
 from __future__ import annotations
 
+import sys
+
 import click
+
+
+def is_piped() -> bool:
+    """True when stdout is not a user terminal (command is piped or redirected).
+
+    Listing commands use this to switch to a plain one-line-per-item
+    format so ``| grep``, ``| head``, ``| wc`` work cleanly — headers,
+    tips, and multi-line item blocks are suppressed in piped mode.
+    """
+    try:
+        return not sys.stdout.isatty()
+    except (AttributeError, ValueError):
+        return True
 
 
 def dim(text: str) -> str:

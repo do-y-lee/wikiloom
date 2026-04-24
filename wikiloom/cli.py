@@ -14,6 +14,7 @@ from wikiloom.cli_output import (
     cross as _cross,
     dim as _dim,
     done_summary,
+    is_piped as _is_piped,
     skip_mark as _skip_mark,
 )
 
@@ -1562,7 +1563,13 @@ def status(project: Path | None) -> None:
     help="Project root.",
 )
 def log_cmd(limit: int, project: Path | None) -> None:
-    """Show recent events from the wiki event log."""
+    """Show recent events from the wiki event log.
+
+    Pipeable: when stdout isn't a terminal, emits one tab-separated
+    line per event (`timestamp\tevent_type\tdescription\ttokens\tcost\tcommit`)
+    with no headers. Missing tokens/cost/commit render as `-`. Works
+    cleanly with `| grep`, `| head`, `| wc`, and `awk -F'\t'`.
+    """
     from wikiloom.events import parse_log
 
     if project is None:
@@ -1575,11 +1582,27 @@ def log_cmd(limit: int, project: Path | None) -> None:
     _warn_if_dirty(project)
 
     events = parse_log(project / "wiki" / "log.md")
+    shown = events[:limit]
+
+    if _is_piped():
+        # Tab-separated so descriptions with spaces (e.g. merge events
+        # rendered as "a → b") don't shift downstream columns.
+        for event in shown:
+            ts = str(event.get("timestamp", "?"))
+            etype = str(event.get("event_type", "?"))
+            desc = str(event.get("description", ""))
+            tokens = event.get("tokens_used") or 0
+            cost = event.get("cost_usd") or 0.0
+            commit = str(event.get("commit") or "")[:8] or "-"
+            tok = str(int(tokens)) if tokens else "-"
+            cst = f"{float(cost):.4f}" if cost else "-"
+            click.echo(f"{ts}\t{etype}\t{desc}\t{tok}\t{cst}\t{commit}")
+        return
+
     if not events:
         click.echo("No events recorded yet.")
         return
 
-    shown = events[:limit]
     click.echo("")
     click.echo(click.style(f"Recent events ({len(shown)})", bold=True))
     click.echo("")
@@ -1630,6 +1653,10 @@ def edits(limit: int, project: Path | None) -> None:
     the git history of human-edit commits. Useful in multi-user
     wikis to see who edited what, when. `git log` remains the
     exhaustive source of truth.
+
+    Pipeable: when stdout isn't a terminal, emits one tab-separated
+    line per edit (`timestamp\tsha\tauthor\tsubject`) with no headers.
+    Works cleanly with `| grep`, `| head`, `| wc`, and `awk -F'\t'`.
     """
     from wikiloom.git_ops import GitOps
 
@@ -1652,12 +1679,23 @@ def edits(limit: int, project: Path | None) -> None:
         gitops.repo.iter_commits(
             all=False, grep=r"^human-edit:", max_count=limit + 1)
     )
+    shown = commits[:limit]
+
+    if _is_piped():
+        # Tab-separated: subjects and author names can contain spaces.
+        for c in shown:
+            when = c.authored_datetime.strftime("%Y-%m-%dT%H:%M:%SZ")
+            author = c.author.name or "?"
+            subject = c.message.splitlines()[0]
+            short = c.hexsha[:8]
+            click.echo(f"{when}\t{short}\t{author}\t{subject}")
+        return
+
     if not commits:
         click.echo(
             "No human edits yet — use `wikiloom save` to commit manual changes.")
         return
 
-    shown = commits[:limit]
     author_width = max((len(c.author.name or "") for c in shown), default=6)
     click.echo("")
     click.echo(
@@ -1968,6 +2006,7 @@ def show(
     help="Discard all pending links without inserting any. Implies --list.",
 )
 @click.option(
+    "-n",
     "--limit",
     type=int,
     default=None,
@@ -2008,8 +2047,12 @@ def links(
 
     \b
     --list filters (optional):
-      --limit N              cap rows printed
+      -n, --limit N          cap rows printed
       --min-similarity 0.65  cosine floor (hybrid pending entries only)
+
+    Pipeable (--list only): when stdout isn't a terminal, --list emits
+    one tab-separated line per candidate (`source\ttarget\tcosine\tfuzzy\tmatched`)
+    with no headers. Works with `| grep`, `| head`, `| wc`, `awk -F'\t'`.
     """
     if project is None:
         project = _find_project_root(Path.cwd())
@@ -2229,6 +2272,11 @@ def related(page_id: str, limit: int, save: bool, link: bool, project: Path | No
     Uses embedding cosine similarity to find related pages that may
     not have explicit wikilinks between them.
 
+    Pipeable (listing mode only): when stdout isn't a terminal and
+    neither --save nor --link is passed, emits one tab-separated
+    line per match (`page_id\tsimilarity\ttitle`) with no headers.
+    Works with `| grep`, `| head`, `| wc`, and `awk -F'\t'`.
+
     \b
     Examples:
       \x1b[36mwikiloom related concepts/transformer\x1b[0m
@@ -2305,6 +2353,14 @@ def related(page_id: str, limit: int, save: bool, link: bool, project: Path | No
         related_pages.append((r["page_id"], r["title"], sim))
         if len(related_pages) >= limit:
             break
+
+    # Piped, listing-only path: one tab-separated line per match,
+    # no decoration. --save and --link are action modes; their
+    # confirmation output stays intact so users see what changed.
+    if _is_piped() and not (save or link):
+        for pid, title, sim in related_pages:
+            click.echo(f"{pid}\t{sim:.2f}\t{title}")
+        return
 
     if not related_pages:
         click.echo(f"No related pages found for {page_id}.")
@@ -2398,18 +2454,29 @@ def related(page_id: str, limit: int, save: bool, link: bool, project: Path | No
 
 @main.command("orphans")
 @click.option(
+    "-n",
+    "--limit",
+    type=int,
+    default=None,
+    help="Cap number of orphans printed (default: all).",
+)
+@click.option(
     "--project",
     type=click.Path(path_type=Path),
     default=None,
     help="Project root.",
 )
-def orphans(project: Path | None) -> None:
+def orphans(limit: int | None, project: Path | None) -> None:
     """List pages with zero inbound wikilinks.
 
     An orphan is a page nothing in the wiki links to — outbound links
     don't count. Excludes sources (provenance, not meant to be linked
     to), index pages (derived), and deprecated pages (out of flow).
     Shares the same definition with `wikiloom lint`.
+
+    Pipeable: when stdout isn't a terminal, emits one tab-separated
+    line per orphan (`page_id\ttype\ttitle`) with no headers or tips.
+    Works cleanly with `| grep`, `| head`, `| wc`, and `awk -F'\t'`.
     """
     from wikiloom.backlinks import BacklinkRegistry
     from wikiloom.lint import find_orphan_page_ids
@@ -2428,29 +2495,42 @@ def orphans(project: Path | None) -> None:
     bl = BacklinkRegistry(project / "_registry")
     orphan_ids = find_orphan_page_ids(registry, bl)
 
-    if not orphan_ids:
-        click.echo("No orphan pages found.")
-        click.echo("")
-        return
-
     # Hydrate display info (title + type) from the manifest.
     orphan_list = [
         (pid, registry.pages[pid].title, registry.pages[pid].type)
         for pid in orphan_ids
     ]
+    total = len(orphan_list)
+    shown = orphan_list[:limit] if limit is not None else orphan_list
+
+    if _is_piped():
+        for pid, title, ptype in shown:
+            click.echo(f"{pid}\t{ptype}\t{title}")
+        return
+
+    if not orphan_list:
+        click.echo("No orphan pages found.")
+        click.echo("")
+        return
 
     click.echo("")
     click.echo(
         click.style("Orphan pages", bold=True)
-        + f"  {_dim('(' + str(len(orphan_list)) + ')')}"
+        + f"  {_dim('(' + str(total) + ')')}"
     )
     click.echo("")
-    for pid, title, ptype in orphan_list:
+    for pid, title, ptype in shown:
         click.echo(
             f"  {_dim('[' + ptype + ']')} "
             f"{click.style(title, fg='cyan')}"
         )
         click.echo(f"      {_dim('→ ' + pid + '.md')}")
+
+    if len(shown) < total:
+        click.echo("")
+        click.echo(
+            _dim(f"  … and {total - len(shown)} more. Pass -n N to see more.")
+        )
 
     example_pid = orphan_list[0][0]
     click.echo("")
@@ -2490,6 +2570,14 @@ def orphans(project: Path | None) -> None:
     help="Walk through dormant candidates interactively.",
 )
 @click.option(
+    "-n",
+    "--limit",
+    type=int,
+    default=None,
+    help="Cap number of items listed (default: all). Applies to the "
+         "default list and --list-marked.",
+)
+@click.option(
     "--project",
     type=click.Path(path_type=Path),
     default=None,
@@ -2501,6 +2589,7 @@ def dormant(
     windows: bool,
     unmark: bool,
     review: bool,
+    limit: int | None,
     project: Path | None,
 ) -> None:
     """Manage dormant pages: pages older than their window.
@@ -2526,6 +2615,15 @@ def dormant(
       wikiloom dormant <page>          mark a page as dormant
       wikiloom dormant <page> --unmark flip a dormant page back to active
       wikiloom dormant --review        walk through candidates interactively
+
+    Pipeable: the list views switch to tab-separated one-line-per-item
+    when stdout isn't a terminal. Formats:
+
+    \b
+      wikiloom dormant              page_id\\ttype\\tage_days\\twindow_days
+      wikiloom dormant --list-marked page_id\\ttype\\tlast_modified\\ttitle
+
+    Works cleanly with `| grep`, `| head`, `| wc`, and `awk -F'\\t'`.
     """
     mode_count = sum([bool(page), list_marked, windows, review])
     if mode_count > 1:
@@ -2548,7 +2646,7 @@ def dormant(
 
     if list_marked:
         _warn_if_dirty(project)
-        _dormant_list_marked(project)
+        _dormant_list_marked(project, limit=limit)
         return
 
     if review:
@@ -2566,7 +2664,7 @@ def dormant(
 
     # Default: list candidates
     _warn_if_dirty(project)
-    _dormant_list_candidates(project)
+    _dormant_list_candidates(project, limit=limit)
 
 
 def _dormant_show_windows(project: Path) -> None:
@@ -2591,13 +2689,26 @@ def _dormant_show_windows(project: Path) -> None:
     click.echo("")
 
 
-def _dormant_list_candidates(project: Path) -> None:
+def _dormant_list_candidates(project: Path, *, limit: int | None = None) -> None:
     from wikiloom.lint import WikiLinter
+    from wikiloom.registry import Registry
 
     loaded = _load_config(project)
     cfg = loaded.dormant if loaded is not None else None
     linter = WikiLinter(project, dormant=cfg)
-    candidates = linter.check_dormant()
+    candidates = sorted(linter.check_dormant(), key=lambda x: -x.age_days)
+    total = len(candidates)
+    shown = candidates[:limit] if limit is not None else candidates
+
+    if _is_piped():
+        registry = Registry(project / "_registry")
+        for c in shown:
+            entry = registry.get_page(c.page_id)
+            ptype = entry.type if entry else "-"
+            click.echo(
+                f"{c.page_id}\t{ptype}\t{c.age_days}\t{c.window_days}"
+            )
+        return
 
     if not candidates:
         click.echo("")
@@ -2610,13 +2721,18 @@ def _dormant_list_candidates(project: Path) -> None:
     click.echo("")
     click.echo(
         click.style("Dormant candidates", bold=True)
-        + f"  {_dim('(' + str(len(candidates)) + ', active pages past window)')}"
+        + f"  {_dim('(' + str(total) + ', active pages past window)')}"
     )
     click.echo("")
-    for c in sorted(candidates, key=lambda x: -x.age_days):
+    for c in shown:
         click.echo(
             f"  {click.style(c.page_id, fg='cyan')}  "
             f"{_dim(f'({c.age_days}d old, window {c.window_days}d)')}"
+        )
+    if len(shown) < total:
+        click.echo("")
+        click.echo(
+            _dim(f"  … and {total - len(shown)} more. Pass -n N to see more.")
         )
     click.echo("")
     click.echo(
@@ -2628,15 +2744,24 @@ def _dormant_list_candidates(project: Path) -> None:
     click.echo("")
 
 
-def _dormant_list_marked(project: Path) -> None:
+def _dormant_list_marked(project: Path, *, limit: int | None = None) -> None:
     from wikiloom.registry import Registry
 
     registry = Registry(project / "_registry")
-    marked = [
+    marked = sorted(
         (pid, entry)
         for pid, entry in registry.pages.items()
         if entry.status == "dormant"
-    ]
+    )
+    total = len(marked)
+    shown = marked[:limit] if limit is not None else marked
+
+    if _is_piped():
+        for pid, entry in shown:
+            modified = (entry.modified or "")[:10] or "-"
+            click.echo(f"{pid}\t{entry.type}\t{modified}\t{entry.title}")
+        return
+
     if not marked:
         click.echo("")
         click.echo("No pages currently marked dormant.")
@@ -2646,16 +2771,21 @@ def _dormant_list_marked(project: Path) -> None:
     click.echo("")
     click.echo(
         click.style("Marked dormant", bold=True)
-        + f"  {_dim('(' + str(len(marked)) + ')')}"
+        + f"  {_dim('(' + str(total) + ')')}"
     )
     click.echo("")
-    for pid, entry in sorted(marked):
+    for pid, entry in shown:
         modified = (entry.modified or "")[:10]
         click.echo(
             f"  {click.style(pid, fg='cyan')}  "
             f"{_dim('(' + entry.title + ')')}"
         )
         click.echo(f"      {_dim('→ last modified ' + modified)}")
+    if len(shown) < total:
+        click.echo("")
+        click.echo(
+            _dim(f"  … and {total - len(shown)} more. Pass -n N to see more.")
+        )
     click.echo("")
     click.echo(_dim("Tip: `wikiloom dormant <page> --unmark` to flip back to active."))
     click.echo("")
@@ -2852,6 +2982,7 @@ def _dormant_review(project: Path) -> None:
     help="Also compare pages across different types (default: same-type only).",
 )
 @click.option(
+    "-n",
     "--limit",
     type=int,
     default=20,
@@ -2896,6 +3027,12 @@ def duplicates(
     Default mode lists suspect pairs sorted by similarity. Use
     --review for an interactive merge workflow, or --auto-merge to
     batch-resolve only the safe singular/plural and prefix variants.
+
+    Pipeable (default listing only): when stdout isn't a terminal
+    and neither --review nor --auto-merge is passed, emits one tab-
+    separated line per pair (`loser\twinner\tslug%\temb\tsafe|review\treason`)
+    with no headers. Works with `| grep`, `| head`, `| wc`, and
+    `awk -F'\t'`.
     """
     from wikiloom.duplicates import find_duplicates, suggest_winner
 
@@ -2922,15 +3059,17 @@ def duplicates(
         same_type_only=not cross_type,
     )
 
-    if not pairs:
-        click.echo("No suspected duplicates found.")
-        return
-
     if review:
+        if not pairs:
+            click.echo("No suspected duplicates found.")
+            return
         _run_review_mode(project, pairs)
         return
 
     if auto_merge:
+        if not pairs:
+            click.echo("No suspected duplicates found.")
+            return
         _run_auto_merge_mode(project, pairs, dry_run=dry_run)
         return
 
@@ -2945,6 +3084,20 @@ def duplicates(
             safe_pairs.append((pair, sug))
         else:
             review_pairs.append((pair, sug))
+
+    if _is_piped():
+        for pair, sug in safe_pairs + review_pairs:
+            emb = f"{pair.embedding_score:.2f}" if pair.embedding_score >= 0 else "n/a"
+            bucket = "safe" if sug.is_safe_to_auto else "review"
+            click.echo(
+                f"{sug.loser_page_id}\t{sug.winner_page_id}\t"
+                f"{pair.slug_score:.0f}\t{emb}\t{bucket}\t{sug.reason}"
+            )
+        return
+
+    if not pairs:
+        click.echo("No suspected duplicates found.")
+        return
 
     def _render_pair(pair: Any, sug: Any) -> None:
         emb_display = (
@@ -3770,6 +3923,17 @@ def _run_pending_list(
     if limit is not None and total_filtered > limit:
         filtered = filtered[:limit]
         truncated = True
+
+    if _is_piped():
+        for item in filtered:
+            source = item.get("source_page", "?")
+            target = item.get("candidate_page_id", "?")
+            matched = item.get("matched_text", "?")
+            fuzzy = item.get("score", "?")
+            cosine = item.get("cosine_score")
+            cosine_str = f"{cosine:.2f}" if isinstance(cosine, (int, float)) else "n/a"
+            click.echo(f"{source}\t{target}\t{cosine_str}\t{fuzzy}\t{matched}")
+        return
 
     click.echo("")
     header = f"Pending links ({total_filtered}"

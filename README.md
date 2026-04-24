@@ -560,6 +560,20 @@ wikiloom show concepts/foo --json | jq .source_count
 
 **Run `wikiloom duplicates` after every batch ingest.** The LLM occasionally creates near-duplicates (`pending-transactions` vs `pending-transactions-banking`); catching them early keeps the wiki clean.
 
+**Listing commands are pipeable.** `wikiloom orphans`, `wikiloom dormant` (both candidate and `--list-marked` views), `wikiloom duplicates`, `wikiloom related <page>`, `wikiloom links --list`, `wikiloom log`, and `wikiloom edits` all detect when stdout isn't a terminal and switch to **tab-separated one line per item** with no headers or tips, so shell pipelines work cleanly:
+
+```bash
+wikiloom dormant | grep concept              # only concept-type candidates
+wikiloom dormant | wc -l                     # total candidate count
+wikiloom orphans | head -20                  # first 20 orphans
+wikiloom dormant --list-marked | cut -f1     # just page_ids
+wikiloom duplicates | grep -i auth           # duplicate pairs mentioning "auth"
+wikiloom log | grep ingest                   # ingest events only
+wikiloom log | awk -F'\t' '{print $1, $5}'   # timestamp and cost columns
+```
+
+Tab-separated keeps column positions stable when fields like titles or descriptions contain spaces, so `cut -f` and `awk -F'\t'` work reliably. Action modes (`--review`, `--auto-merge`, `--save`, `--link`, `--accept-all`, `--clear`) keep their interactive or confirmation output intact. The pretty view also stays when you run commands directly in a terminal. Run `wikiloom <command> --help` for each command's exact column order.
+
 **Customize the synthesis prompt.** Open `.wikiloom/prompts/ingest.md` and iterate — every page WikiLoom produces is a function of that prompt + the chunk. The default works but is generic. For domain-specific corpora, tailored prompts produce noticeably better output.
 
 **Read `wiki/log.md` to see what happened.** Every operation appends a structured event with timestamps, token usage, and cost. Useful for cost reviews and auditing.
