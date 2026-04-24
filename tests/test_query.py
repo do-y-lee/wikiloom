@@ -166,6 +166,169 @@ def test_retrieve_context_truncates_long_bodies(project: Path) -> None:
     assert "[... truncated]" in contexts[0].body
 
 
+def test_retrieve_context_includes_linked_pages_as_secondary(
+    project: Path,
+) -> None:
+    """Primary hits pull their outbound wikilink targets in as secondary context.
+
+    Scenario: question matches 'concepts/alpha' via FTS5. Alpha's
+    body contains a wikilink to 'concepts/beta', which wouldn't
+    surface on its own (no keyword match). With include_linked=True
+    (default), beta appears as a secondary PageContext, dedup'd
+    against primaries, filtered against excluded types.
+    """
+    from wikiloom.backlinks import BacklinkRegistry
+
+    _add_page(
+        project,
+        "concepts/alpha",
+        "Alpha",
+        "Alpha discusses pantograph parts in detail: "
+        "[[concepts/beta|Beta]].",
+        summary="About pantograph.",
+    )
+    _add_page(
+        project,
+        "concepts/beta",
+        "Beta",
+        "Beta is a side concept with its own vocabulary.",
+        summary="About beta side concept.",
+    )
+    _add_page(
+        project,
+        "concepts/gamma",
+        "Gamma",
+        "Unreferenced orphan with unrelated terms.",
+        summary="About gamma.",
+    )
+    # Rebuild backlinks so the outbound edge alpha -> beta is recorded.
+    bl = BacklinkRegistry(project / "_registry", wiki_dir=project / "wiki")
+    bl.rebuild()
+    bl.save()
+
+    cache = _rebuild_cache(project)
+    # 'pantograph' is unique to alpha — FTS5 only matches alpha, so
+    # beta's appearance in the result must come from the linked-page
+    # expansion path.
+    contexts = retrieve_context("pantograph", cache, project / "wiki")
+
+    kinds_by_id = {c.page_id: c.kind for c in contexts}
+    assert kinds_by_id.get("concepts/alpha") == "primary"
+    assert kinds_by_id.get("concepts/beta") == "secondary"
+    # Gamma isn't linked from alpha and doesn't match the keyword,
+    # so it must not appear in either tier.
+    assert "concepts/gamma" not in kinds_by_id
+
+
+def test_retrieve_context_linked_pages_respect_max_linked(
+    project: Path,
+) -> None:
+    """``max_linked`` caps the secondary tier; order is reference_count + recency."""
+    from wikiloom.backlinks import BacklinkRegistry
+
+    # Alpha links to three candidate targets; we ask for only 1.
+    _add_page(
+        project,
+        "concepts/alpha",
+        "Alpha",
+        "Alpha mentions [[concepts/b1|B1]] and [[concepts/b2|B2]] and "
+        "[[concepts/b3|B3]].",
+        summary="About alpha.",
+    )
+    for pid, title in [
+        ("concepts/b1", "B1"),
+        ("concepts/b2", "B2"),
+        ("concepts/b3", "B3"),
+    ]:
+        _add_page(project, pid, title, f"Body of {title}.")
+    bl = BacklinkRegistry(project / "_registry", wiki_dir=project / "wiki")
+    bl.rebuild()
+    bl.save()
+
+    cache = _rebuild_cache(project)
+    contexts = retrieve_context(
+        "alpha", cache, project / "wiki", max_linked=1
+    )
+    secondary_ids = [c.page_id for c in contexts if c.kind == "secondary"]
+    assert len(secondary_ids) == 1
+
+
+def test_retrieve_context_include_linked_false_skips_expansion(
+    project: Path,
+) -> None:
+    """Passing ``include_linked=False`` returns primaries only."""
+    from wikiloom.backlinks import BacklinkRegistry
+
+    _add_page(
+        project,
+        "concepts/alpha",
+        "Alpha",
+        "Alpha discusses [[concepts/beta|Beta]].",
+        summary="About alpha.",
+    )
+    _add_page(project, "concepts/beta", "Beta", "About beta.")
+    bl = BacklinkRegistry(project / "_registry", wiki_dir=project / "wiki")
+    bl.rebuild()
+    bl.save()
+
+    cache = _rebuild_cache(project)
+    contexts = retrieve_context(
+        "alpha", cache, project / "wiki", include_linked=False
+    )
+    assert all(c.kind == "primary" for c in contexts)
+    assert "concepts/beta" not in {c.page_id for c in contexts}
+
+
+def test_retrieve_context_linked_filters_source_type(project: Path) -> None:
+    """Source-type targets are filtered from the secondary tier.
+
+    Source pages are provenance, not content the LLM should reason
+    from, so they should never appear as supporting context even
+    when a primary links to one.
+    """
+    from wikiloom.backlinks import BacklinkRegistry
+
+    _add_page(
+        project,
+        "concepts/alpha",
+        "Alpha",
+        "Alpha cites [[sources/doc|doc]].",
+        summary="About alpha.",
+    )
+    # Source-type page: manual registry entry so type='source'.
+    fm = Frontmatter(
+        title="doc",
+        type="source",
+        status="active",
+        created="2026-01-01T00:00:00Z",
+        modified="2026-01-01T00:00:00Z",
+        summary="Source doc.",
+    )
+    write_page(project / "wiki" / "sources" / "doc.md", fm, "Raw doc.")
+    registry = Registry(project / "_registry")
+    registry.register_page(
+        "sources/doc",
+        PageEntry(
+            title="doc",
+            type="source",
+            summary="Source doc.",
+            created=fm.created,
+            modified=fm.modified,
+        ),
+    )
+    registry.save()
+
+    bl = BacklinkRegistry(project / "_registry", wiki_dir=project / "wiki")
+    bl.rebuild()
+    bl.save()
+
+    cache = _rebuild_cache(project)
+    contexts = retrieve_context("alpha", cache, project / "wiki")
+    page_ids = {c.page_id for c in contexts}
+    assert "concepts/alpha" in page_ids
+    assert "sources/doc" not in page_ids
+
+
 # ----------------------------------------------------------------------
 # validate_query_response
 # ----------------------------------------------------------------------

@@ -1143,6 +1143,14 @@ def query(
         if not last_query_path.exists():
             raise click.ClickException("No previous query result found.")
         data = json_mod.loads(last_query_path.read_text(encoding="utf-8"))
+        prev_question = data.get("question", "")
+        click.echo("")
+        if prev_question:
+            click.echo(
+                f"{click.style('Question:', bold=True)} {prev_question}"
+            )
+            click.echo("")
+        click.echo(click.style("Answer:", bold=True))
         click.echo("")
         click.echo(data.get("answer", ""))
         click.echo("")
@@ -1154,44 +1162,70 @@ def query(
         raise click.UsageError(
             "Missing argument 'QUESTION'. Use --last-detail or --save-last for the previous result.")
 
-    cfg = _load_config(project)
-    if cfg is None:
-        raise click.ClickException(
-            "Could not load wikiloom.toml. Run inside a project directory."
-        )
-
-    llm_client = LLMClient(cfg, model=cfg.llm.for_query())
-
-    # Load embedder for semantic fallback if enabled
-    embedder = None
-    if cfg.embeddings.enabled:
-        try:
-            from wikiloom.embeddings import get_embedder
-            embedder = get_embedder(cfg.embeddings)
-        except (ImportError, ValueError):
-            pass  # embedding provider not installed; FTS5-only
-
     import threading
     import sys
+
+    # Echo the question back IMMEDIATELY — before config load,
+    # embedder init, or any other slow setup — so the user sees
+    # confirmation the command is running instead of staring at a
+    # blank terminal while fastembed's ONNX model loads.
+    click.echo("")
+    click.echo(f"{click.style('Question:', bold=True)} {question}")
+    click.echo("")
 
     stop_spinner = threading.Event()
 
     def _spinner() -> None:
-        frames = ["Searching wiki...", "Reading pages...", "Thinking..."]
+        frames = [
+            "Initializing...",
+            "Searching wiki...",
+            "Reading pages...",
+            "Expanding linked context...",
+            "Thinking...",
+        ]
+        # ``\033[2K`` clears the entire current line; ``\r`` returns
+        # the cursor to column 0. ``\n\033[A`` reserves a blank row
+        # below the spinner (newline drops us to the next row, then
+        # cursor-up returns so the next frame rewrites the message
+        # line). The visual effect: while the spinner animates, the
+        # row beneath it stays empty — breathing room so the terminal
+        # prompt below doesn't feel crammed against the moving line.
+        ERASE_LINE = "\r\033[2K"
         i = 0
         while not stop_spinner.is_set():
             msg = frames[min(i, len(frames) - 1)]
-            sys.stderr.write(f"\r{msg:<30}")
+            sys.stderr.write(
+                f"{ERASE_LINE}  {click.style(msg, fg='cyan')}\n\033[A"
+            )
             sys.stderr.flush()
             i += 1
             stop_spinner.wait(timeout=2.0)
-        sys.stderr.write(f"\r{'':<30}\r")
+        sys.stderr.write(ERASE_LINE)
         sys.stderr.flush()
 
     spinner_thread = threading.Thread(target=_spinner, daemon=True)
     spinner_thread.start()
 
     try:
+        # Heavy setup lives inside the spinner-wrapped block so the
+        # user sees the "Initializing..." phase while fastembed's
+        # ONNX model loads instead of staring at a blank terminal.
+        cfg = _load_config(project)
+        if cfg is None:
+            raise click.ClickException(
+                "Could not load wikiloom.toml. Run inside a project directory."
+            )
+
+        llm_client = LLMClient(cfg, model=cfg.llm.for_query())
+
+        embedder = None
+        if cfg.embeddings.enabled:
+            try:
+                from wikiloom.embeddings import get_embedder
+                embedder = get_embedder(cfg.embeddings)
+            except (ImportError, ValueError):
+                pass  # embedding provider not installed; FTS5-only
+
         answer = run_query(
             question=question,
             project_root=project,
@@ -1229,7 +1263,9 @@ def query(
         encoding="utf-8",
     )
 
-    # Print the answer
+    # Print the answer with a bold section header so it visually
+    # separates from the question block above.
+    click.echo(click.style("Answer:", bold=True))
     click.echo("")
     click.echo(answer.answer)
 

@@ -12,15 +12,30 @@ from importlib import resources as importlib_resources
 from pathlib import Path
 from typing import Any
 
+from wikiloom.backlinks import BacklinkRegistry
 from wikiloom.cache import SQLiteCache
 from wikiloom.config import Config
 from wikiloom.frontmatter import read_page
 from wikiloom.llm import LLMCallMetrics, LLMClient
 from wikiloom.llm_errors import LLMProviderError, LLMResponseFormatError
+from wikiloom.registry import Registry
 
 PROMPT_FILENAME = "query.md"
 MAX_CONTEXT_PAGES = 5
-MAX_BODY_CHARS = 4000
+# Body caps differ by tier so primary pages (where the answer is
+# grounded) dominate the prompt while linked pages supply bounded
+# supporting context. Starting values; tune from real queries.
+MAX_PRIMARY_BODY_CHARS = 20000
+MAX_SECONDARY_BODY_CHARS = 5000
+# Legacy alias kept so external callers that still pass
+# ``max_body_chars`` keep working. New code should use the tier-
+# specific constants above.
+MAX_BODY_CHARS = MAX_PRIMARY_BODY_CHARS
+MAX_LINKED_PAGES = 5
+# Page types that never show up as secondary context. ``source``
+# pages are provenance summaries (not content the LLM should reason
+# from); ``index`` pages are derived navigation.
+_SECONDARY_EXCLUDE_TYPES: frozenset[str] = frozenset({"source", "index"})
 _VALID_RELEVANCES = frozenset({"primary", "supporting", "tangential"})
 _VALID_CONFIDENCES = frozenset({"high", "medium", "low"})
 
@@ -35,6 +50,7 @@ class PageContext:
     page_id: str
     title: str
     body: str
+    kind: str = "primary"  # "primary" | "secondary"
 
 
 @dataclass
@@ -79,16 +95,48 @@ def retrieve_context(
     cache: SQLiteCache,
     wiki_dir: Path,
     max_pages: int = MAX_CONTEXT_PAGES,
-    max_body_chars: int = MAX_BODY_CHARS,
+    max_body_chars: int | None = None,
     embedder: Any | None = None,
+    *,
+    registry_dir: Path | None = None,
+    include_linked: bool = True,
+    max_linked: int = MAX_LINKED_PAGES,
+    max_primary_body_chars: int = MAX_PRIMARY_BODY_CHARS,
+    max_secondary_body_chars: int = MAX_SECONDARY_BODY_CHARS,
 ) -> list[PageContext]:
-    """Retrieve relevant pages: FTS5 first, semantic top-up if needed.
+    """Retrieve primary pages + (optional) linked secondary pages.
 
-    FTS5 keyword search runs first. If it returns fewer than
-    ``max_pages`` results and an ``embedder`` is provided, semantic
-    similarity fills the remaining slots — so the LLM always gets
-    the richest context available without duplicates.
+    Primary retrieval is unchanged: FTS5 keyword search first, with
+    a semantic top-up from ``embedder`` if FTS5 underdelivers.
+
+    Secondary retrieval (``include_linked=True``, on by default):
+    walks outbound wikilinks from every primary page, ranks targets
+    by how many primaries reference them (ties broken by recency),
+    filters out deprecated, archived, already-primary, and
+    source/index types, and caps at ``max_linked`` — so the LLM
+    gets directly-matched context first and bounded link-hop
+    context after.
+
+    ``max_body_chars``, when provided, pins both tiers to the same
+    cap — kept for backward compatibility with older callers.
+    Otherwise the tiers use independent caps so primaries dominate
+    the prompt while secondaries stay bounded.
+
+    ``registry_dir`` is needed to walk backlinks and filter by
+    manifest status. When omitted, it's inferred from ``wiki_dir``
+    (``wiki_dir.parent / '_registry'``). Callers that want to
+    disable the expansion can pass ``include_linked=False``.
     """
+    wiki_dir = Path(wiki_dir)
+    if registry_dir is None:
+        registry_dir = wiki_dir.parent / "_registry"
+    else:
+        registry_dir = Path(registry_dir)
+
+    if max_body_chars is not None:
+        max_primary_body_chars = max_body_chars
+        max_secondary_body_chars = max_body_chars
+
     # Primary: FTS5 keyword search
     hits = cache.search(question, limit=max_pages)
 
@@ -109,18 +157,112 @@ def retrieve_context(
         except Exception:
             pass  # embedding failure is non-fatal
 
+    primary_ids: list[str] = []
     contexts: list[PageContext] = []
     for hit in hits:
         page_id = hit["page_id"]
-        page_path = Path(wiki_dir) / f"{page_id}.md"
-        if not page_path.exists():
-            continue
-        fm, body = read_page(page_path)
-        title = fm.title if fm else page_id
-        if len(body) > max_body_chars:
-            body = body[:max_body_chars] + "\n\n[... truncated]"
-        contexts.append(PageContext(page_id=page_id, title=title, body=body))
+        ctx = _load_page_context(
+            page_id, wiki_dir, max_primary_body_chars, kind="primary"
+        )
+        if ctx is not None:
+            contexts.append(ctx)
+            primary_ids.append(page_id)
+
+    if include_linked and primary_ids and max_linked > 0:
+        secondary_ids = _rank_linked_pages(
+            primary_ids=primary_ids,
+            registry_dir=registry_dir,
+            wiki_dir=wiki_dir,
+            limit=max_linked,
+        )
+        for pid in secondary_ids:
+            ctx = _load_page_context(
+                pid, wiki_dir, max_secondary_body_chars, kind="secondary"
+            )
+            if ctx is not None:
+                contexts.append(ctx)
+
     return contexts
+
+
+def _load_page_context(
+    page_id: str,
+    wiki_dir: Path,
+    max_chars: int,
+    *,
+    kind: str,
+) -> PageContext | None:
+    """Load a page's frontmatter + body, truncating the body if needed."""
+    page_path = wiki_dir / f"{page_id}.md"
+    if not page_path.exists():
+        return None
+    fm, body = read_page(page_path)
+    title = fm.title if fm else page_id
+    if len(body) > max_chars:
+        body = body[:max_chars] + "\n\n[... truncated]"
+    return PageContext(page_id=page_id, title=title, body=body, kind=kind)
+
+
+def _rank_linked_pages(
+    *,
+    primary_ids: list[str],
+    registry_dir: Path,
+    wiki_dir: Path,
+    limit: int,
+) -> list[str]:
+    """Return up to ``limit`` secondary page_ids ranked by link-hop relevance.
+
+    Process:
+    1. Collect outbound wikilink targets from every primary page.
+    2. Dedup by target page_id, summing the number of primaries that
+       link to each target.
+    3. Drop: already-primary, deprecated, archived, missing-from-
+       manifest, and types in ``_SECONDARY_EXCLUDE_TYPES`` (source,
+       index).
+    4. Sort by ``(reference_count desc, modified desc)`` so shared
+       concepts rise and the freshest page breaks ties.
+    5. Return the top ``limit``.
+    """
+    if limit <= 0 or not primary_ids:
+        return []
+
+    try:
+        backlinks = BacklinkRegistry(registry_dir, wiki_dir=wiki_dir)
+    except Exception:  # noqa: BLE001 — retrieval must not kill the query
+        return []
+
+    primary_set = set(primary_ids)
+    ref_counts: dict[str, int] = {}
+    for edge in backlinks.edges:
+        if edge.source not in primary_set:
+            continue
+        if edge.target in primary_set:
+            continue
+        ref_counts[edge.target] = ref_counts.get(edge.target, 0) + 1
+
+    if not ref_counts:
+        return []
+
+    try:
+        registry = Registry(registry_dir)
+    except Exception:  # noqa: BLE001
+        return []
+
+    ranked: list[tuple[int, str, str]] = []
+    for pid, count in ref_counts.items():
+        entry = registry.get_page(pid)
+        if entry is None:
+            continue
+        if entry.status in ("deprecated", "archived"):
+            continue
+        if entry.type in _SECONDARY_EXCLUDE_TYPES:
+            continue
+        ranked.append((count, entry.modified or "", pid))
+
+    # Sort by (count desc, modified desc) — reference_count is the
+    # primary signal; recency breaks ties.
+    ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [pid for _, _, pid in ranked[:limit]]
 
 
 # ----------------------------------------------------------------------
@@ -129,17 +271,41 @@ def retrieve_context(
 
 
 def _render_user_prompt(question: str, contexts: list[PageContext]) -> str:
+    """Split contexts into primary/secondary sections so the LLM weights them accordingly.
+
+    Primary pages come from FTS5/embedding hits — directly matched to
+    the question, full body. Secondary pages come from outbound
+    wikilinks on the primaries — supporting context, shorter body.
+    Separating them in the prompt gives the LLM explicit hierarchy:
+    ground the answer in primaries, lean on secondaries only when
+    they reinforce.
+    """
     parts = [f"## Your question\n\n{question}"]
-    if contexts:
-        parts.append("\n## Wiki pages (for reference)\n")
-        for ctx in contexts:
-            parts.append(f"### {ctx.page_id} — {ctx.title}\n\n{ctx.body}\n")
-    else:
+
+    primaries = [c for c in contexts if c.kind == "primary"]
+    secondaries = [c for c in contexts if c.kind == "secondary"]
+
+    if not primaries and not secondaries:
         parts.append(
             "\n## Wiki pages\n\n"
             "(No relevant pages found. Answer based on your knowledge "
             "and note that the wiki doesn't cover this topic yet.)\n"
         )
+        return "\n".join(parts)
+
+    if primaries:
+        parts.append("\n## Primary pages (directly matched)\n")
+        for ctx in primaries:
+            parts.append(f"### {ctx.page_id} — {ctx.title}\n\n{ctx.body}\n")
+
+    if secondaries:
+        parts.append(
+            "\n## Linked pages (outbound links from primaries, "
+            "for additional context)\n"
+        )
+        for ctx in secondaries:
+            parts.append(f"### {ctx.page_id} — {ctx.title}\n\n{ctx.body}\n")
+
     return "\n".join(parts)
 
 
