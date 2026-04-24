@@ -152,3 +152,138 @@ def test_single_missing_path_still_raises(
 
     assert result.exit_code != 0
     assert "No such file" in result.output
+
+
+# ----------------------------------------------------------------------
+# --batch-file / --batch-dir / mutual exclusivity
+# ----------------------------------------------------------------------
+
+
+def test_batch_file_reads_paths_and_skips_comments(
+    project: Path, mock_llm: MagicMock
+) -> None:
+    """--batch-file reads one path per line, strips blanks and comments."""
+    a = _write_sample(project, "a.md")
+    b = _write_sample(project, "b.md")
+    list_path = project.parent / "paths.txt"
+    list_path.write_text(
+        f"# a list of things to ingest\n\n{a}\n\n# section\n{b}\n",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["ingest", "--batch-file", str(list_path), "--project", str(project)],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "2 complete" in result.output
+
+
+def test_batch_file_missing_raises(project: Path, mock_llm: MagicMock) -> None:
+    """Missing --batch-file path is a hard error, not a silent empty run."""
+    result = CliRunner().invoke(
+        main,
+        ["ingest", "--batch-file", "/tmp/does-not-exist.txt", "--project", str(project)],
+    )
+    assert result.exit_code != 0
+    assert "--batch-file not found" in result.output
+
+
+def test_batch_dir_resolves_sorted_files_and_skips_hidden(
+    project: Path, mock_llm: MagicMock
+) -> None:
+    """--batch-dir returns a sorted list and ignores dotfiles + subdirs."""
+    corpus = project.parent / "corpus"
+    corpus.mkdir()
+    body = "# {name}\n\nA longer document body so the extractor does not reject it as empty.\n"
+    (corpus / "b.md").write_text(body.format(name="b"), encoding="utf-8")
+    (corpus / "a.md").write_text(body.format(name="a"), encoding="utf-8")
+    (corpus / ".hidden.md").write_text(body.format(name="x"), encoding="utf-8")
+    (corpus / "sub").mkdir()
+
+    result = CliRunner().invoke(
+        main,
+        ["ingest", "--batch-dir", str(corpus), "--project", str(project)],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "2 complete" in result.output
+    # Hidden file and the subdir were not ingested.
+    assert ".hidden.md" not in result.output
+    # Sorted: a appears before b in per-file headers.
+    a_idx = result.output.find("a.md")
+    b_idx = result.output.find("b.md")
+    assert 0 <= a_idx < b_idx, result.output
+
+
+def test_batch_dir_empty_raises(project: Path, mock_llm: MagicMock) -> None:
+    """An empty --batch-dir is a hard error — no files to ingest."""
+    empty = project.parent / "empty"
+    empty.mkdir()
+    result = CliRunner().invoke(
+        main,
+        ["ingest", "--batch-dir", str(empty), "--project", str(project)],
+    )
+    assert result.exit_code != 0
+    assert "no files" in result.output
+
+
+def test_mutual_exclusivity_positional_plus_batch_file_errors(
+    project: Path, mock_llm: MagicMock
+) -> None:
+    """Passing both positional paths and --batch-file fails fast."""
+    a = _write_sample(project, "a.md")
+    list_path = project.parent / "paths.txt"
+    list_path.write_text(f"{a}\n", encoding="utf-8")
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "ingest",
+            str(a),
+            "--batch-file",
+            str(list_path),
+            "--project",
+            str(project),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "Choose one input mode" in result.output
+
+
+def test_mutual_exclusivity_batch_file_plus_batch_dir_errors(
+    project: Path, mock_llm: MagicMock
+) -> None:
+    """--batch-file and --batch-dir can't be combined."""
+    corpus = project.parent / "corpus"
+    corpus.mkdir()
+    (corpus / "a.md").write_text("# a\n", encoding="utf-8")
+    list_path = project.parent / "paths.txt"
+    list_path.write_text("a.md\n", encoding="utf-8")
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "ingest",
+            "--batch-file",
+            str(list_path),
+            "--batch-dir",
+            str(corpus),
+            "--project",
+            str(project),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "Choose one input mode" in result.output
+
+
+def test_no_input_mode_errors(project: Path, mock_llm: MagicMock) -> None:
+    """Calling `wikiloom ingest` with no paths and no flags errors."""
+    result = CliRunner().invoke(
+        main, ["ingest", "--project", str(project)]
+    )
+    assert result.exit_code != 0
+    assert "Provide at least one source" in result.output

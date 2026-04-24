@@ -627,7 +627,24 @@ def _commit_merge_log_tail(project: Path, subject: str) -> None:
 
 
 @main.command()
-@click.argument("sources", nargs=-1, required=True)
+@click.argument("sources", nargs=-1)
+@click.option(
+    "--batch-file",
+    "batch_file",
+    type=str,
+    default=None,
+    help="Read source paths from a text file, one per line. Lines "
+         "starting with '#' and blank lines are skipped. Pass '-' "
+         "to read from stdin.",
+)
+@click.option(
+    "--batch-dir",
+    "batch_dir",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Ingest every file in a directory (non-recursive, skips "
+         "hidden files). Paths are sorted for deterministic order.",
+)
 @click.option(
     "--project",
     type=click.Path(path_type=Path),
@@ -648,6 +665,8 @@ def _commit_merge_log_tail(project: Path, subject: str) -> None:
 )
 def ingest(
     sources: tuple[str, ...],
+    batch_file: str | None,
+    batch_dir: Path | None,
     project: Path | None,
     force: bool,
     no_page_context: bool,
@@ -663,15 +682,43 @@ def ingest(
     (some chunks failed), or failed.
 
     \b
+    Input modes (mutually exclusive — pick one):
+      positional: wikiloom ingest a.pdf b.pdf c.pdf
+      --batch-file paths.txt    paths from a text file (one per line)
+      --batch-file -            paths from stdin
+      --batch-dir ~/docs/       every file in a directory
+
+    \b
     Examples:
       \x1b[36mwikiloom ingest ~/docs/paper.pdf\x1b[0m
       \x1b[36mwikiloom ingest https://en.wikipedia.org/wiki/Chase_Bank\x1b[0m
       \x1b[36mwikiloom ingest ~/docs/paper.pdf --force\x1b[0m
       \x1b[36mwikiloom ingest a.pdf b.pdf c.pdf\x1b[0m
+      \x1b[36mwikiloom ingest --batch-file paths.txt\x1b[0m
+      \x1b[36mwikiloom ingest --batch-dir ~/docs/\x1b[0m
     """
     from wikiloom.config import ConfigError
     from wikiloom.ingest.errors import IngestError
     from wikiloom.ingest.processor import ingest as run_ingest
+
+    # Exactly one input mode must be chosen. Zero modes → nothing to
+    # do; two or more → ambiguous precedence.
+    mode_count = sum([bool(sources), bool(batch_file), bool(batch_dir)])
+    if mode_count == 0:
+        raise click.UsageError(
+            "Provide at least one source: positional paths, --batch-file, "
+            "or --batch-dir."
+        )
+    if mode_count > 1:
+        raise click.UsageError(
+            "Choose one input mode: positional sources, --batch-file, "
+            "or --batch-dir — not more than one."
+        )
+
+    if batch_file is not None:
+        sources = tuple(_read_batch_file(batch_file))
+    elif batch_dir is not None:
+        sources = tuple(_read_batch_dir(batch_dir))
 
     if project is None:
         project = _find_project_root(Path.cwd())
@@ -780,6 +827,68 @@ def ingest(
     if multi:
         _print_grand_summary(outcomes, elapsed=time.monotonic() - batch_start)
     _post_flight_budget_warning(project)
+
+
+def _read_batch_file(path_arg: str) -> list[str]:
+    """Parse `--batch-file` input into a list of source paths.
+
+    Reads one path per line. Skips blank lines and lines starting with
+    '#' so users can keep comments or section headers in the list.
+    Pass '-' to read from stdin.
+    """
+    if path_arg == "-":
+        text = sys.stdin.read()
+    else:
+        file_path = Path(path_arg).expanduser()
+        if not file_path.exists():
+            raise click.ClickException(
+                f"--batch-file not found: {path_arg}"
+            )
+        if not file_path.is_file():
+            raise click.ClickException(
+                f"--batch-file is not a file: {path_arg}"
+            )
+        text = file_path.read_text(encoding="utf-8")
+
+    paths: list[str] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        paths.append(line)
+    if not paths:
+        raise click.ClickException(
+            f"--batch-file contained no paths: {path_arg}"
+        )
+    return paths
+
+
+def _read_batch_dir(dir_arg: Path) -> list[str]:
+    """Resolve `--batch-dir` to a sorted list of regular files.
+
+    Flat (non-recursive) glob. Skips hidden files (names starting with
+    '.') and any subdirectories. Sorted alphabetically for a stable
+    processing order across runs.
+    """
+    dir_path = Path(dir_arg).expanduser()
+    if not dir_path.exists():
+        raise click.ClickException(
+            f"--batch-dir not found: {dir_arg}"
+        )
+    if not dir_path.is_dir():
+        raise click.ClickException(
+            f"--batch-dir is not a directory: {dir_arg}"
+        )
+    paths = [
+        str(p)
+        for p in sorted(dir_path.iterdir())
+        if p.is_file() and not p.name.startswith(".")
+    ]
+    if not paths:
+        raise click.ClickException(
+            f"--batch-dir contained no files: {dir_arg}"
+        )
+    return paths
 
 
 def _print_ingest_summary(result: Any) -> None:
