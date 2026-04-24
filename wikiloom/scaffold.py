@@ -310,16 +310,27 @@ A WikiLoom wiki.
 ## Common commands
 
 ```
-wikiloom ingest <file|url>   # add a source to the wiki
-wikiloom query "question"    # ask the wiki; --save to persist the answer
-wikiloom status              # page counts, tokens, monthly spend
-wikiloom log                 # recent LLM / system events
-wikiloom edits               # recent human edits (who edited what, when)
-wikiloom cost                # token + spend breakdown
-wikiloom save                # commit your manual edits
-wikiloom review              # review pending link candidates
-wikiloom --help              # full command list
-wikiloom <cmd> --help        # flags for a specific command (e.g. wikiloom query --help)
+wikiloom ingest <file|url> [more...]    # add one or more sources to the wiki
+wikiloom ingest --batch-file paths.txt  # ingest paths from a text file
+wikiloom ingest --batch-dir ~/docs/     # ingest every file in a directory
+wikiloom query "question"               # ask the wiki; --save to persist the answer
+wikiloom status                         # page counts, tokens, monthly spend
+wikiloom log                            # recent LLM / system events
+wikiloom edits                          # recent human edits (who edited what, when)
+wikiloom cost                           # token + spend breakdown
+wikiloom save                           # commit your manual edits
+wikiloom review                         # review pending link candidates
+wikiloom --help                         # full command list
+wikiloom <cmd> --help                   # flags for a specific command (e.g. wikiloom query --help)
+```
+
+For long batch ingests (>20 files), pass `--yes` to skip the
+confirmation prompt and redirect output to a log so your terminal
+stays free:
+
+```
+wikiloom ingest --batch-file paths.txt --yes > batch.log 2>&1 &
+tail -f batch.log
 ```
 
 ## Editing workflow
@@ -337,13 +348,32 @@ the wiki in an inconsistent state.
 | Delete / retire a page                | `wikiloom deprecate <page>` (never `rm`) |
 | Permanently remove archived pages     | `wikiloom purge`            |
 | Merge duplicate pages                 | `wikiloom merge`            |
-| Add a source document                 | `wikiloom ingest <file\\|url>` |
+| Add one or more source documents      | `wikiloom ingest <files...>` or `--batch-file` / `--batch-dir` |
 | Rebuild wikilinks                     | `wikiloom relink`           |
 | Tweak config or prompts               | Edit file → `wikiloom save` |
 
 `wikiloom save` commits your manual changes with a `human-edit:`
 prefix so auto-tools (`lint --fix`, re-ingest) leave them alone. Most
 wikiloom commands will print a reminder if you have uncommitted edits.
+
+## Recovering from a failed ingest
+
+If an ingest crashes mid-pipeline, WikiLoom rolls back uncommitted
+changes under `wiki/` and `_registry/` automatically — so the next
+ingest starts from a clean tree without manual `git checkout`. The
+source copy under `raw/` is left in place; re-running ingest on the
+same file just overwrites it idempotently.
+
+To retry a failed file, check `_registry/sources.json` for its
+content hash:
+
+- **Not in `sources.json`** (crash before commit) — re-run plain:
+  `wikiloom ingest <file>`
+- **In `sources.json`** (commit succeeded, a later step raised) —
+  force a re-run: `wikiloom ingest <file> --force`
+
+Most mid-pipeline crashes happen before catalog write, so plain
+re-ingest usually works.
 
 ## Configuration
 
@@ -357,7 +387,7 @@ next command — no restart needed.
 
 ## Docs
 
-Upstream project: https://github.com/your-org/wikiloom
+Upstream project: https://github.com/do-y-lee/wikiloom
 """
 
 

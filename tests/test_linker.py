@@ -415,6 +415,36 @@ def test_save_pending_appends(engine: LinkingEngine, project: Path) -> None:
     assert len(data["pending"]) == 2
 
 
+@requires_model
+def test_save_pending_serializes_numpy_scores(
+    engine: LinkingEngine, project: Path
+) -> None:
+    """Cosine scores come from numpy ops (float32) and must serialize.
+
+    Regression: round() on a numpy scalar returns another numpy scalar,
+    which json.dumps rejects with TypeError. Mid-batch ingest in a
+    real project hit this on the second file, after the first file
+    populated the page-embeddings cache.
+    """
+    import numpy as np
+
+    pending = [
+        PendingLink(
+            source_page="sources/paper",
+            matched_text="span",
+            candidate_page_id="concepts/x",
+            score=np.int64(82),  # rapidfuzz can return numpy scalars
+            label="CONCEPT",
+            cosine_score=np.float32(0.8765),
+        )
+    ]
+    engine._save_pending(pending)
+    pending_path = project / "_registry" / "pending.json"
+    data = json.loads(pending_path.read_text())
+    assert data["pending"][0]["score"] == 82
+    assert data["pending"][0]["cosine_score"] == pytest.approx(0.8765, abs=1e-4)
+
+
 # ----------------------------------------------------------------------
 # Stub creation
 # ----------------------------------------------------------------------

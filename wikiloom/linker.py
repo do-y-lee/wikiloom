@@ -661,16 +661,21 @@ class LinkingEngine:
 
         timestamp = now_iso()
         for p in pending:
+            # Cast both scores to plain Python types: cosine comes from
+            # numpy ops (cosine_similarity → float32), and round() on a
+            # numpy scalar still returns a numpy scalar — json.dumps
+            # rejects those with a TypeError. Fuzzy score is usually an
+            # int already but cast defensively.
             entry: dict[str, Any] = {
                 "source_page": p.source_page,
                 "matched_text": p.matched_text,
                 "candidate_page_id": p.candidate_page_id,
-                "score": p.score,
+                "score": int(p.score) if p.score is not None else None,
                 "label": p.label,
                 "added_at": timestamp,
             }
             if p.cosine_score is not None:
-                entry["cosine_score"] = round(p.cosine_score, 4)
+                entry["cosine_score"] = round(float(p.cosine_score), 4)
             existing_items.append(entry)
 
         path.write_text(

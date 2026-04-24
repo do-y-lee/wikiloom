@@ -401,6 +401,117 @@ def test_large_batch_proceeds_on_yes(
     assert stub.call_count == 25
 
 
+def test_unexpected_exception_buckets_as_failed_and_continues(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-ingest exception (e.g. a bug deep in the pipeline) on file 1
+    must not abort the whole batch — it gets bucketed as failed and
+    the remaining files still run.
+    """
+    import wikiloom.cli as cli_module
+
+    a = _write_sample(project, "a.md")
+    b = _write_sample(project, "b.md")
+
+    calls: list[str] = []
+
+    def _fake(source, **kwargs):
+        calls.append(str(source))
+        if "a.md" in str(source):
+            raise TypeError("simulated deep-pipeline bug")
+
+        class _R:
+            pages_created: list[str] = []
+            pages_updated: list[str] = []
+            notes: list[str] = []
+            total_tokens_in = 0
+            total_tokens_out = 0
+            total_cost_usd = 0.0
+            chunks_total = 0
+            chunks_processed = 0
+            chunks_failed = 0
+
+        return _R()
+
+    monkeypatch.setattr("wikiloom.ingest.processor.ingest", _fake)
+    monkeypatch.setattr(cli_module, "_require_clean_tree", lambda *a, **k: None)
+    monkeypatch.setattr(cli_module, "_warn_if_dirty", lambda *a, **k: None)
+    monkeypatch.setattr(cli_module, "_post_flight_budget_warning", lambda *a, **k: None)
+    monkeypatch.setattr(
+        cli_module, "_rollback_partial_ingest", lambda *a, **k: None
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["ingest", str(a), str(b), "--project", str(project)],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "unexpected error" in result.output
+    assert "simulated deep-pipeline bug" in result.output
+    # Both files were attempted — the batch did not abort on the first one.
+    assert len(calls) == 2
+    # Grand summary reports the right buckets.
+    assert "1 complete" in result.output
+    assert "1 failed" in result.output
+
+
+def test_unexpected_exception_in_single_file_still_raises(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """In single-file mode, an unexpected exception must still propagate
+    so bugs stay loud during development. Rollback runs first so the
+    user's next attempt starts from a clean tree.
+    """
+    import wikiloom.cli as cli_module
+
+    a = _write_sample(project, "a.md")
+    rollback_calls: list[Path] = []
+
+    def _fake(source, **kwargs):
+        raise TypeError("simulated bug")
+
+    def _fake_rollback(p: Path) -> None:
+        rollback_calls.append(p)
+
+    monkeypatch.setattr("wikiloom.ingest.processor.ingest", _fake)
+    monkeypatch.setattr(cli_module, "_require_clean_tree", lambda *a, **k: None)
+    monkeypatch.setattr(cli_module, "_warn_if_dirty", lambda *a, **k: None)
+    monkeypatch.setattr(cli_module, "_post_flight_budget_warning", lambda *a, **k: None)
+    monkeypatch.setattr(cli_module, "_rollback_partial_ingest", _fake_rollback)
+
+    result = CliRunner().invoke(
+        main, ["ingest", str(a), "--project", str(project)]
+    )
+
+    assert result.exit_code != 0
+    assert isinstance(result.exception, TypeError)
+    # Rollback ran exactly once before the exception propagated.
+    assert len(rollback_calls) == 1
+
+
+def test_rollback_restores_tree_after_failed_ingest(project: Path) -> None:
+    """`_rollback_partial_ingest` cleans uncommitted writes under wiki/
+    and _registry/ so the next ingest starts from a known-good state.
+    """
+    from wikiloom.cli import _rollback_partial_ingest
+
+    # Simulate a partial ingest: a tracked file dirtied + a brand-new
+    # untracked page sitting in wiki/.
+    manifest = project / "_registry" / "manifest.json"
+    original = manifest.read_text(encoding="utf-8")
+    manifest.write_text("{}", encoding="utf-8")  # mutate tracked file
+    leftover = project / "wiki" / "concepts" / "leftover-from-crash.md"
+    leftover.write_text("# leftover\n", encoding="utf-8")
+
+    _rollback_partial_ingest(project)
+
+    # Tracked file restored to its pre-crash content.
+    assert manifest.read_text(encoding="utf-8") == original
+    # Untracked leftover page removed.
+    assert not leftover.exists()
+
+
 def test_yes_flag_skips_prompt(
     project: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

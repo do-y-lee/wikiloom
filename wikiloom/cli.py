@@ -713,6 +713,20 @@ def ingest(
     also durable in `wikiloom log` after each file commits.
 
     \b
+    Retrying after failure:
+    On any per-file error the working tree is rolled back to HEAD, so
+    no leftover pages need cleaning up by hand. To retry a file from
+    the grand summary's `Failed:` section, look up its content hash in
+    _registry/sources.json:
+      - not catalogued (crash before commit) → `wikiloom ingest SOURCE`
+      - catalogued (commit succeeded but a later step raised) →
+        `wikiloom ingest SOURCE --force`
+    Most mid-pipeline crashes happen before catalog write, so plain
+    re-ingest usually works. Rollback covers wiki/ and _registry/
+    only; raw/ keeps its source copy so the next ingest just
+    overwrites it idempotently.
+
+    \b
     Examples:
       \x1b[36mwikiloom ingest ~/docs/paper.pdf\x1b[0m
       \x1b[36mwikiloom ingest https://en.wikipedia.org/wiki/Chase_Bank\x1b[0m
@@ -821,16 +835,19 @@ def ingest(
                 force=force,
                 use_page_context=use_page_context_override,
             )
+        except ConfigError as exc:
+            # Config errors are global and pre-flight; nothing was
+            # written yet, so no rollback needed.
+            raise click.ClickException(str(exc)) from exc
         except IngestError as exc:
+            _rollback_partial_ingest(project)
             if not multi:
                 raise click.ClickException(str(exc)) from exc
             click.echo(f"  {_cross()} {exc}")
             outcomes.append((source, exc))
             continue
-        except ConfigError as exc:
-            # Config errors are global; no point continuing the batch.
-            raise click.ClickException(str(exc)) from exc
         except FileNotFoundError as exc:
+            _rollback_partial_ingest(project)
             msg = f"File not found during ingest: {exc}\nCheck the path and try again."
             if not multi:
                 raise click.ClickException(msg) from exc
@@ -838,6 +855,7 @@ def ingest(
             outcomes.append((source, exc))
             continue
         except PermissionError as exc:
+            _rollback_partial_ingest(project)
             msg = (
                 f"Permission denied reading source: {exc}\n"
                 f"Check file permissions (chmod / sudo)."
@@ -845,6 +863,22 @@ def ingest(
             if not multi:
                 raise click.ClickException(msg) from exc
             click.echo(f"  {_cross()} {msg}")
+            outcomes.append((source, exc))
+            continue
+        except Exception as exc:  # noqa: BLE001
+            # Unexpected error from somewhere deep in the pipeline (a
+            # bug, an extractor we did not anticipate, etc.). In single-
+            # file mode the traceback surfaces so bugs stay loud; in
+            # multi-file mode we bucket and continue so the rest of the
+            # batch is not lost. Rollback runs in both cases so the
+            # working tree is clean for the user's next attempt.
+            _rollback_partial_ingest(project)
+            if not multi:
+                raise
+            click.echo(
+                f"  {_cross()} unexpected error: "
+                f"{type(exc).__name__}: {exc}"
+            )
             outcomes.append((source, exc))
             continue
 
@@ -865,6 +899,36 @@ _LARGE_BATCH_THRESHOLD = 20
 # size-dependent; just a ballpark so users can decide "sure" vs. "no
 # actually that's not what I meant."
 _EST_MINUTES_PER_FILE = 5
+
+
+def _rollback_partial_ingest(project: Path) -> None:
+    """Discard uncommitted wiki/registry changes left by a failed ingest.
+
+    An ingest writes pages, runs the linker, and commits in a single
+    step. If anything between writing pages and committing raises, the
+    working tree is dirty. In a multi-file batch the next file would
+    otherwise commit those leftovers as part of its own commit; in
+    single-file mode the next manual `wikiloom ingest` would be blocked
+    by the clean-tree pre-flight check. Restore tracked paths to HEAD
+    and clean untracked files in the same paths so the user's next
+    attempt starts from the last known-good state in either case.
+
+    Best-effort: any git failure is swallowed with a one-line notice
+    so a quirky repo state cannot itself abort the run.
+    """
+    try:
+        import git as _git_module
+
+        repo = _git_module.Repo(project)
+        repo.git.checkout("HEAD", "--", "wiki", "_registry")
+        repo.git.clean("-fdq", "wiki", "_registry")
+    except Exception as exc:  # noqa: BLE001
+        click.echo(
+            _dim(
+                f"  (could not roll back partial state: "
+                f"{type(exc).__name__}: {exc})"
+            )
+        )
 
 
 def _confirm_large_batch(count: int, *, assume_yes: bool) -> None:
