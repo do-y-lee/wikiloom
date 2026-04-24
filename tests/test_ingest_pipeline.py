@@ -144,6 +144,34 @@ def test_ingest_copies_source_to_raw(
     assert "articles" in result.raw_path.parts
 
 
+def test_ingest_result_carries_chunk_counts_on_success(
+    project: Path, sample_markdown: Path, mock_llm: MagicMock
+) -> None:
+    """A successful synthesis exposes its per-chunk counts on IngestResult.
+
+    The batch-ingest layer reads these to classify a file as complete /
+    partial / failed, so they must be populated on the happy path.
+    """
+    result = ingest(sample_markdown, project_root=project)
+    assert result.chunks_total > 0
+    assert result.chunks_processed == result.chunks_total
+    assert result.chunks_failed == 0
+
+
+def test_ingest_result_chunk_counts_are_zero_on_dedup_skip(
+    project: Path, sample_markdown: Path, mock_llm: MagicMock
+) -> None:
+    """Re-ingesting an already-catalogued source short-circuits before
+    synthesis, so the counts stay at their zero defaults — the "synthesis
+    didn't run" signal the batch layer relies on.
+    """
+    ingest(sample_markdown, project_root=project)
+    second = ingest(sample_markdown, project_root=project)
+    assert second.chunks_total == 0
+    assert second.chunks_processed == 0
+    assert second.chunks_failed == 0
+
+
 def test_ingest_regenerates_index_files(
     project: Path, sample_markdown: Path, mock_llm: MagicMock
 ) -> None:

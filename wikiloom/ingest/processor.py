@@ -73,6 +73,13 @@ class IngestResult:
     total_tokens_in: int = 0
     total_tokens_out: int = 0
     total_cost_usd: float = 0.0
+    # Per-chunk counts from synthesis. All zero means "synthesis didn't
+    # run" (dedup skip, empty extraction, etc.). When synthesis runs:
+    # chunks_processed + chunks_failed == chunks_total. The batch-ingest
+    # layer reads these to classify a file as complete / partial / failed.
+    chunks_total: int = 0
+    chunks_processed: int = 0
+    chunks_failed: int = 0
 
 
 # ----------------------------------------------------------------------
@@ -418,6 +425,9 @@ def ingest(
             result.total_tokens_in = synthesis.total_tokens_in
             result.total_tokens_out = synthesis.total_tokens_out
             result.total_cost_usd = synthesis.total_cost_usd
+            result.chunks_total = len(chunks)
+            result.chunks_processed = synthesis.chunks_processed
+            result.chunks_failed = synthesis.chunks_failed
             result.notes.extend(synthesis.notes)
 
             # End-of-synthesis summary: one line, totals rolled up.
