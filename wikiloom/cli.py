@@ -695,9 +695,22 @@ def ingest(
     \b
     Input modes (mutually exclusive — pick one):
       positional: wikiloom ingest a.pdf b.pdf c.pdf
-      --batch-file paths.txt    paths from a text file (one per line)
+      --batch-file paths.txt    paths from a text file (one per line,
+                                blanks and '#' comments skipped)
       --batch-file -            paths from stdin
-      --batch-dir ~/docs/       every file in a directory
+      --batch-dir ~/docs/       every file in a directory (non-recursive,
+                                sorted, hidden files skipped)
+
+    \b
+    Large batches (>20 files) pause for a confirmation prompt with a
+    rough wall-clock estimate. Pass --yes / -y to skip the prompt —
+    required in non-interactive contexts (scripts, backgrounded runs).
+
+    \b
+    For long batches, redirect output so your terminal is free:
+      wikiloom ingest --batch-file paths.txt --yes > batch.log 2>&1 &
+    Check progress with `tail -f batch.log`; per-ingest summaries are
+    also durable in `wikiloom log` after each file commits.
 
     \b
     Examples:
@@ -706,7 +719,8 @@ def ingest(
       \x1b[36mwikiloom ingest ~/docs/paper.pdf --force\x1b[0m
       \x1b[36mwikiloom ingest a.pdf b.pdf c.pdf\x1b[0m
       \x1b[36mwikiloom ingest --batch-file paths.txt\x1b[0m
-      \x1b[36mwikiloom ingest --batch-dir ~/docs/\x1b[0m
+      \x1b[36mwikiloom ingest --batch-dir ~/docs/ --yes\x1b[0m
+      \x1b[36mfind ~/docs -name '*.pdf' | wikiloom ingest --batch-file -\x1b[0m
     """
     from wikiloom.config import ConfigError
     from wikiloom.ingest.errors import IngestError

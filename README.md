@@ -558,6 +558,27 @@ wikiloom show concepts/foo --json | jq .source_count
 
 **Pin permanent notes above the auto marker.** This is the only place that survives `wikiloom ingest <file> --force`.
 
+**Ingesting many files at once.** `wikiloom ingest` accepts more than one source. Pick the input mode that fits — they're mutually exclusive and each feeds the same sequential per-file pipeline with a three-bucket (complete / partial / failed) grand summary at the end:
+
+```bash
+wikiloom ingest a.pdf b.pdf c.pdf          # variadic positional
+wikiloom ingest --batch-file paths.txt     # paths from a text file (blanks and '#' comments skipped)
+wikiloom ingest --batch-dir ~/docs/        # every file in a directory (non-recursive, sorted)
+find ~/docs -name '*.pdf' | wikiloom ingest --batch-file -   # paths from stdin
+```
+
+Failures are isolated per file: a missing path, extraction error, or rate-limit abort on one file doesn't halt the batch. The grand summary lists any partial / failed files with a retry hint.
+
+Batches above 20 files pause for a confirmation prompt with a rough wall-clock estimate (≈5 minutes per file at `max_workers=1`). Pass `--yes` / `-y` to skip the prompt — required for non-interactive contexts like scripts or backgrounded runs.
+
+For long overnight batches, redirect the stream so your terminal is free:
+
+```bash
+wikiloom ingest --batch-file paths.txt --yes > batch.log 2>&1 &
+tail -f batch.log       # watch progress
+wikiloom log            # per-ingest summaries, durable in git
+```
+
 **Run `wikiloom duplicates` after every batch ingest.** The LLM occasionally creates near-duplicates (`pending-transactions` vs `pending-transactions-banking`); catching them early keeps the wiki clean.
 
 **Listing commands are pipeable.** `wikiloom orphans`, `wikiloom dormant` (both candidate and `--list-marked` views), `wikiloom duplicates`, `wikiloom related <page>`, `wikiloom links --list`, `wikiloom log`, and `wikiloom edits` all detect when stdout isn't a terminal and switch to **tab-separated one line per item** with no headers or tips, so shell pipelines work cleanly:
