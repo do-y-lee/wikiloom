@@ -130,16 +130,18 @@ class IngestConfig:
     ``page_context_top_k`` caps how many retrieved pages are injected.
 
     ``max_workers`` sets the concurrency of the synthesis loop. The
-    default of 2 is safe across most providers' entry tiers. Set to 1
-    to run strictly sequentially. Provider-specific guidance:
+    default of 1 is the safe floor: it sidesteps rate limits on every
+    provider's entry tier, so new users don't hit 429s before they
+    see the tool work. Bump it up once you know your provider tier
+    has headroom. Provider-specific guidance:
 
-    - Anthropic Tier 1 (Haiku): 2 is tight against the 10k OTPM cap.
-      Bump to 4–6 on Tier 2+.
+    - Anthropic Tier 1 (Haiku): stay at 1 against the 10k OTPM cap.
+      Tier 2 comfortably handles 2–4; Tier 3+ handles 4–6.
     - OpenAI Tier 1 (gpt-4o-mini / gpt-4o): headroom for 4+ on
       gpt-4o-mini; gpt-4o is ITPM-bound on large chunks.
-    - Gemini free tier: keep at 1–2 (15 RPM ceiling). Paid tiers
+    - Gemini free tier: keep at 1 (15 RPM ceiling). Paid tiers
       handle 4–6 easily.
-    - Mistral / other low free tiers: start at 1 and tune up.
+    - Mistral / other low free tiers: stay at 1 and tune up.
 
     Prompt caching (enabled automatically for Anthropic) reduces ITPM
     pressure since cache reads don't count toward the limit, so
@@ -168,7 +170,7 @@ class IngestConfig:
     enable_budget_check: bool = True
     use_page_context: bool = True
     page_context_top_k: int = 10
-    max_workers: int = 2
+    max_workers: int = 1
     post_merge: str = "off"
     auto_relink: bool = True
 

@@ -225,10 +225,11 @@ post_merge = "off"
 # winners gained aliases for. No cost if nothing merged.
 auto_relink = true
 
-# Parallel synthesis concurrency. 2 is safe on Anthropic Tier 1 (the
-# 10k OTPM Haiku output cap). Bump to 4–6 on Tier 2+ accounts. Set
-# to 1 to run strictly sequentially if you see 429 rate-limit errors.
-max_workers = 2
+# Parallel synthesis concurrency. 1 is the safe floor across every
+# provider's entry tier (Anthropic Tier 1 10k OTPM, Gemini free 15
+# RPM, etc.) — you won't hit 429s before you see ingest work. Bump
+# to 2–4 on Anthropic Tier 2+, or 4–6 on Tier 3+ / OpenAI paid tiers.
+max_workers = 1
 
 # Use semantic retrieval to show the LLM the pages most similar to
 # each chunk, so it can prefer UPDATE over CREATE on overlapping
