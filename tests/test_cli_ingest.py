@@ -287,3 +287,140 @@ def test_no_input_mode_errors(project: Path, mock_llm: MagicMock) -> None:
     )
     assert result.exit_code != 0
     assert "Provide at least one source" in result.output
+
+
+# ----------------------------------------------------------------------
+# Soft cap + --yes
+# ----------------------------------------------------------------------
+
+
+def _fake_ingest_that_succeeds(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+    """Replace the processor-level ingest with a stub so large-batch
+    tests don't actually run extraction + synthesis on every file.
+    """
+    from wikiloom.cli import _print_ingest_summary  # noqa: F401
+    import wikiloom.cli as cli_module
+
+    stub = MagicMock()
+
+    class _StubResult:
+        pages_created: list[str] = []
+        pages_updated: list[str] = []
+        notes: list[str] = []
+        total_tokens_in = 0
+        total_tokens_out = 0
+        total_cost_usd = 0.0
+        chunks_total = 0
+        chunks_processed = 0
+        chunks_failed = 0
+
+    def _fake(source, **kwargs):
+        stub(source=source, **kwargs)
+        return _StubResult()
+
+    monkeypatch.setattr(
+        "wikiloom.ingest.processor.ingest", _fake
+    )
+    monkeypatch.setattr(cli_module, "_require_clean_tree", lambda *a, **k: None)
+    monkeypatch.setattr(cli_module, "_warn_if_dirty", lambda *a, **k: None)
+    monkeypatch.setattr(
+        cli_module, "_post_flight_budget_warning", lambda *a, **k: None
+    )
+    return stub
+
+
+def _make_fake_files(project: Path, count: int) -> Path:
+    """Write `count` small markdown files under project.parent and return
+    a paths.txt listing them, one per line. Files exist (so pre-flight
+    accepts them) but an ingest stub takes over so no real LLM runs.
+    """
+    list_path = project.parent / "paths.txt"
+    lines = []
+    for i in range(count):
+        f = project.parent / f"fake-{i}.md"
+        f.write_text(
+            "# a\n\nA long-enough body to clear the empty-extraction guard.\n",
+            encoding="utf-8",
+        )
+        lines.append(str(f))
+    list_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return list_path
+
+
+def test_small_batch_does_not_prompt(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 3-file batch stays below the soft threshold — no prompt."""
+    _fake_ingest_that_succeeds(monkeypatch)
+    list_path = _make_fake_files(project, 3)
+
+    result = CliRunner().invoke(
+        main,
+        ["ingest", "--batch-file", str(list_path), "--project", str(project)],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "rough estimate" not in result.output
+
+
+def test_large_batch_prompts_and_aborts_on_no(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Above the threshold, answering 'n' aborts before any ingest runs."""
+    stub = _fake_ingest_that_succeeds(monkeypatch)
+    list_path = _make_fake_files(project, 25)
+
+    result = CliRunner().invoke(
+        main,
+        ["ingest", "--batch-file", str(list_path), "--project", str(project)],
+        input="n\n",
+    )
+
+    assert result.exit_code != 0
+    assert "rough estimate" in result.output
+    # Processor never called — we aborted at the prompt.
+    assert stub.call_count == 0
+
+
+def test_large_batch_proceeds_on_yes(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Above the threshold, answering 'y' proceeds with all files."""
+    stub = _fake_ingest_that_succeeds(monkeypatch)
+    list_path = _make_fake_files(project, 25)
+
+    result = CliRunner().invoke(
+        main,
+        ["ingest", "--batch-file", str(list_path), "--project", str(project)],
+        input="y\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "rough estimate" in result.output
+    # All 25 files flowed through to the processor stub.
+    assert stub.call_count == 25
+
+
+def test_yes_flag_skips_prompt(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--yes bypasses the confirmation entirely for non-interactive runs."""
+    stub = _fake_ingest_that_succeeds(monkeypatch)
+    list_path = _make_fake_files(project, 25)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "ingest",
+            "--batch-file",
+            str(list_path),
+            "--yes",
+            "--project",
+            str(project),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    # Prompt text never printed.
+    assert "rough estimate" not in result.output
+    assert stub.call_count == 25

@@ -663,6 +663,16 @@ def _commit_merge_log_tail(project: Path, subject: str) -> None:
     default=False,
     help="Disable per-chunk semantic retrieval of existing pages for this run.",
 )
+@click.option(
+    "--yes",
+    "-y",
+    "assume_yes",
+    is_flag=True,
+    default=False,
+    help="Skip the confirmation prompt for large batches (>20 files). "
+         "Required in non-interactive contexts (scripts, backgrounded "
+         "runs, stdin redirection).",
+)
 def ingest(
     sources: tuple[str, ...],
     batch_file: str | None,
@@ -670,6 +680,7 @@ def ingest(
     project: Path | None,
     force: bool,
     no_page_context: bool,
+    assume_yes: bool,
 ) -> None:
     """Ingest one or more source files or URLs into the wiki.
 
@@ -719,6 +730,8 @@ def ingest(
         sources = tuple(_read_batch_file(batch_file))
     elif batch_dir is not None:
         sources = tuple(_read_batch_dir(batch_dir))
+
+    _confirm_large_batch(len(sources), assume_yes=assume_yes)
 
     if project is None:
         project = _find_project_root(Path.cwd())
@@ -827,6 +840,38 @@ def ingest(
     if multi:
         _print_grand_summary(outcomes, elapsed=time.monotonic() - batch_start)
     _post_flight_budget_warning(project)
+
+
+# Soft cap for the confirmation prompt. Above this count the user
+# is asked to confirm (unless --yes). No hard limit — a real batch
+# of 500 files is fine, we just want a guardrail against shell-glob
+# accidents (`--batch-dir **/*.pdf` expanding to everything).
+_LARGE_BATCH_THRESHOLD = 20
+# Rough per-file wall-clock estimate for the prompt. Very tier- and
+# size-dependent; just a ballpark so users can decide "sure" vs. "no
+# actually that's not what I meant."
+_EST_MINUTES_PER_FILE = 5
+
+
+def _confirm_large_batch(count: int, *, assume_yes: bool) -> None:
+    """Prompt before running batches larger than the soft threshold.
+
+    Non-interactive callers (scripts, backgrounded runs, stdin
+    redirection) must pass --yes — click.confirm otherwise aborts
+    when stdin can't be read.
+    """
+    if count <= _LARGE_BATCH_THRESHOLD or assume_yes:
+        return
+    est_minutes = count * _EST_MINUTES_PER_FILE
+    if est_minutes >= 60:
+        wall = f"~{est_minutes // 60}h {est_minutes % 60}m"
+    else:
+        wall = f"~{est_minutes}m"
+    click.confirm(
+        f"Ingest {count} files (rough estimate: {wall} wall-clock)?",
+        default=False,
+        abort=True,
+    )
 
 
 def _read_batch_file(path_arg: str) -> list[str]:
