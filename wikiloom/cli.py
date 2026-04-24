@@ -2509,6 +2509,14 @@ def dormant(
     A page is a candidate when its modified date exceeds the window
     configured in [dormant] for its type. Marking is a user decision.
 
+    Marking a page dormant:
+
+    \b
+      - excludes it as an auto-linker target (no new inbound links)
+      - drops its title/aliases from the entity ruler
+      - keeps it fully readable, queryable, and backlinked
+      - auto-flips back to active on any re-ingest or human edit
+
     Modes:
 
     \b
@@ -2566,14 +2574,21 @@ def _dormant_show_windows(project: Path) -> None:
 
     loaded = _load_config(project)
     cfg = loaded.dormant if loaded is not None else DormantConfig()
-    click.echo("Dormant windows (change in wikiloom.toml [dormant]):")
-    click.echo(f"  entity:    {cfg.entity_window_days} days")
-    click.echo(f"  concept:   {cfg.concept_window_days} days")
-    click.echo(f"  synthesis: {cfg.synthesis_window_days} days")
-    click.echo(f"  default:   {cfg.default_window_days} days")
+    click.echo("")
     click.echo(
-        "\nPer-page overrides via `dormant_window_days` in frontmatter."
+        click.style("Dormant windows", bold=True)
+        + f"  {_dim('(change in wikiloom.toml [dormant])')}"
     )
+    click.echo("")
+    click.echo(f"  {_dim('entity:')}    {cfg.entity_window_days} days")
+    click.echo(f"  {_dim('concept:')}   {cfg.concept_window_days} days")
+    click.echo(f"  {_dim('synthesis:')} {cfg.synthesis_window_days} days")
+    click.echo(f"  {_dim('default:')}   {cfg.default_window_days} days")
+    click.echo("")
+    click.echo(
+        _dim("Per-page overrides via `dormant_window_days` in frontmatter.")
+    )
+    click.echo("")
 
 
 def _dormant_list_candidates(project: Path) -> None:
@@ -2585,21 +2600,32 @@ def _dormant_list_candidates(project: Path) -> None:
     candidates = linter.check_dormant()
 
     if not candidates:
+        click.echo("")
         click.echo(
-            "No dormant candidates — all active pages are within their windows.")
+            "No dormant candidates — all active pages are within their windows."
+        )
+        click.echo("")
         return
 
+    click.echo("")
     click.echo(
-        f"Dormant candidates ({len(candidates)}, active pages past window):\n"
+        click.style("Dormant candidates", bold=True)
+        + f"  {_dim('(' + str(len(candidates)) + ', active pages past window)')}"
     )
+    click.echo("")
     for c in sorted(candidates, key=lambda x: -x.age_days):
         click.echo(
-            f"  {c.page_id}  ({c.age_days}d old, window {c.window_days}d)"
+            f"  {click.style(c.page_id, fg='cyan')}  "
+            f"{_dim(f'({c.age_days}d old, window {c.window_days}d)')}"
         )
+    click.echo("")
     click.echo(
-        "\nMark a candidate with `wikiloom dormant <page>`, "
-        "or walk through interactively with `wikiloom dormant --review`."
+        _dim(
+            "Tip: `wikiloom dormant <page>` to mark one, "
+            "or `wikiloom dormant --review` to walk through interactively."
+        )
     )
+    click.echo("")
 
 
 def _dormant_list_marked(project: Path) -> None:
@@ -2612,16 +2638,27 @@ def _dormant_list_marked(project: Path) -> None:
         if entry.status == "dormant"
     ]
     if not marked:
+        click.echo("")
         click.echo("No pages currently marked dormant.")
+        click.echo("")
         return
 
-    click.echo(f"Marked dormant ({len(marked)}):\n")
+    click.echo("")
+    click.echo(
+        click.style("Marked dormant", bold=True)
+        + f"  {_dim('(' + str(len(marked)) + ')')}"
+    )
+    click.echo("")
     for pid, entry in sorted(marked):
         modified = (entry.modified or "")[:10]
-        click.echo(f"  {pid}  ({entry.title}) — last modified {modified}")
-    click.echo(
-        "\nUnmark with `wikiloom dormant <page> --unmark`."
-    )
+        click.echo(
+            f"  {click.style(pid, fg='cyan')}  "
+            f"{_dim('(' + entry.title + ')')}"
+        )
+        click.echo(f"      {_dim('→ last modified ' + modified)}")
+    click.echo("")
+    click.echo(_dim("Tip: `wikiloom dormant <page> --unmark` to flip back to active."))
+    click.echo("")
 
 
 def _dormant_set_status(project: Path, page_id: str, mark: bool) -> None:
@@ -2643,10 +2680,19 @@ def _dormant_set_status(project: Path, page_id: str, mark: bool) -> None:
         if entry is None:
             raise click.ClickException(f"Page not in manifest: {page_id}")
         if mark and entry.status == "dormant":
-            click.echo(f"{page_id} is already dormant.")
+            click.echo("")
+            click.echo(
+                f"  {click.style(page_id, fg='cyan')} is already dormant."
+            )
+            click.echo("")
             return
         if not mark and entry.status != "dormant":
-            click.echo(f"{page_id} is not dormant (status: {entry.status}).")
+            click.echo("")
+            click.echo(
+                f"  {click.style(page_id, fg='cyan')} is not dormant "
+                f"{_dim('(status: ' + entry.status + ')')}."
+            )
+            click.echo("")
             return
 
         text = page_path.read_text(encoding="utf-8")
@@ -2663,11 +2709,16 @@ def _dormant_set_status(project: Path, page_id: str, mark: bool) -> None:
         _sync_cache(project, changed_files=[page_path])
         _auto_commit(project, "dormant", f"{verb} {page_id}")
 
-    click.echo(f"{verb.capitalize()}ed {page_id}.")
+    click.echo("")
+    click.echo(
+        f"{_check()} {verb.capitalize()}ed  {click.style(page_id, fg='cyan')}"
+    )
+    click.echo("")
 
 
 def _dormant_review(project: Path) -> None:
     """Interactive triage of dormant candidates."""
+    from wikiloom.backlinks import BacklinkRegistry
     from wikiloom.config import Config
     from wikiloom.frontmatter import parse_frontmatter, render_frontmatter
     from wikiloom.lint import WikiLinter
@@ -2684,14 +2735,21 @@ def _dormant_review(project: Path) -> None:
 
     import time as _time
 
+    bl = BacklinkRegistry(project / "_registry")
+    graph = bl.graph
+
     total = len(candidates)
     marked = 0
     skipped = 0
     check_mark = _check()
     cross_mark = _cross()
     skip_glyph = _skip_mark()
-    click.echo(f"Reviewing {total} candidate(s).")
-    click.echo("For each: [m]ark dormant / [n]ext (skip) / [q]uit")
+    click.echo("")
+    click.echo(
+        click.style("Reviewing dormant candidates", bold=True)
+        + f"  {_dim('(' + str(total) + ')')}"
+    )
+    click.echo(_dim("For each: [m]ark dormant / [n]ext (skip) / [q]uit"))
     click.echo("")
     start = _time.monotonic()
 
@@ -2701,16 +2759,31 @@ def _dormant_review(project: Path) -> None:
         if entry is None:
             continue
         click.echo(
-            f"  {_dim(f'--- {i}/{total}')}  {candidate.page_id}  "
+            f"  {_dim(f'--- {i}/{total}')}  "
+            f"{click.style(candidate.page_id, fg='cyan')}  "
             f"{_dim(f'({entry.type})')}"
         )
-        click.echo(f"    title:   {entry.title}")
+        click.echo(f"    {_dim('title:')}       {entry.title}")
         click.echo(
-            f"    age:     {candidate.age_days}d "
+            f"    {_dim('age:')}         {candidate.age_days}d "
             f"{_dim(f'(window {candidate.window_days}d)')}"
         )
         if entry.summary:
-            click.echo(f"    summary: {entry.summary[:100]}")
+            click.echo(f"    {_dim('summary:')}     {entry.summary[:100]}")
+
+        in_graph = candidate.page_id in graph
+        inbound_count = graph.in_degree(candidate.page_id) if in_graph else 0
+        click.echo(f"    {_dim('inbound:')}     {inbound_count}")
+        if inbound_count > 0:
+            sources = sorted(graph.predecessors(candidate.page_id))
+            titles = [
+                (registry.get_page(src).title if registry.get_page(src) else src)
+                for src in sources[:3]
+            ]
+            suffix = f", and {inbound_count - 3} more" if inbound_count > 3 else ""
+            click.echo(
+                f"    {_dim('linked from:')} {', '.join(titles)}{suffix}"
+            )
 
         choice = click.prompt(
             "  Action",
@@ -3342,6 +3415,10 @@ def deprecate(
 
     To undo: `git revert` the deprecate commit.
     To remove permanently: `wikiloom purge <page_id>` after deprecation.
+
+    Inbound [[wikilinks]] to this page stay in source files but become
+    broken refs (lint reason: deprecated). Run \x1b[36mwikiloom lint --fix\x1b[0m
+    to strip the wikilink wrapper — link text is preserved.
 
     \b
     Examples:

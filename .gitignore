@@ -22,3 +22,6 @@ htmlcov/
 
 # Local-only notes (audit logs, scratchpads)
 *.local.md
+
+# Claude Code agent state (scheduled tasks, local settings)
+.claude/
