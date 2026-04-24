@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -626,7 +627,7 @@ def _commit_merge_log_tail(project: Path, subject: str) -> None:
 
 
 @main.command()
-@click.argument("source")
+@click.argument("sources", nargs=-1, required=True)
 @click.option(
     "--project",
     type=click.Path(path_type=Path),
@@ -646,19 +647,27 @@ def _commit_merge_log_tail(project: Path, subject: str) -> None:
     help="Disable per-chunk semantic retrieval of existing pages for this run.",
 )
 def ingest(
-    source: str, project: Path | None, force: bool, no_page_context: bool
+    sources: tuple[str, ...],
+    project: Path | None,
+    force: bool,
+    no_page_context: bool,
 ) -> None:
-    """Ingest a source file or URL into the wiki.
+    """Ingest one or more source files or URLs into the wiki.
 
     Extracts content, copies local files to raw/, rebuilds backlinks and
     indexes, and commits the result. Re-ingesting an identical local
     file is a cheap no-op (catalog dedup) unless --force is passed.
+
+    When more than one source is passed, each runs sequentially and a
+    grand summary at the end classifies every file as complete, partial
+    (some chunks failed), or failed.
 
     \b
     Examples:
       \x1b[36mwikiloom ingest ~/docs/paper.pdf\x1b[0m
       \x1b[36mwikiloom ingest https://en.wikipedia.org/wiki/Chase_Bank\x1b[0m
       \x1b[36mwikiloom ingest ~/docs/paper.pdf --force\x1b[0m
+      \x1b[36mwikiloom ingest a.pdf b.pdf c.pdf\x1b[0m
     """
     from wikiloom.config import ConfigError
     from wikiloom.ingest.errors import IngestError
@@ -672,67 +681,124 @@ def ingest(
                 "Run inside a project directory or pass --project."
             )
 
-    # Pre-flight: for local sources, fail fast with a friendly message
-    # when the path is wrong. URLs are resolved at fetch time by the
-    # extractor; we don't try to validate them here.
-    is_url = source.startswith(("http://", "https://"))
-    if not is_url:
+    # Pre-flight path validation. For a single source, a bad path is a
+    # hard error (we abort before touching the repo). For multi-file
+    # batches, bucket bad paths as failures and keep processing the
+    # good ones — losing the whole batch because of one typo is worse
+    # than continuing.
+    validated: list[tuple[str, Exception | None]] = []
+    for source in sources:
+        is_url = source.startswith(("http://", "https://"))
+        if is_url:
+            validated.append((source, None))
+            continue
         src_path = Path(source).expanduser()
         if not src_path.exists():
-            raise click.ClickException(
+            err = click.ClickException(
                 f"No such file: {source}\n"
                 f"Check the path and try again. Tip: drag the file into "
                 f"your terminal to get the exact path."
             )
+            if len(sources) == 1:
+                raise err
+            validated.append((source, err))
+            continue
         if src_path.is_dir():
-            raise click.ClickException(
+            err = click.ClickException(
                 f"Path is a directory, not a file: {source}\n"
-                f"Ingest takes one file at a time. To process a folder, "
-                f"loop over its files in your shell."
+                f"Ingest takes files. For a folder of files, use "
+                f"--batch-dir (coming soon) or loop in your shell."
             )
-        source = str(src_path)
+            if len(sources) == 1:
+                raise err
+            validated.append((source, err))
+            continue
+        validated.append((str(src_path), None))
 
     _require_clean_tree(project, "ingest")
     _warn_if_dirty(project)
     # CLI flag is a one-way opt-out. None leaves the config value in
     # effect; False forces the behavior off for this run only.
     use_page_context_override = False if no_page_context else None
-    try:
-        result = run_ingest(
-            source,
-            project_root=project,
-            force=force,
-            use_page_context=use_page_context_override,
-        )
-    except IngestError as exc:
-        raise click.ClickException(str(exc)) from exc
-    except ConfigError as exc:
-        raise click.ClickException(str(exc)) from exc
-    except FileNotFoundError as exc:
-        # Backstop — the pre-flight check above covers the common case,
-        # but an extractor could still hit a missing path (e.g. for a
-        # nested resource). Keep the error friendly rather than leaking
-        # the extractor's backend exception.
-        raise click.ClickException(
-            f"File not found during ingest: {exc}\nCheck the path and try again."
-        ) from exc
-    except PermissionError as exc:
-        raise click.ClickException(
-            f"Permission denied reading source: {exc}\n"
-            f"Check file permissions (chmod / sudo)."
-        ) from exc
 
-    # Summary
+    multi = len(validated) > 1
+    batch_start = time.monotonic() if multi else None
+    # Each entry is (source, result_or_exception). Carried through the
+    # loop so the grand summary can classify every file at the end.
+    outcomes: list[tuple[str, Any]] = []
+    for idx, (source, preflight_err) in enumerate(validated, start=1):
+        if multi:
+            click.echo("")
+            click.echo(
+                click.style(f"[{idx}/{len(validated)}] ", fg="cyan")
+                + source
+            )
+        if preflight_err is not None:
+            # Pre-flight failure (bad path, etc.) already echoed its own
+            # message only if the user sees a ClickException — for multi
+            # we swallow the raise and print a one-line notice instead.
+            click.echo(f"  {_cross()} {preflight_err.message}")
+            outcomes.append((source, preflight_err))
+            continue
+        try:
+            result = run_ingest(
+                source,
+                project_root=project,
+                force=force,
+                use_page_context=use_page_context_override,
+            )
+        except IngestError as exc:
+            if not multi:
+                raise click.ClickException(str(exc)) from exc
+            click.echo(f"  {_cross()} {exc}")
+            outcomes.append((source, exc))
+            continue
+        except ConfigError as exc:
+            # Config errors are global; no point continuing the batch.
+            raise click.ClickException(str(exc)) from exc
+        except FileNotFoundError as exc:
+            msg = f"File not found during ingest: {exc}\nCheck the path and try again."
+            if not multi:
+                raise click.ClickException(msg) from exc
+            click.echo(f"  {_cross()} {msg}")
+            outcomes.append((source, exc))
+            continue
+        except PermissionError as exc:
+            msg = (
+                f"Permission denied reading source: {exc}\n"
+                f"Check file permissions (chmod / sudo)."
+            )
+            if not multi:
+                raise click.ClickException(msg) from exc
+            click.echo(f"  {_cross()} {msg}")
+            outcomes.append((source, exc))
+            continue
+
+        _print_ingest_summary(result)
+        outcomes.append((source, result))
+
+    if multi:
+        _print_grand_summary(outcomes, elapsed=time.monotonic() - batch_start)
+    _post_flight_budget_warning(project)
+
+
+def _print_ingest_summary(result: Any) -> None:
+    """One-file summary: the "Done." line plus any notes.
+
+    Printed after each file in a multi-file batch, and as the only
+    summary for a single-file ingest. The grand summary (multi-file
+    only) is separate.
+    """
+    from wikiloom.cli_output import (
+        done_summary,
+        format_tokens as _fmt_tok,
+    )
+
     created = len(result.pages_created)
     updated = len(result.pages_updated)
     total_tok = result.total_tokens_in + result.total_tokens_out
     click.echo("")
     if created or updated:
-        from wikiloom.cli_output import (
-            done_summary,
-            format_tokens as _fmt_tok,
-        )
-
         click.echo(
             done_summary(
                 [
@@ -751,7 +817,71 @@ def ingest(
         click.echo(click.style("Notes", bold=True))
         for note in result.notes:
             click.echo(f"  {_dim('•')} {note}")
-    _post_flight_budget_warning(project)
+
+
+def _print_grand_summary(
+    outcomes: list[tuple[str, Any]],
+    *,
+    elapsed: float,
+) -> None:
+    """Three-bucket summary for multi-file ingests.
+
+    Classification per file:
+      - failed: raised an exception (hard error, pre-flight failure,
+        extractor error, etc.). No IngestResult available.
+      - partial: IngestResult with ``chunks_failed > 0``. Synthesis
+        finished and catalog was written, so re-running needs --force.
+      - complete: everything else, including dedup-skip no-ops
+        (``chunks_total == 0``).
+    """
+    from wikiloom.cli_output import done_summary
+
+    complete: list[str] = []
+    partial: list[tuple[str, int, int]] = []  # (source, processed, total)
+    failed: list[tuple[str, str]] = []  # (source, reason)
+
+    for source, outcome in outcomes:
+        if isinstance(outcome, Exception):
+            reason = getattr(outcome, "message", None) or str(outcome)
+            failed.append((source, reason.splitlines()[0]))
+        elif outcome.chunks_failed > 0:
+            partial.append(
+                (source, outcome.chunks_processed, outcome.chunks_total)
+            )
+        else:
+            complete.append(source)
+
+    click.echo("")
+    click.echo(
+        done_summary(
+            [
+                f"{len(complete)} complete",
+                f"{len(partial)} partial",
+                f"{len(failed)} failed",
+            ],
+            elapsed=elapsed,
+        )
+    )
+
+    if partial:
+        click.echo("")
+        click.echo(click.style("Partial:", bold=True))
+        for source, processed, total in partial:
+            click.echo(
+                f"  {click.style(source, fg='cyan')}  "
+                f"{_dim(f'({processed}/{total} chunks)')}  "
+                f"{_dim('→')}  "
+                f"{_dim(f'wikiloom ingest {source} --force')}"
+            )
+
+    if failed:
+        click.echo("")
+        click.echo(click.style("Failed:", bold=True))
+        for source, reason in failed:
+            click.echo(
+                f"  {click.style(source, fg='cyan')}  {_dim('(' + reason + ')')}"
+            )
+    click.echo("")
     click.echo("")
 
 
