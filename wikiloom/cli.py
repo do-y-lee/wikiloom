@@ -1242,10 +1242,12 @@ def lint(fix: bool, project: Path | None) -> None:
                 f"{_dim('  ' + str(fixes.total_fixed) + ' page(s) fixed')}"
             )
 
-            click.echo(f"{_dim('Syncing cache...')}")
-            _sync_cache(project)
-
+            # Cache sync only matters when files actually changed. A
+            # zero-fix run is read-only, so skipping the sync trims a
+            # significant chunk off lint --fix time on bigger wikis.
             if fixes.total_fixed:
+                click.echo(f"{_dim('Syncing cache...')}")
+                _sync_cache(project)
                 parts: list[str] = []
                 if fixes.broken_links_fixed:
                     parts.append(f"{fixes.broken_links_fixed} broken link(s)")

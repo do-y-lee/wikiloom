@@ -195,9 +195,14 @@ class WikiLinter:
     # ------------------------------------------------------------------
 
     def run_all(self) -> LintReport:
-        """Run every health check and return an aggregate report."""
-        duplicates = self.check_duplicates()
-        auto_safe = self._count_auto_mergeable(duplicates)
+        """Run every health check and return an aggregate report.
+
+        Duplicate detection runs find_duplicates once and folds the
+        per-pair work (DuplicateSet shape + suggest_winner classification)
+        into a single pass; ``check_duplicates`` retains its standalone
+        API for callers that only want the duplicates list.
+        """
+        duplicates, auto_safe = self._duplicates_with_auto_safe()
         return LintReport(
             broken_links=self.check_broken_links(),
             orphans=self.check_orphans(),
@@ -211,18 +216,16 @@ class WikiLinter:
             promoted_from_update=self.check_promoted_from_update(),
         )
 
-    def _count_auto_mergeable(
-        self, duplicates: list[DuplicateSet]
-    ) -> int:
-        """Count pairs that ``wikiloom duplicates --auto-merge`` would act on.
+    def _duplicates_with_auto_safe(
+        self,
+    ) -> tuple[list[DuplicateSet], int]:
+        """Run find_duplicates once, classify pairs, return both outputs.
 
-        Re-runs ``find_duplicates`` + ``suggest_winner`` to avoid
-        changing ``DuplicateSet``'s shape. Called once per lint run
-        over a small set (typically < 200 pairs), so the duplicate
-        work is fine at this scale.
+        Replaces the old two-pass approach where ``check_duplicates``
+        and ``_count_auto_mergeable`` both invoked ``find_duplicates``.
+        Embedding-based pairing is the dominant cost in lint, so
+        running it twice doubled lint time on larger wikis.
         """
-        if not duplicates:
-            return 0
         from wikiloom.duplicates import find_duplicates, suggest_winner
 
         try:
@@ -233,12 +236,22 @@ class WikiLinter:
                 same_type_only=True,
             )
         except Exception:
-            return 0
+            return [], 0
+
+        out: list[DuplicateSet] = []
         safe = 0
         for p in pairs:
+            ordered = tuple(sorted((p.page_a, p.page_b)))
+            out.append(
+                DuplicateSet(
+                    pages=ordered,
+                    slug_score=int(p.slug_score),
+                    embedding_score=float(p.embedding_score),
+                )
+            )
             if suggest_winner(p).is_safe_to_auto:
                 safe += 1
-        return safe
+        return out, safe
 
     def fix_all(self, report: LintReport) -> FixReport:
         """Apply mechanical fixes from a report.
