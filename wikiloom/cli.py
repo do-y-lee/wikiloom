@@ -2270,6 +2270,27 @@ def cost(project: Path | None) -> None:
         bucket["cost"] += cost_usd
         bucket["count"] += 1
 
+    # Filter to event types that actually incurred tokens or cost.
+    # Mechanical events (merge, lint, purge, reindex, etc.) emit log
+    # entries but never call an LLM, so a $0 / 0-token row is just
+    # noise on a command whose purpose is "where am I spending."
+    # Mechanical event counts stay visible in `wikiloom log`.
+    paid = {
+        etype: b
+        for etype, b in by_type.items()
+        if int(b["tokens"]) > 0 or b["cost"] > 0
+    }
+    if not paid:
+        click.echo("No LLM events recorded yet.")
+        click.echo(
+            _dim(
+                "  Run `wikiloom log` to see all events; only ingest and "
+                "query incur tokens or cost."
+            )
+        )
+        click.echo("")
+        return
+
     total_tokens = 0
     total_cost = 0.0
     total_events = 0
@@ -2279,8 +2300,8 @@ def cost(project: Path | None) -> None:
     click.echo("")
     header = f"  {'Event':<16} {'Count':>8} {'Tokens':>12} {'Cost':>10}"
     click.echo(_dim(header))
-    for etype in sorted(by_type):
-        b = by_type[etype]
+    for etype in sorted(paid):
+        b = paid[etype]
         t = int(b["tokens"])
         c = b["cost"]
         n = int(b["count"])
