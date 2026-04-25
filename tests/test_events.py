@@ -14,13 +14,18 @@ from wikiloom.events import EventType, WikiEvent, append_event, create_event
 # ----------------------------------------------------------------------
 
 
-def test_event_type_has_all_eight_kinds() -> None:
+def test_event_type_covers_every_logged_kind() -> None:
     expected = {
         "ingest",
         "query",
         "lint",
         "merge",
         "deprecate",
+        "purge",
+        "reindex",
+        "relink",
+        "related",
+        "rebuild-cache",
         "human-edit",
         "schema-migration",
         "stub-created",

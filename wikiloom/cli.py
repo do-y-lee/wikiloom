@@ -1208,9 +1208,23 @@ def lint(fix: bool, project: Path | None) -> None:
         _require_clean_tree(project, "lint --fix")
         start = _time.monotonic()
         with FileLock(project):
+            click.echo("")
+            click.echo(f"{_dim('Scanning project for issues...')}")
             report = linter.run_all()
+            issue_count = report.total_issues
+            click.echo(
+                f"{_dim('  found ' + str(issue_count) + ' issue(s)')}"
+            )
+
+            click.echo(f"{_dim('Applying fixes...')}")
             fixes = linter.fix_all(report)
+            click.echo(
+                f"{_dim('  ' + str(fixes.total_fixed) + ' page(s) fixed')}"
+            )
+
+            click.echo(f"{_dim('Syncing cache...')}")
             _sync_cache(project)
+
             if fixes.total_fixed:
                 parts: list[str] = []
                 if fixes.broken_links_fixed:
@@ -1218,11 +1232,27 @@ def lint(fix: bool, project: Path | None) -> None:
                 if fixes.frontmatter_repaired:
                     parts.append(f"{fixes.frontmatter_repaired} frontmatter")
                 detail = f" [{', '.join(parts)}]" if parts else ""
-                _auto_commit(
+                click.echo(f"{_dim('Committing...')}")
+                commit_hash = _auto_commit(
                     project,
                     "lint",
                     f"repaired {fixes.total_fixed} page(s){detail}",
                 )
+                # Log a LINT event so `wikiloom log` and `wikiloom cost`
+                # both surface the fix run. lint --fix is mechanical so
+                # tokens/cost stay at zero.
+                from wikiloom.events import (
+                    EventType, append_event, create_event,
+                )
+
+                log_path = project / "wiki" / "log.md"
+                if log_path.parent.exists():
+                    event = create_event(
+                        EventType.LINT,
+                        description=f"repaired {fixes.total_fixed} page(s){detail}",
+                        git_commit_hash=commit_hash,
+                    )
+                    append_event(log_path, event)
         _print_report(report)
         summary_parts = [f"{fixes.total_fixed} fixed"]
         if fixes.broken_links_fixed:
@@ -1239,6 +1269,8 @@ def lint(fix: bool, project: Path | None) -> None:
         click.echo("")
         return
 
+    click.echo("")
+    click.echo(f"{_dim('Scanning project for issues...')}")
     report = linter.run_all()
     _print_report(report)
     if not report.is_healthy:
@@ -1348,11 +1380,23 @@ def reindex(project: Path | None) -> None:
     with FileLock(project):
         written = IndexUpdater(project / "wiki").rebuild_all()
         if written:
-            _auto_commit(
+            commit_hash = _auto_commit(
                 project,
                 "reindex",
                 f"rebuilt {len(written)} index file(s)",
             )
+            from wikiloom.events import (
+                EventType, append_event, create_event,
+            )
+
+            log_path = project / "wiki" / "log.md"
+            if log_path.parent.exists():
+                event = create_event(
+                    EventType.REINDEX,
+                    description=f"rebuilt {len(written)} index file(s)",
+                    git_commit_hash=commit_hash,
+                )
+                append_event(log_path, event)
     click.echo("")
     click.echo(
         f"{_check()} Rebuilt {len(written)} index file(s)."
@@ -1451,11 +1495,23 @@ def relink(project: Path | None) -> None:
 
         _sync_cache(project)
         if linked:
-            _auto_commit(
+            commit_hash = _auto_commit(
                 project,
                 "relink",
                 f"updated wikilinks across {len(linked)} page(s)",
             )
+            from wikiloom.events import (
+                EventType, append_event, create_event,
+            )
+
+            log_path = project / "wiki" / "log.md"
+            if log_path.parent.exists():
+                event = create_event(
+                    EventType.RELINK,
+                    description=f"updated wikilinks across {len(linked)} page(s)",
+                    git_commit_hash=commit_hash,
+                )
+                append_event(log_path, event)
 
     click.echo("")
     click.echo(
@@ -1675,6 +1731,26 @@ def query(
         json_mod.dumps(result_data, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
+
+    # Append a QUERY event to wiki/log.md so `wikiloom log` and
+    # `wikiloom cost` both pick it up. Truncate the question for the
+    # description so multi-line / very long prompts stay tidy in the
+    # log. Mirrors the ingest pattern: written without committing —
+    # the next ingest/lint/save commit picks up the log.md change.
+    from wikiloom.events import EventType, append_event, create_event
+
+    log_path = project / "wiki" / "log.md"
+    if log_path.parent.exists():
+        desc = " ".join(question.split())  # collapse whitespace
+        if len(desc) > 120:
+            desc = desc[:117] + "..."
+        event = create_event(
+            EventType.QUERY,
+            description=desc,
+            tokens_used=answer.metrics.tokens_in + answer.metrics.tokens_out,
+            cost_usd=answer.metrics.cost_usd,
+        )
+        append_event(log_path, event)
 
     # Print the answer with a bold section header so it visually
     # separates from the question block above.
@@ -2839,7 +2915,7 @@ def related(page_id: str, limit: int, save: bool, link: bool, project: Path | No
 
         write_page(page_path, fm, body)
         _sync_cache(project, changed_files=[page_path])
-        _auto_commit(
+        commit_hash = _auto_commit(
             project, "related", f"updated {page_id} with related pages"
         )
 
@@ -2849,6 +2925,23 @@ def related(page_id: str, limit: int, save: bool, link: bool, project: Path | No
                 f"{len(related_pages)} related page(s) to frontmatter")
         if link:
             actions.append(f"{len(new_links)} wikilink(s) to page body")
+
+        # Log a RELATED event so --save / --link / --save --link runs
+        # land in `wikiloom log` and the event-type breakdown. The
+        # description carries the page id and what changed; mechanical
+        # so tokens/cost stay zero.
+        from wikiloom.events import EventType, append_event, create_event
+
+        log_path = project / "wiki" / "log.md"
+        if log_path.parent.exists():
+            event = create_event(
+                EventType.RELATED,
+                description=f"{page_id}: {', '.join(actions)}",
+                pages_updated=[page_id],
+                git_commit_hash=commit_hash,
+            )
+            append_event(log_path, event)
+
         click.echo("")
         click.echo(f"{_check()} Saved: {', '.join(actions)}.")
         click.echo("")
@@ -4162,7 +4255,19 @@ def purge(page_id: str, yes: bool, project: Path | None) -> None:
         _sync_cache(
             project, changed_files=[archive_file, *index_paths]
         )
-        _auto_commit(project, "deprecate", f"purge {page_id}")
+        commit_hash = _auto_commit(project, "deprecate", f"purge {page_id}")
+        # Log a PURGE event so the audit trail records irreversible
+        # removals. Mechanical so tokens/cost stay at zero.
+        from wikiloom.events import EventType, append_event, create_event
+
+        log_path = project / "wiki" / "log.md"
+        if log_path.parent.exists():
+            event = create_event(
+                EventType.PURGE,
+                description=page_id,
+                git_commit_hash=commit_hash,
+            )
+            append_event(log_path, event)
 
     click.echo("")
     click.echo(
@@ -4843,6 +4948,22 @@ def rebuild_cache(project: Path | None) -> None:
             project, embedder=embedder, progress=progress_fn
         )
     stats = cache.get_stats()
+
+    # Log a REBUILD_CACHE event for the audit trail. The cache itself
+    # is gitignored so there is no commit to attach a hash to; the
+    # log.md change rides on the next ingest/lint/save commit.
+    from wikiloom.events import EventType, append_event, create_event
+
+    log_path = project / "wiki" / "log.md"
+    if log_path.parent.exists():
+        event = create_event(
+            EventType.REBUILD_CACHE,
+            description=(
+                f"{count} pages, {stats['aliases']} aliases, "
+                f"{stats['backlinks']} backlinks"
+            ),
+        )
+        append_event(log_path, event)
 
     click.echo("")
     click.echo(
