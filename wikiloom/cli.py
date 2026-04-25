@@ -202,8 +202,25 @@ class _CategorizedGroup(click.Group):
         return "\n" + super().get_help(ctx) + "\n"
 
 
+def _wikiloom_version() -> str:
+    """Read the installed package version so --version stays in sync
+    with pyproject.toml without a hardcoded string. Falls back to a
+    sentinel when running from source without an editable install.
+    """
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        return version("wikiloom")
+    except PackageNotFoundError:
+        return "0.0.0+unknown"
+
+
 @click.group(cls=_CategorizedGroup)
-@click.version_option(version="0.1.0", prog_name="wikiloom")
+@click.version_option(
+    version=_wikiloom_version(),
+    prog_name="wikiloom",
+    message="%(prog)s %(version)s",
+)
 def main() -> None:
     """WikiLoom — LLM-maintained knowledge bases with deterministic linking."""
     # Load `.env` from the project root (walks up from cwd until it
