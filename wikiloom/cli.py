@@ -37,6 +37,8 @@ _COMMAND_CATEGORIES: list[tuple[str, list[str]]] = [
             "links",
             "show",
             "orphans",
+            "stubs",
+            "contradictions",
             "related",
             "query",
             "source",
@@ -1211,9 +1213,27 @@ def lint(fix: bool, project: Path | None) -> None:
             click.echo("")
             click.echo(f"{_dim('Scanning project for issues...')}")
             report = linter.run_all()
-            issue_count = report.total_issues
+            # Split issues by what --fix can mechanically repair vs.
+            # what only a human can resolve. Auto-fixable: broken
+            # wikilinks (strip wrapper), frontmatter (repair), index
+            # drift (rebuild). Needs review: orphans, duplicates,
+            # contradictions, stubs — all judgment calls.
+            auto_fixable = (
+                len(report.broken_links)
+                + len(report.frontmatter_issues)
+                + len(report.index_drift)
+            )
+            needs_review = report.total_issues - auto_fixable
             click.echo(
-                f"{_dim('  found ' + str(issue_count) + ' issue(s)')}"
+                f"{_dim('  found ' + str(report.total_issues) + ' issue(s)')}"
+            )
+            click.echo(
+                f"{_dim('    auto-fixable: ' + str(auto_fixable))}"
+                f"{_dim('  (broken links, frontmatter, index drift)')}"
+            )
+            click.echo(
+                f"{_dim('    needs review: ' + str(needs_review))}"
+                f"{_dim('  (orphans, duplicates, contradictions, stubs)')}"
             )
 
             click.echo(f"{_dim('Applying fixes...')}")
@@ -1263,6 +1283,8 @@ def lint(fix: bool, project: Path | None) -> None:
             summary_parts.append(
                 f"{fixes.skipped_human_edited} human-edited skipped"
             )
+        if needs_review:
+            summary_parts.append(f"{needs_review} need review")
         click.echo(
             done_summary(summary_parts, elapsed=_time.monotonic() - start)
         )
@@ -1967,10 +1989,12 @@ def status(project: Path | None) -> None:
 
     by_status = stats.get("by_status") or {}
     active_n = by_status.get("active", 0)
+    stub_n = by_status.get("stub", 0)
     dormant_n = by_status.get("dormant", 0)
     deprecated_n = by_status.get("deprecated", 0)
     click.echo(
         f"  Status: {active_n} active  {sep}  "
+        f"{stub_n} stub  {sep}  "
         f"{dormant_n} dormant  {sep}  {deprecated_n} deprecated"
     )
     click.echo("")
@@ -3043,6 +3067,219 @@ def orphans(limit: int | None, project: Path | None) -> None:
         _dim(
             f"Tip: `wikiloom related {example_pid}` to find connections, "
             f"or `wikiloom relink` to re-run the linker."
+        )
+    )
+    click.echo("")
+
+
+@main.command("stubs")
+@click.option(
+    "-n",
+    "--limit",
+    type=int,
+    default=None,
+    help="Cap number of stubs printed (default: all).",
+)
+@click.option(
+    "--project",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Project root.",
+)
+def stubs(limit: int | None, project: Path | None) -> None:
+    """List pages with `status: stub` — placeholders waiting on content.
+
+    Stubs are auto-created during ingest when the linker recognizes an
+    entity or concept name that has no page yet. They keep wikilinks
+    resolving and accumulate inbound backlinks across ingests, but
+    have no body until a human fills them in, deprecates them, or
+    merges them into an existing page.
+
+    Sorted by inbound link count descending so the most-referenced
+    stubs (the ones most likely worth filling in) surface first.
+
+    Pipeable: when stdout isn't a terminal, emits one tab-separated
+    line per stub (`page_id\ttype\tinbound\ttitle`) with no headers
+    or tips. Works cleanly with `| grep`, `| head`, `| wc`, and
+    `awk -F'\t'`.
+    """
+    from wikiloom.backlinks import BacklinkRegistry
+    from wikiloom.registry import Registry
+
+    if project is None:
+        project = _find_project_root(Path.cwd())
+        if project is None:
+            raise click.ClickException(
+                "Could not find a WikiLoom project (no wikiloom.toml found)."
+            )
+
+    _warn_if_dirty(project)
+
+    registry = Registry(project / "_registry")
+    bl = BacklinkRegistry(project / "_registry")
+    graph = bl.graph
+
+    def _inbound(page_id: str) -> int:
+        return graph.in_degree(page_id) if page_id in graph else 0
+
+    stub_list = [
+        (pid, entry.title, entry.type, _inbound(pid))
+        for pid, entry in registry.pages.items()
+        if entry.status == "stub"
+    ]
+    # High-inbound stubs first; alphabetical within each tier so the
+    # output is stable across runs.
+    stub_list.sort(key=lambda row: (-row[3], row[0]))
+    total = len(stub_list)
+    shown = stub_list[:limit] if limit is not None else stub_list
+
+    if _is_piped():
+        for pid, title, ptype, inbound in shown:
+            click.echo(f"{pid}\t{ptype}\t{inbound}\t{title}")
+        return
+
+    if not stub_list:
+        click.echo("No stub pages found.")
+        click.echo("")
+        return
+
+    click.echo("")
+    click.echo(
+        click.style("Stub pages", bold=True)
+        + f"  {_dim('(' + str(total) + ')')}"
+    )
+    click.echo("")
+    for pid, title, ptype, inbound in shown:
+        click.echo(
+            f"  {_dim('[' + ptype + ']')} "
+            f"{click.style(title, fg='cyan')}  "
+            f"{_dim(str(inbound) + ' inbound')}"
+        )
+        click.echo(f"      {_dim('→ ' + pid + '.md')}")
+
+    if len(shown) < total:
+        click.echo("")
+        click.echo(
+            _dim(f"  … and {total - len(shown)} more. Pass -n N to see more.")
+        )
+
+    example_pid = stub_list[0][0]
+    click.echo("")
+    click.echo(
+        _dim(
+            f"Tip: `wikiloom show {example_pid}` to inspect, then either "
+            f"edit + `wikiloom save`, `wikiloom deprecate {example_pid}`, "
+            f"or `wikiloom merge <winner> {example_pid}`."
+        )
+    )
+    click.echo("")
+
+
+@main.command("contradictions")
+@click.option(
+    "-n",
+    "--limit",
+    type=int,
+    default=None,
+    help="Cap number of pages printed (default: all).",
+)
+@click.option(
+    "--project",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Project root.",
+)
+def contradictions(limit: int | None, project: Path | None) -> None:
+    """List pages whose frontmatter records unresolved contradictions.
+
+    During synthesis the LLM flags conflicts between a new source and
+    an existing page rather than silently overwriting — each conflict
+    lands in the page's `contradictions:` frontmatter block as an
+    `existing` / `new` / `source` triple. They accumulate across
+    re-ingests until a human reconciles the page body and clears the
+    entry.
+
+    Sorted by contradiction count descending so the most-conflicted
+    pages (the ones most likely to mislead a reader) surface first.
+
+    Pipeable: when stdout isn't a terminal, emits one tab-separated
+    line per page (`page_id\ttype\tcount\ttitle`) with no headers or
+    tips. Works cleanly with `| grep`, `| head`, `| wc`, and
+    `awk -F'\t'`.
+    """
+    from collections import Counter
+
+    from wikiloom.lint import WikiLinter
+    from wikiloom.registry import Registry
+
+    if project is None:
+        project = _find_project_root(Path.cwd())
+        if project is None:
+            raise click.ClickException(
+                "Could not find a WikiLoom project (no wikiloom.toml found)."
+            )
+
+    _warn_if_dirty(project)
+
+    registry = Registry(project / "_registry")
+    linter = WikiLinter(project)
+    raw = linter.check_contradictions()
+
+    counts: Counter[str] = Counter()
+    for c in raw:
+        counts[c.page_id] += 1
+
+    rows = []
+    for page_id, count in counts.items():
+        entry = registry.get_page(page_id)
+        if entry is None:
+            continue
+        rows.append((page_id, entry.title, entry.type, count))
+    # Highest-count pages first; alphabetical within each tier so the
+    # output is stable across runs.
+    rows.sort(key=lambda row: (-row[3], row[0]))
+    total = len(rows)
+    shown = rows[:limit] if limit is not None else rows
+
+    if _is_piped():
+        for pid, title, ptype, count in shown:
+            click.echo(f"{pid}\t{ptype}\t{count}\t{title}")
+        return
+
+    if not rows:
+        click.echo("No pages with unresolved contradictions.")
+        click.echo("")
+        return
+
+    click.echo("")
+    click.echo(
+        click.style("Pages with contradictions", bold=True)
+        + f"  {_dim('(' + str(total) + ')')}"
+    )
+    click.echo("")
+    for pid, title, ptype, count in shown:
+        noun = "contradiction" if count == 1 else "contradictions"
+        click.echo(
+            f"  {_dim('[' + ptype + ']')} "
+            f"{click.style(title, fg='cyan')}  "
+            f"{_dim(str(count) + ' ' + noun)}"
+        )
+        click.echo(f"      {_dim('→ ' + pid + '.md')}")
+
+    if len(shown) < total:
+        click.echo("")
+        click.echo(
+            _dim(f"  … and {total - len(shown)} more. Pass -n N to see more.")
+        )
+
+    example_pid = rows[0][0]
+    click.echo("")
+    click.echo(
+        _dim(
+            f"Tip: `wikiloom show {example_pid}` to inspect the conflict, "
+            f"edit the page body to reflect the truth, remove the entry "
+            f"from the `contradictions:` frontmatter block, then "
+            f"`wikiloom save` to commit the resolution."
         )
     )
     click.echo("")

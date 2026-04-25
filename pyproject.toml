@@ -37,6 +37,16 @@ wikiloom = "wikiloom.cli:main"
 requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools.package-data]
+# Non-Python assets that wikiloom init copies into a new project.
+# Without this, setuptools only ships .py files in the wheel and
+# `wikiloom init` would fail on a pip-installed package.
+wikiloom = [
+    "templates/*.md",
+    "templates/prompts/*.md",
+    "templates/output_formats/*.json",
+]
+
 [tool.pytest.ini_options]
 # `live` marks tests that hit a real LLM provider. Skipped by default
 # so `pytest` stays free and deterministic. Run them manually with:

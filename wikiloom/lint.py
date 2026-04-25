@@ -459,8 +459,12 @@ class WikiLinter:
     def check_contradictions(self) -> list[Contradiction]:
         """Pages with non-empty ``contradictions`` in frontmatter.
 
-        Plumbing is live today; Component 13 populates the field during
-        synthesis. Until then this returns empty and that's fine.
+        Synthesis populates ``frontmatter.contradictions`` whenever the
+        ingest prompt detects a conflict between a chunk and an
+        existing page. Each entry is an ``existing`` / ``new`` /
+        ``source`` triple that ``page_writer`` accumulates across
+        re-ingests until a human reconciles it. Surfaced here for
+        ``wikiloom lint`` and the ``wikiloom contradictions`` listing.
         """
         found: list[Contradiction] = []
         for md_path in self._iter_content_pages():

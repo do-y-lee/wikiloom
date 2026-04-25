@@ -472,6 +472,17 @@ def _copy_templates(dest: Path, domain: str = "") -> None:
             src.read_text(encoding="utf-8"), encoding="utf-8"
         )
 
+    # templates/ — page-shape examples for the two cases users may need
+    # to write or finish by hand: decision pages (no auto-creation path
+    # at all) and stub pages (auto-created empty, body filled later).
+    page_templates_dir = dest / "templates"
+    page_templates_dir.mkdir(exist_ok=True)
+    for tmpl_name in ("decision.md", "stub.md"):
+        src = templates_pkg / tmpl_name
+        (page_templates_dir / tmpl_name).write_text(
+            src.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+
 
 def _init_git(project_dir: Path) -> None:
     """Initialize a git repository if one doesn't exist, and commit the
