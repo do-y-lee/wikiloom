@@ -206,7 +206,7 @@ Run `wikiloom --help` for the command list and `wikiloom <command> --help` for a
 
 **Supported with caveats:** code files, office docs (`.docx`), scanned PDFs (no OCR yet — will extract as empty). Structured data (spreadsheets, CSVs) works as plain text but rarely produces useful concept pages.
 
-**URL ingestion:** `wikiloom ingest https://example.com/page` works on **static HTML sites** — documentation, blog posts, Wikipedia, most MkDocs/Docusaurus/Sphinx-rendered docs. It **does not work** on:
+**URL ingestion:** `wikiloom ingest https://example.com/page` works on **static HTML sites** — documentation, blog posts, Wikipedia, most MkDocs/Docusaurus/Sphinx-rendered docs. The `http://` or `https://` scheme is required — bare hostnames like `example.com/page` are treated as local file paths and fail with "No such file." It **does not work** on:
 
 - JavaScript-rendered pages (React / Vue / Next.js client-side apps, most modern product pages)
 - Paywalled or login-gated content

@@ -702,6 +702,11 @@ def ingest(
                                 sorted, hidden files skipped)
 
     \b
+    URLs need an explicit http:// or https:// scheme — bare hostnames
+    like example.com/page are treated as local file paths and fail.
+    Local paths and URLs can be mixed freely in --batch-file.
+
+    \b
     Large batches (>20 files) pause for a confirmation prompt with a
     rough wall-clock estimate. Pass --yes / -y to skip the prompt —
     required in non-interactive contexts (scripts, backgrounded runs).
@@ -1066,23 +1071,41 @@ def _print_grand_summary(
       - complete: everything else, including dedup-skip no-ops
         (``chunks_total == 0``).
     """
-    from wikiloom.cli_output import done_summary
+    from wikiloom.cli_output import done_summary, format_tokens
 
     complete: list[str] = []
     partial: list[tuple[str, int, int]] = []  # (source, processed, total)
     failed: list[tuple[str, str]] = []  # (source, reason)
 
+    total_pages_created = 0
+    total_pages_updated = 0
+    total_tokens = 0
+    total_cost = 0.0
+
     for source, outcome in outcomes:
         if isinstance(outcome, Exception):
             reason = getattr(outcome, "message", None) or str(outcome)
             failed.append((source, reason.splitlines()[0]))
-        elif outcome.chunks_failed > 0:
+            continue
+        if outcome.chunks_failed > 0:
             partial.append(
                 (source, outcome.chunks_processed, outcome.chunks_total)
             )
         else:
             complete.append(source)
+        total_pages_created += len(outcome.pages_created)
+        total_pages_updated += len(outcome.pages_updated)
+        total_tokens += outcome.total_tokens_in + outcome.total_tokens_out
+        total_cost += outcome.total_cost_usd
 
+    # Visual break + bold header so the batch summary doesn't blur
+    # into the previous file's per-file "Done." line.
+    click.echo("")
+    click.echo("")
+    click.echo(
+        click.style("Batch ingest summary", bold=True)
+        + f"  {_dim('(' + str(len(outcomes)) + ' files)')}"
+    )
     click.echo("")
     click.echo(
         done_summary(
@@ -1094,6 +1117,16 @@ def _print_grand_summary(
             elapsed=elapsed,
         )
     )
+    # Rolled-up totals across every file in the batch (skips files that
+    # raised since they have no IngestResult).
+    if total_pages_created or total_pages_updated or total_tokens or total_cost:
+        click.echo(
+            f"  {_dim('Totals:')} "
+            f"{total_pages_created} created  •  "
+            f"{total_pages_updated} updated  •  "
+            f"{format_tokens(total_tokens)} tok  •  "
+            f"${total_cost:.2f}"
+        )
 
     if partial:
         click.echo("")
