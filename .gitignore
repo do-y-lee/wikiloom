@@ -25,3 +25,9 @@ htmlcov/
 
 # Claude Code agent state (scheduled tasks, local settings)
 .claude/
+.python-version
+
+# Environment variables
+.env
+.env.*
+!.env.example
