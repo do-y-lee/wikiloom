@@ -154,6 +154,29 @@ def test_check_broken_links_ignores_stub_targets(project: Path) -> None:
     assert linter.check_broken_links() == []
 
 
+def test_check_broken_links_ignores_deprecated_source(project: Path) -> None:
+    """Edges from a deprecated/archived source page are noise, not signal:
+    archive content is a historical record and shouldn't be flagged for
+    cosmetic rewrites. The dominant real-world case is archive→archive
+    after curation via deprecation."""
+    _write_page(
+        project, "concepts/old-source.md",
+        body="[[concepts/old-target]]",
+        status="deprecated",
+    )
+    _write_page(project, "concepts/old-target.md", status="deprecated")
+    reg = _register(project, "concepts/old-source", status="deprecated")
+    reg.register_page(
+        "concepts/old-target",
+        PageEntry(title="Old Target", type="concept", status="deprecated"),
+    )
+    reg.save()
+    _rebuild_backlinks(project)
+
+    linter = WikiLinter(project)
+    assert linter.check_broken_links() == []
+
+
 def test_check_broken_links_clean_when_all_targets_exist(project: Path) -> None:
     _write_page(project, "concepts/a.md", body="[[concepts/b]]")
     _write_page(project, "concepts/b.md", body="body")

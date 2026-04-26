@@ -312,6 +312,11 @@ class WikiLinter:
         pipeline) rather than re-parsing bodies — cheaper and keeps the
         wikilink regex as a single source of truth in ``backlinks.py``.
 
+        Edges whose *source* page is deprecated or archived are excluded
+        by design: archive content is a historical record, and rewriting
+        it for cosmetic lint reasons adds noise without value (the
+        archive→archive case multiplies as users curate via deprecation).
+
         Classification:
 
         - **missing**: target absent from the manifest → ``--fix`` strips
@@ -326,6 +331,12 @@ class WikiLinter:
         """
         broken: list[BrokenLink] = []
         for edge in self.backlinks._edges:
+            source_entry = self.registry.get_page(edge.source)
+            if source_entry is not None and source_entry.status in (
+                "deprecated",
+                "archived",
+            ):
+                continue
             entry = self.registry.get_page(edge.target)
             if entry is None:
                 reason = "missing"
