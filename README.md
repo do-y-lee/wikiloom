@@ -2,6 +2,8 @@
 
 WikiLoom turns raw documents into a persistent, compounding knowledge base. Ingest a PDF, markdown file, or URL — the LLM reads the source and writes structured wiki pages with deterministic linking, structural provenance, and human-edit protection. Every operation is committed to git automatically.
 
+> **Heads up: WikiLoom calls paid LLM APIs by default.** Anthropic, OpenAI, and Google providers cost money — typically cents per document ingested. A pre-flight budget check refuses runs that would exceed `monthly_budget_usd` in `wikiloom.toml` (default $50/mo). For zero-cost local operation, use the `ollama` provider — see [Provider options](#provider-options).
+
 ## Table of contents
 
 - [How it works](#how-it-works)
