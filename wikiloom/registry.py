@@ -285,7 +285,20 @@ class Registry:
                 # different categories with the same slug don't collide.
                 archive_name = page_id.replace("/", "__") + ".md"
                 archive_path = archive_dir / archive_name
-                shutil.move(str(source_path), str(archive_path))
+                # Rewrite the file's frontmatter so disk matches the manifest.
+                # Otherwise `wikiloom show <archive_path>` (which reads
+                # frontmatter directly from disk) would report status=active
+                # for a page the manifest knows is deprecated.
+                from wikiloom.frontmatter import read_page, write_page
+                fm, body = read_page(source_path)
+                if fm is not None:
+                    fm.status = "deprecated"
+                    if superseded_by:
+                        fm.superseded_by = superseded_by
+                    write_page(archive_path, fm, body)
+                    source_path.unlink()
+                else:
+                    shutil.move(str(source_path), str(archive_path))
 
         if emit_event:
             self._emit_deprecate_event(page_id, superseded_by)

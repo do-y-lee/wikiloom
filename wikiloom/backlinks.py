@@ -236,6 +236,11 @@ class BacklinkRegistry:
                 continue
             if md_path.name == "log.md":
                 continue
+            # Skip archived pages: their edges would reference
+            # archive-prefixed page_ids that don't exist in the manifest,
+            # producing spurious broken-link reports in lint.
+            if "archive" in md_path.relative_to(target_dir).parts:
+                continue
             page_id = page_id_from_path(target_dir, md_path)
             body = md_path.read_text(encoding="utf-8")
             for edge in self._extract_edges_from_page(body, page_id, now):

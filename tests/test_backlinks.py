@@ -137,6 +137,20 @@ def test_rebuild_skips_index_and_log_files(project: Path) -> None:
     assert sources == {"concepts/real"}
 
 
+def test_rebuild_skips_archived_pages(project: Path) -> None:
+    """Archive files would yield archive-prefixed source page_ids that
+    don't exist in the manifest, producing spurious lint reports."""
+    _write_page(project, "concepts/active.md", "[[concepts/target]]")
+    _write_page(project, "concepts/target.md", "body")
+    _write_page(project, "archive/concepts__old.md", "[[concepts/target]]")
+
+    reg = BacklinkRegistry(project / "_registry", project / "wiki")
+    reg.rebuild()
+
+    sources = {e.source for e in reg._edges}
+    assert sources == {"concepts/active"}
+
+
 def test_rebuild_preserves_linked_at_for_existing_edges(project: Path) -> None:
     _write_page(
         project,

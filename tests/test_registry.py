@@ -194,6 +194,37 @@ def test_deprecate_page_moves_file_to_archive(project: Path) -> None:
     assert archive_path.name == "entities__old.md"
 
 
+def test_deprecate_page_rewrites_frontmatter_status_on_archive(
+    project: Path,
+) -> None:
+    """Disk frontmatter must match the manifest after deprecation —
+    `wikiloom show` reads frontmatter directly from the file, so a
+    file left at status=active would mislead users."""
+    from wikiloom.frontmatter import (
+        Frontmatter,
+        read_page,
+        render_frontmatter,
+    )
+
+    reg = Registry(project / "_registry")
+    page_path = project / "wiki" / "concepts" / "old.md"
+    fm = Frontmatter(title="Old", type="concept", status="active")
+    page_path.write_text(
+        render_frontmatter(fm) + "\n# Old\n\nbody", encoding="utf-8"
+    )
+    reg.register_page("concepts/old", _entry("Old", type_="concept"))
+
+    archive_path = reg.deprecate_page(
+        "concepts/old", superseded_by="concepts/new"
+    )
+
+    assert archive_path is not None
+    archived_fm, _ = read_page(archive_path)
+    assert archived_fm is not None
+    assert archived_fm.status == "deprecated"
+    assert archived_fm.superseded_by == "concepts/new"
+
+
 def test_deprecate_page_handles_missing_file(project: Path) -> None:
     reg = Registry(project / "_registry")
     reg.register_page("entities/nonexistent", _entry("Nope"))
