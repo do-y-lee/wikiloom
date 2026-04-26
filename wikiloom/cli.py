@@ -1726,11 +1726,10 @@ def query(
         encoding="utf-8",
     )
 
-    # Append a QUERY event to wiki/log.md so `wikiloom log` and
-    # `wikiloom cost` both pick it up. Truncate the question for the
-    # description so multi-line / very long prompts stay tidy in the
-    # log. Mirrors the ingest pattern: written without committing —
-    # the next ingest/lint/save commit picks up the log.md change.
+    # Append a QUERY event to wiki/log.md and commit it. Commits only
+    # log.md (not the broader _auto_commit sweep) so any uncommitted
+    # human edits in wiki/ are not swept into a "query:" commit with
+    # the wrong classifying prefix.
     from wikiloom.events import EventType, append_event, create_event
 
     log_path = project / "wiki" / "log.md"
@@ -1745,6 +1744,13 @@ def query(
             cost_usd=answer.metrics.cost_usd,
         )
         append_event(log_path, event)
+
+        subject = desc if len(desc) <= 60 else desc[:57] + "..."
+        from wikiloom.git_ops import GitOps
+        try:
+            GitOps(project).commit([log_path], f"query: {subject}")
+        except ValueError:
+            pass  # not a git repo
 
     # Print the answer with a bold section header so it visually
     # separates from the question block above.
