@@ -76,24 +76,40 @@ class LintReport:
     promoted_from_update: list[str] = field(default_factory=list)
 
     @property
-    def total_issues(self) -> int:
-        # ``dormant`` and ``promoted_from_update`` are informational,
-        # not "issues" — they're review prompts, not health problems.
-        # Excluded from the total so a healthy wiki with promoted
-        # pages under review still reads as healthy.
+    def total_warnings(self) -> int:
+        """Findings that need fixing — content-integrity warnings, not
+        runtime failures. Broken links, duplicates, frontmatter issues,
+        index drift, and contradictions all degrade the wiki's quality
+        but never crash any command — that's why they're warnings, not
+        errors. Errors (red) stay reserved for real command failures.
+
+        Orphans, dormant candidates, stubs, and promoted-from-update are
+        observability signals (deliberate or under-construction states),
+        not warnings. They live in ``total_tracking`` instead so a wiki
+        with 40 orphans but zero integrity warnings still reads as
+        healthy and exits 0 for CI.
+        """
         return (
             len(self.broken_links)
-            + len(self.orphans)
             + len(self.duplicates)
             + len(self.frontmatter_issues)
             + len(self.index_drift)
             + len(self.contradictions)
+        )
+
+    @property
+    def total_tracking(self) -> int:
+        """Informational findings — surfaced for awareness, not action."""
+        return (
+            len(self.orphans)
+            + len(self.dormant)
             + len(self.stubs)
+            + len(self.promoted_from_update)
         )
 
     @property
     def is_healthy(self) -> bool:
-        return self.total_issues == 0
+        return self.total_warnings == 0
 
 
 @dataclass

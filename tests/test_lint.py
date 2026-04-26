@@ -593,7 +593,7 @@ def test_run_all_aggregates_findings(project: Path) -> None:
     report = WikiLinter(project).run_all()
     assert isinstance(report, LintReport)
     assert len(report.broken_links) == 1
-    assert report.total_issues >= 1
+    assert report.total_warnings >= 1
     assert report.is_healthy is False
 
 
@@ -695,22 +695,37 @@ def test_fix_all_skips_human_edited_pages(
 # ----------------------------------------------------------------------
 
 
-def test_lint_report_total_issues_sums_all_categories() -> None:
-    """Dormant is informational and excluded from the issue count."""
+def test_lint_report_total_warnings_sums_all_categories() -> None:
+    """Warnings = content-integrity findings only. Orphans, dormant,
+    stubs, and promoted-from-update are tracking signals, not warnings,
+    and don't contribute to the count or affect ``is_healthy``."""
     report = LintReport(
-        broken_links=[BrokenLink("a", "b", "")],
-        orphans=["c"],
-        dormant=[DormantPage("d", 100, 90)],  # informational, not counted
-        duplicates=[
+        broken_links=[BrokenLink("a", "b", "")],     # warning
+        orphans=["c"],                                # tracking
+        dormant=[DormantPage("d", 100, 90)],          # tracking
+        duplicates=[                                  # warning
             DuplicateSet(pages=("e", "f"), slug_score=95, embedding_score=-1.0)
         ],
-        frontmatter_issues=["g"],
-        index_drift=["concepts"],
-        contradictions=[],
-        stubs=["h"],
+        frontmatter_issues=["g"],                     # warning
+        index_drift=["concepts"],                     # warning
+        contradictions=[],                            # warning (empty)
+        stubs=["h"],                                  # tracking
     )
-    assert report.total_issues == 6  # excludes the dormant entry
+    assert report.total_warnings == 4
     assert report.is_healthy is False
+
+
+def test_lint_report_total_tracking_counts_informational() -> None:
+    """Tracking aggregates orphans, dormant, stubs, and promoted-from-update."""
+    report = LintReport(
+        orphans=["a", "b"],
+        dormant=[DormantPage("c", 100, 90)],
+        stubs=["d"],
+        promoted_from_update=["e", "f"],
+    )
+    assert report.total_tracking == 6
+    assert report.total_warnings == 0
+    assert report.is_healthy is True  # tracking-only is still healthy
 
 
 def test_lint_report_empty_is_healthy() -> None:

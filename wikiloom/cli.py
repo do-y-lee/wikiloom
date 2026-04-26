@@ -1155,8 +1155,9 @@ def _print_grand_summary(
 def lint(fix: bool, project: Path | None) -> None:
     """Run health checks over a WikiLoom project.
 
-    Default behavior prints a report and exits 1 if issues are found.
-    Pass --fix to apply mechanical repairs (respecting human-edit
+    Default behavior prints a report and exits 1 if warnings are found.
+    Tracking signals (orphans, dormant, stubs) don't affect the exit
+    code. Pass --fix to apply mechanical repairs (respecting human-edit
     protection).
     """
     from wikiloom.lint import WikiLinter
@@ -1181,21 +1182,23 @@ def lint(fix: bool, project: Path | None) -> None:
         start = _time.monotonic()
         with FileLock(project):
             click.echo("")
-            click.echo(f"{_dim('Scanning project for issues...')}")
             report = linter.run_all()
-            # Split issues by what --fix can mechanically repair vs.
+            # Split warnings by what --fix can mechanically repair vs.
             # what only a human can resolve. Auto-fixable: broken
             # wikilinks (strip wrapper), frontmatter (repair), index
-            # drift (rebuild). Needs review: orphans, duplicates,
-            # contradictions, stubs — all judgment calls.
+            # drift (rebuild). Needs review: duplicates and
+            # contradictions are judgment calls. Tracking signals
+            # (orphans, dormant, stubs) aren't warnings — counted
+            # separately so `--fix` doesn't claim to "leave them
+            # behind".
             auto_fixable = (
                 len(report.broken_links)
                 + len(report.frontmatter_issues)
                 + len(report.index_drift)
             )
-            needs_review = report.total_issues - auto_fixable
+            needs_review = report.total_warnings - auto_fixable
             click.echo(
-                f"{_dim('  found ' + str(report.total_issues) + ' issue(s)')}"
+                f"{_dim('  found ' + str(report.total_warnings) + ' warning(s)')}"
             )
             click.echo(
                 f"{_dim('    auto-fixable: ' + str(auto_fixable))}"
@@ -1203,7 +1206,7 @@ def lint(fix: bool, project: Path | None) -> None:
             )
             click.echo(
                 f"{_dim('    needs review: ' + str(needs_review))}"
-                f"{_dim('  (orphans, duplicates, contradictions, stubs)')}"
+                f"{_dim('  (duplicates, contradictions)')}"
             )
 
             click.echo(f"{_dim('Applying fixes...')}")
@@ -1264,7 +1267,6 @@ def lint(fix: bool, project: Path | None) -> None:
         return
 
     click.echo("")
-    click.echo(f"{_dim('Scanning project for issues...')}")
     report = linter.run_all()
     _print_report(report)
     if not report.is_healthy:
@@ -5232,13 +5234,21 @@ def rebuild_cache(project: Path | None) -> None:
 
 
 def _print_report(report) -> None:
-    """Render a ``LintReport`` to stdout with the shared CLI style."""
-    click.echo("")
-    if report.is_healthy and not report.promoted_from_update:
-        click.echo(f"{_check()} Wiki is healthy.")
-        click.echo("")
-        return
+    """Render a ``LintReport`` to stdout with the shared CLI style.
 
+    Sections are grouped into two buckets so users can tell at a glance
+    what they need to act on vs. what's just informational:
+
+    - **Warnings** (orange): content-integrity issues that need fixing
+      but don't break any command (broken links, duplicates,
+      frontmatter, index drift, contradictions). Drives the exit code.
+    - **Tracking** (yellow): signals worth knowing but not actionable
+      failures (orphans, dormant, stubs, promoted-from-update).
+
+    Red is intentionally absent — it's reserved for real command
+    failures (crashes, config errors). Lint never breaks the tool, so
+    its output never uses red.
+    """
     _CAP = 10  # how many items to show per category before the trailing note.
 
     def _section(name: str, count: int, note: str | None = None) -> None:
@@ -5257,114 +5267,150 @@ def _print_report(report) -> None:
         if total > cap:
             click.echo(f"  {_dim(f'… and {total - cap} more')}")
 
-    click.echo(
-        click.style("Lint report", bold=True)
-        + f"  {_dim(f'({report.total_issues} issue(s))')}"
-    )
     click.echo("")
 
-    if report.broken_links:
-        _section("Broken links", len(report.broken_links))
-        for b in report.broken_links[:_CAP]:
-            _item(
-                f"{click.style(b.source, fg='cyan')} → {b.target}  "
-                f"{_dim('(' + b.reason + ')')}"
-            )
-        _more(len(report.broken_links))
-        click.echo("")
-
-    if report.orphans:
-        _section("Orphans", len(report.orphans))
-        for pid in report.orphans[:_CAP]:
-            _item(click.style(pid, fg="cyan"))
-        _more(len(report.orphans))
-        click.echo("")
-
-    if report.dormant:
-        _section(
-            "Dormant candidates",
-            len(report.dormant),
-            note="informational — `wikiloom dormant <page>` to mark",
+    # Top-line verdict. Orange (256-color 208) for warnings —
+    # intentionally not red, because lint findings degrade quality but
+    # never break commands. Tracking counts stay dim because they're
+    # observability, not failure signals.
+    if report.is_healthy:
+        verdict = click.style("✓ Healthy", fg="green", bold=True)
+        warning_phrase = _dim("0 warnings")
+    else:
+        verdict = click.style(
+            f"⚠ {report.total_warnings} warning(s)", fg=208, bold=True
         )
-        for d in report.dormant[:_CAP]:
-            _item(
-                f"{click.style(d.page_id, fg='cyan')}  "
-                f"{_dim(f'({d.age_days}d > {d.window_days}d)')}"
+        warning_phrase = ""
+    tracking_phrase = _dim(f"• {report.total_tracking} tracking")
+    head_parts = [verdict]
+    if warning_phrase:
+        head_parts.append(warning_phrase)
+    head_parts.append(tracking_phrase)
+    click.echo("  ".join(head_parts))
+    click.echo("")
+
+    # Nothing to detail — everything's clean and there's no tracking signal.
+    if report.is_healthy and report.total_tracking == 0:
+        return
+
+    # ------------------------------------------------------------------
+    # Warnings — content-integrity findings; drive the exit code.
+    # ------------------------------------------------------------------
+    if report.total_warnings:
+        click.echo(click.style("Warnings", fg=208, bold=True))
+        click.echo("")
+
+        if report.broken_links:
+            _section("Broken links", len(report.broken_links))
+            for b in report.broken_links[:_CAP]:
+                _item(
+                    f"{click.style(b.source, fg='cyan')} → {b.target}  "
+                    f"{_dim('(' + b.reason + ')')}"
+                )
+            _more(len(report.broken_links))
+            click.echo("")
+
+        if report.duplicates:
+            total = len(report.duplicates)
+            safe = getattr(report, "duplicates_auto_safe", 0)
+            review = total - safe
+            split_note_parts = []
+            if safe:
+                split_note_parts.append(f"{safe} safe to auto-merge")
+            if review:
+                split_note_parts.append(f"{review} need review")
+            split_note = (
+                ", ".join(split_note_parts) if split_note_parts else None
             )
-        _more(len(report.dormant))
+            _section("Duplicates", total, note=split_note)
+            for d in report.duplicates[:_CAP]:
+                pages = " ~ ".join(
+                    click.style(p, fg="cyan") for p in d.pages
+                )
+                emb_display = (
+                    f"emb {d.embedding_score:.2f}"
+                    if d.embedding_score >= 0
+                    else "emb n/a"
+                )
+                _item(
+                    f"{pages}  "
+                    f"{_dim(f'(slug {d.slug_score}%  •  {emb_display})')}"
+                )
+            _more(total)
+            click.echo("")
+
+        if report.frontmatter_issues:
+            _section("Frontmatter issues", len(report.frontmatter_issues))
+            for pid in report.frontmatter_issues[:_CAP]:
+                _item(click.style(pid, fg="cyan"))
+            _more(len(report.frontmatter_issues))
+            click.echo("")
+
+        if report.index_drift:
+            _section("Index drift", len(report.index_drift))
+            for name in report.index_drift[:_CAP]:
+                _item(click.style(name, fg="cyan"))
+            _more(len(report.index_drift))
+            click.echo("")
+
+        if report.contradictions:
+            _section("Contradictions", len(report.contradictions))
+            for c in report.contradictions[:_CAP]:
+                _item(
+                    f"{click.style(c.page_id, fg='cyan')}  "
+                    f"{_dim(f'{c.existing[:40]} vs {c.new[:40]}')}"
+                )
+            _more(len(report.contradictions))
+            click.echo("")
+
+    # ------------------------------------------------------------------
+    # Tracking — informational signals; do not drive the exit code.
+    # ------------------------------------------------------------------
+    if report.total_tracking:
+        click.echo(click.style("Tracking", fg="yellow", bold=True))
         click.echo("")
 
-    if report.duplicates:
-        total = len(report.duplicates)
-        safe = getattr(report, "duplicates_auto_safe", 0)
-        review = total - safe
-        split_note_parts = []
-        if safe:
-            split_note_parts.append(f"{safe} safe to auto-merge")
-        if review:
-            split_note_parts.append(f"{review} need review")
-        split_note = (
-            ", ".join(split_note_parts) if split_note_parts else None
-        )
-        _section("Duplicates", total, note=split_note)
-        for d in report.duplicates[:_CAP]:
-            pages = " ~ ".join(click.style(p, fg="cyan") for p in d.pages)
-            emb_display = (
-                f"emb {d.embedding_score:.2f}"
-                if d.embedding_score >= 0
-                else "emb n/a"
+        if report.orphans:
+            _section("Orphans", len(report.orphans))
+            for pid in report.orphans[:_CAP]:
+                _item(click.style(pid, fg="cyan"))
+            _more(len(report.orphans))
+            click.echo("")
+
+        if report.dormant:
+            _section(
+                "Dormant candidates",
+                len(report.dormant),
+                note="`wikiloom dormant <page>` to mark",
             )
-            _item(
-                f"{pages}  "
-                f"{_dim(f'(slug {d.slug_score}%  •  {emb_display})')}"
+            for d in report.dormant[:_CAP]:
+                _item(
+                    f"{click.style(d.page_id, fg='cyan')}  "
+                    f"{_dim(f'({d.age_days}d > {d.window_days}d)')}"
+                )
+            _more(len(report.dormant))
+            click.echo("")
+
+        if report.stubs:
+            _section("Stubs", len(report.stubs))
+            for pid in report.stubs[:_CAP]:
+                _item(click.style(pid, fg="cyan"))
+            _more(len(report.stubs))
+            click.echo("")
+
+        if report.promoted_from_update:
+            _section(
+                "Promoted from update",
+                len(report.promoted_from_update),
+                note=(
+                    "LLM proposed an update for a nonexistent page; "
+                    "content preserved as a new page for review"
+                ),
             )
-        _more(total)
-        click.echo("")
-
-    if report.frontmatter_issues:
-        _section("Frontmatter issues", len(report.frontmatter_issues))
-        for pid in report.frontmatter_issues[:_CAP]:
-            _item(click.style(pid, fg="cyan"))
-        _more(len(report.frontmatter_issues))
-        click.echo("")
-
-    if report.index_drift:
-        _section("Index drift", len(report.index_drift))
-        for name in report.index_drift[:_CAP]:
-            _item(click.style(name, fg="cyan"))
-        _more(len(report.index_drift))
-        click.echo("")
-
-    if report.contradictions:
-        _section("Contradictions", len(report.contradictions))
-        for c in report.contradictions[:_CAP]:
-            _item(
-                f"{click.style(c.page_id, fg='cyan')}  "
-                f"{_dim(f'{c.existing[:40]} vs {c.new[:40]}')}"
-            )
-        _more(len(report.contradictions))
-        click.echo("")
-
-    if report.stubs:
-        _section("Stubs", len(report.stubs))
-        for pid in report.stubs[:_CAP]:
-            _item(click.style(pid, fg="cyan"))
-        _more(len(report.stubs))
-        click.echo("")
-
-    if report.promoted_from_update:
-        _section(
-            "Promoted from update",
-            len(report.promoted_from_update),
-            note=(
-                "informational — LLM proposed an update for a nonexistent "
-                "page; content preserved as a new page for review"
-            ),
-        )
-        for pid in report.promoted_from_update[:_CAP]:
-            _item(click.style(pid, fg="cyan"))
-        _more(len(report.promoted_from_update))
-        click.echo("")
+            for pid in report.promoted_from_update[:_CAP]:
+                _item(click.style(pid, fg="cyan"))
+            _more(len(report.promoted_from_update))
+            click.echo("")
 
 
 if __name__ == "__main__":
