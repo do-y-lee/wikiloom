@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -89,14 +90,24 @@ def _create_page(
 
 
 def _mock_llm_client(responses: list[dict[str, Any] | Exception]) -> MagicMock:
-    """Build a mock LLMClient whose synthesize returns each response in order."""
+    """Build a mock LLMClient whose synthesize binds each chunk to its
+    matching response.
+
+    The synthesis pipeline runs chunks through a ThreadPoolExecutor, so
+    a naive FIFO mock would non-deterministically pair chunks with
+    responses based on which worker thread happens to call synthesize
+    first. We instead parse the ``## Source chunk N of M`` marker that
+    ``_render_user_prompt`` writes into every prompt, and return
+    ``responses[N-1]``. Binding is by chunk identity, not arrival order,
+    so the mock is deterministic at any concurrency level.
+    """
     client = MagicMock()
-    call_results: list[Any] = []
+    bound_results: list[Any] = []
     for r in responses:
         if isinstance(r, Exception):
-            call_results.append(r)
+            bound_results.append(r)
         else:
-            call_results.append(
+            bound_results.append(
                 SynthesizeResult(
                     result=r,
                     metrics=LLMCallMetrics(
@@ -109,7 +120,20 @@ def _mock_llm_client(responses: list[dict[str, Any] | Exception]) -> MagicMock:
             )
 
     def side_effect(*args: Any, **kwargs: Any) -> Any:
-        nxt = call_results.pop(0)
+        user_prompt = args[1] if len(args) >= 2 else kwargs.get("user_prompt", "")
+        m = re.search(r"## Source chunk (\d+) of \d+", user_prompt)
+        if m is None:
+            raise AssertionError(
+                "mock LLM client could not find a '## Source chunk N of M' "
+                "marker in the user prompt — has _render_user_prompt changed?"
+            )
+        idx = int(m.group(1)) - 1
+        if not 0 <= idx < len(bound_results):
+            raise AssertionError(
+                f"mock LLM client received chunk {idx + 1} but only "
+                f"{len(bound_results)} responses were configured"
+            )
+        nxt = bound_results[idx]
         if isinstance(nxt, Exception):
             raise nxt
         return nxt
@@ -573,10 +597,7 @@ def test_run_synthesis_update_proposals_accumulate(
 
     assert len(result.pages_to_update) == 2
     additions = [u.additions_markdown for u in result.pages_to_update]
-    # Order is not guaranteed: ThreadPoolExecutor lets chunks race for the
-    # mock's FIFO response queue. The contract under test is "both updates
-    # are kept", not which chunk consumed which response.
-    assert sorted(additions) == ["First addition", "Second addition"]
+    assert additions == ["First addition", "Second addition"]
 
 
 # ----------------------------------------------------------------------
