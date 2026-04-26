@@ -703,52 +703,22 @@ def ingest(
 ) -> None:
     """Ingest one or more source files or URLs into the wiki.
 
-    Extracts content, copies local files to raw/, rebuilds backlinks and
-    indexes, and commits the result. Re-ingesting an identical local
-    file is a cheap no-op (catalog dedup) unless --force is passed.
-
-    When more than one source is passed, each runs sequentially and a
-    grand summary at the end classifies every file as complete, partial
-    (some chunks failed), or failed.
+    Extracts content, copies local files to raw/, rebuilds backlinks
+    and indexes, and commits. Re-ingesting an identical local file is
+    a cheap no-op unless --force is passed. Multi-source runs process
+    files sequentially with a grand summary (complete / partial / failed).
 
     \b
     Input modes (mutually exclusive — pick one):
-      positional: wikiloom ingest a.pdf b.pdf c.pdf
-      --batch-file paths.txt    paths from a text file (one per line,
-                                blanks and '#' comments skipped)
-      --batch-file -            paths from stdin
-      --batch-dir ~/docs/       every file in a directory (non-recursive,
-                                sorted, hidden files skipped)
+      positional             \x1b[36mwikiloom ingest a.pdf b.pdf c.pdf\x1b[0m
+      --batch-file PATH      paths from a text file (blanks and '#' lines skipped)
+      --batch-file -         paths from stdin
+      --batch-dir PATH       every file in a directory (non-recursive, sorted)
 
-    \b
-    URLs need an explicit http:// or https:// scheme — bare hostnames
-    like example.com/page are treated as local file paths and fail.
-    Local paths and URLs can be mixed freely in --batch-file.
-
-    \b
-    Large batches (>20 files) pause for a confirmation prompt with a
-    rough wall-clock estimate. Pass --yes / -y to skip the prompt —
-    required in non-interactive contexts (scripts, backgrounded runs).
-
-    \b
-    For long batches, redirect output so your terminal is free:
-      wikiloom ingest --batch-file paths.txt --yes > batch.log 2>&1 &
-    Check progress with `tail -f batch.log`; per-ingest summaries are
-    also durable in `wikiloom log` after each file commits.
-
-    \b
-    Retrying after failure:
-    On any per-file error the working tree is rolled back to HEAD, so
-    no leftover pages need cleaning up by hand. To retry a file from
-    the grand summary's `Failed:` section, look up its content hash in
-    _registry/sources.json:
-      - not catalogued (crash before commit) → `wikiloom ingest SOURCE`
-      - catalogued (commit succeeded but a later step raised) →
-        `wikiloom ingest SOURCE --force`
-    Most mid-pipeline crashes happen before catalog write, so plain
-    re-ingest usually works. Rollback covers wiki/ and _registry/
-    only; raw/ keeps its source copy so the next ingest just
-    overwrites it idempotently.
+    URLs need an explicit http:// or https:// scheme. Local paths and
+    URLs can be mixed freely in --batch-file. On per-file error the
+    working tree rolls back to HEAD — re-run the same command to retry
+    (add --force if the source was already catalogued).
 
     \b
     Examples:
@@ -3798,6 +3768,17 @@ def duplicates(
     separated line per pair (`loser\twinner\tslug%\temb\tsafe|review\treason`)
     with no headers. Works with `| grep`, `| head`, `| wc`, and
     `awk -F'\t'`.
+
+    \b
+    Examples:
+      \x1b[36mwikiloom duplicates\x1b[0m
+      \x1b[36mwikiloom duplicates --slug-threshold 90 --embedding-threshold 0.92\x1b[0m
+      \x1b[36mwikiloom duplicates --cross-type\x1b[0m
+      \x1b[36mwikiloom duplicates --auto-merge\x1b[0m
+      \x1b[36mwikiloom duplicates --auto-merge --dry-run\x1b[0m
+      \x1b[36mwikiloom duplicates --review\x1b[0m
+      \x1b[36mwikiloom duplicates | grep concept\x1b[0m
+      \x1b[36mwikiloom duplicates | awk -F'\\t' '$5=="safe" {print $1, $2}'\x1b[0m
     """
     from wikiloom.duplicates import find_duplicates, suggest_winner
 
@@ -4086,6 +4067,7 @@ def _run_auto_merge_mode(project: Path, pairs: list, dry_run: bool) -> None:
     from wikiloom.locking import FileLock
     from wikiloom.merge import merge_pages
 
+    click.echo("")
     safe_plan: list = []
     unsafe: list = []
     for pair in pairs:
@@ -4102,6 +4084,7 @@ def _run_auto_merge_mode(project: Path, pairs: list, dry_run: bool) -> None:
                 f"\n{len(unsafe)} pair(s) need manual review. "
                 f"Run `wikiloom duplicates --review` to walk through them."
             )
+        click.echo("")
         return
 
     click.echo(f"Plan ({len(safe_plan)} safe merge(s)):")
@@ -4121,10 +4104,12 @@ def _run_auto_merge_mode(project: Path, pairs: list, dry_run: bool) -> None:
 
     if dry_run:
         click.echo("\nDry run. Nothing executed.")
+        click.echo("")
         return
 
     if not click.confirm(f"\nProceed with {len(safe_plan)} merge(s)?"):
         click.echo("Aborted.")
+        click.echo("")
         return
 
     click.echo("")
@@ -4171,6 +4156,7 @@ def _run_auto_merge_mode(project: Path, pairs: list, dry_run: bool) -> None:
             elapsed=_time.monotonic() - start,
         )
     )
+    click.echo("")
 
 
 @main.command("merge")
