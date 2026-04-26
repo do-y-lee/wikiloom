@@ -209,9 +209,13 @@ Run `wikiloom --help` for the command list and `wikiloom <command> --help` for a
 |---|---|
 | `wikiloom ingest <file-or-url> [--force] [--no-page-context]` | Ingest a source, synthesize pages, link, commit. `--force` re-runs even if the source was already ingested. `--no-page-context` disables per-chunk semantic retrieval for this run |
 
-**Best inputs:** markdown, plain text, PDFs with a text layer (research papers, contracts, documentation, reference manuals). Prose-heavy sources synthesize into useful wiki pages consistently.
+**What ingests well**
 
-**Supported with caveats:** code files, office docs (`.docx`), scanned PDFs (no OCR yet — will extract as empty). Structured data (spreadsheets, CSVs) works as plain text but rarely produces useful concept pages.
+| Tier | Formats | Notes |
+|---|---|---|
+| **Best — clean extraction, strong synthesis** | `.md`, `.txt`, `.rst`, text-based `.pdf`, URLs (`http://`, `https://`) | Markdown / plain text are native. PDFs need a text layer — scanned PDFs extract as empty (no OCR). The URL extractor strips nav, ads, and boilerplate before synthesis. |
+| **Good — supported with caveats** | `.docx`, `.pptx`, code files (`.py`, `.sql`, `.js`, `.ts`, `.tsx`, `.jsx`, `.go`, `.rs`, `.java`, `.rb`, `.cs`, `.cpp`, `.c`, `.sh`), config / IaC (`.yaml`, `.yml`, `.json`, `.toml`, `.dockerfile`, `.tf`, `.hcl`, `.proto`, `.graphql`) | Office docs flatten tables / layout and skip embedded images. Code and config ingest as plain text with language context — strong on docs, comments, and schemas; weaker on pure algorithmic code (the LLM tends to re-describe behavior rather than extract domain knowledge). |
+| **Not supported today** | `.xls`, `.xlsx`, `.csv` (large), images (`.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`), standalone `.html` | Excel: export to `.csv` or `.md` first. Large CSV tables don't synthesize well — small ones may work as plain text. Images currently emit a placeholder (no vision / OCR). For HTML, host at a URL and ingest the URL instead. |
 
 **URL ingestion:** `wikiloom ingest https://example.com/page` works on **static HTML sites** — documentation, blog posts, Wikipedia, most MkDocs/Docusaurus/Sphinx-rendered docs. The `http://` or `https://` scheme is required — bare hostnames like `example.com/page` are treated as local file paths and fail with "No such file." It **does not work** on:
 
