@@ -1573,10 +1573,13 @@ def query(
       \x1b[36mwikiloom query --last-detail\x1b[0m
       \x1b[36mwikiloom query --save-last\x1b[0m
     """
-    import json as json_mod
-
     from wikiloom.llm import LLMClient
     from wikiloom.query import run_query
+    from wikiloom.query_history import (
+        QueryHistory,
+        QueryHistoryEntry,
+        derive_query_id,
+    )
     from wikiloom.utils import now_iso
 
     if project is None:
@@ -1589,25 +1592,27 @@ def query(
     if not save_last:
         _warn_if_dirty(project)
 
-    last_query_path = project / "_registry" / "last_query.json"
+    history = QueryHistory.load(project / "_registry")
+    if history.migrate_legacy(project / "_registry"):
+        history.save()
 
-    # --save-last: save the cached last query as a synthesis page
+    # --save-last: promote the most recent history entry to a synthesis page
     if save_last:
-        if not last_query_path.exists():
+        latest = history.latest()
+        if latest is None:
             raise click.ClickException(
                 "No previous query result found. Run a query first."
             )
         _require_clean_tree(project, "query --save-last")
-        data = json_mod.loads(last_query_path.read_text(encoding="utf-8"))
-        # _save_query_as_page performs the cache sync and auto-commit.
-        _save_query_as_page(data, project)
+        _save_query_as_page(_entry_to_legacy_dict(latest), project)
         return
 
-    # --last-detail: show detail from the cached result, no LLM call
+    # --last-detail: render detail for the most recent entry, no LLM call
     if last_detail:
-        if not last_query_path.exists():
+        latest = history.latest()
+        if latest is None:
             raise click.ClickException("No previous query result found.")
-        data = json_mod.loads(last_query_path.read_text(encoding="utf-8"))
+        data = _entry_to_legacy_dict(latest)
         prev_question = data.get("question", "")
         click.echo("")
         if prev_question:
@@ -1671,6 +1676,8 @@ def query(
     spinner_thread = threading.Thread(target=_spinner, daemon=True)
     spinner_thread.start()
 
+    import time as _time
+    query_start = _time.monotonic()
     try:
         # Heavy setup lives inside the spinner-wrapped block so the
         # user sees the "Initializing..." phase while fastembed's
@@ -1681,7 +1688,8 @@ def query(
                 "Could not load wikiloom.toml. Run inside a project directory."
             )
 
-        llm_client = LLMClient(cfg, model=cfg.llm.for_query())
+        query_model = cfg.llm.for_query()
+        llm_client = LLMClient(cfg, model=query_model)
 
         embedder = None
         if cfg.embeddings.enabled:
@@ -1705,28 +1713,40 @@ def query(
 
     stop_spinner.set()
     spinner_thread.join()
+    latency_ms = int((_time.monotonic() - query_start) * 1000)
 
-    # Save result for --last
-    result_data = {
-        "question": question,
-        "answer": answer.answer,
-        "sources_consulted": [
-            {"page_path": s.page_path, "relevance": s.relevance}
-            for s in answer.sources_consulted
-        ],
-        "confidence": answer.confidence,
-        "suggest_synthesis": answer.suggest_synthesis,
-        "suggested_followups": answer.suggested_followups,
-        "tokens_in": answer.metrics.tokens_in,
-        "tokens_out": answer.metrics.tokens_out,
-        "cost_usd": answer.metrics.cost_usd,
-        "timestamp": now_iso(),
-    }
-    last_query_path.parent.mkdir(parents=True, exist_ok=True)
-    last_query_path.write_text(
-        json_mod.dumps(result_data, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
+    # Build a QueryHistoryEntry — captures everything --detail shows
+    # plus structural metadata so users can reconstruct the call later
+    # without re-running it. Skips the write if [query] history_enabled
+    # is False (privacy opt-out).
+    timestamp = now_iso()
+    sources_payload = [
+        {"page_path": s.page_path, "relevance": s.relevance}
+        for s in answer.sources_consulted
+    ]
+    new_entry = QueryHistoryEntry(
+        query_id=derive_query_id(question, timestamp),
+        timestamp=timestamp,
+        question=question,
+        answer=answer.answer,
+        relevance="",  # run_query does not surface a top-level relevance
+        confidence=answer.confidence,
+        sources=sources_payload,
+        pages_consulted=len(sources_payload),
+        followups=list(answer.suggested_followups or []),
+        suggest_synthesis=answer.suggest_synthesis,
+        model=query_model,
+        tokens_in=answer.metrics.tokens_in,
+        tokens_out=answer.metrics.tokens_out,
+        cost_usd=answer.metrics.cost_usd,
+        latency_ms=latency_ms,
     )
+    if cfg.query.history_enabled:
+        history.append(new_entry, max_entries=cfg.query.history_size)
+        history.save()
+
+    # Synthesize the legacy-shape dict for downstream renderers.
+    result_data = _entry_to_legacy_dict(new_entry)
 
     # Append a QUERY event to wiki/log.md and commit it. Commits only
     # log.md (not the broader _auto_commit sweep) so any uncommitted
@@ -1776,6 +1796,175 @@ def query(
                 _dim("  --save-last    save this answer as a synthesis page")
             )
     click.echo("")
+
+
+@main.command("queries")
+@click.option(
+    "--show",
+    "show_id",
+    metavar="ID",
+    default=None,
+    help="Print full answer + sources for the given entry (id prefix or 1-based index).",
+)
+@click.option(
+    "--save",
+    "save_id",
+    metavar="ID",
+    default=None,
+    help="Save the given entry as a synthesis page (same flow as `query --save-last`).",
+)
+@click.option(
+    "--all",
+    "show_all",
+    is_flag=True,
+    default=False,
+    help="Show every retained entry instead of just the most recent 20.",
+)
+@click.option(
+    "--project",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Project root. Defaults to walking upward from the current directory.",
+)
+def queries(
+    show_id: str | None,
+    save_id: str | None,
+    show_all: bool,
+    project: Path | None,
+) -> None:
+    """Browse the rolling cache of past `wikiloom query` results.
+
+    Default mode lists the 20 most recent entries (timestamp, question
+    snippet, confidence). The history file lives at
+    `_registry/query_history.json` (gitignored, per-machine cache);
+    retention is controlled by `[query] history_size` in `wikiloom.toml`.
+
+    \b
+    Examples:
+      \x1b[36mwikiloom queries\x1b[0m
+      \x1b[36mwikiloom queries --all\x1b[0m
+      \x1b[36mwikiloom queries --show 1\x1b[0m
+      \x1b[36mwikiloom queries --save 3\x1b[0m
+
+    Note: this file may contain sensitive prompts. Disable history with
+    `[query] history_enabled = false` in `wikiloom.toml`.
+    """
+    from wikiloom.query_history import QueryHistory
+
+    if project is None:
+        project = _find_project_root(Path.cwd())
+        if project is None:
+            raise click.ClickException(
+                "Could not find a WikiLoom project (no wikiloom.toml found)."
+            )
+
+    history = QueryHistory.load(project / "_registry")
+    if history.migrate_legacy(project / "_registry"):
+        history.save()
+
+    # Mutually exclusive flags — `--show` and `--save` both target one
+    # entry, so if both arrive Click would silently let `save` win.
+    # Surface the conflict instead.
+    if show_id and save_id:
+        raise click.UsageError("Pass either --show or --save, not both.")
+
+    if save_id:
+        entry = history.get(save_id)
+        if entry is None:
+            raise click.ClickException(
+                f"No entry matches '{save_id}'. Run `wikiloom queries` to see available ids."
+            )
+        _require_clean_tree(project, "queries --save")
+        _save_query_as_page(_entry_to_legacy_dict(entry), project)
+        return
+
+    if show_id:
+        entry = history.get(show_id)
+        if entry is None:
+            raise click.ClickException(
+                f"No entry matches '{show_id}'. Run `wikiloom queries` to see available ids."
+            )
+        click.echo("")
+        click.echo(f"{click.style('Question:', bold=True)} {entry.question}")
+        click.echo("")
+        click.echo(click.style("Answer:", bold=True))
+        click.echo("")
+        click.echo(entry.answer)
+        click.echo("")
+        _print_query_detail(_entry_to_legacy_dict(entry), project)
+        click.echo("")
+        return
+
+    # List mode.
+    if not history.entries:
+        click.echo("")
+        click.echo(_dim("No queries in history yet. Run `wikiloom query \"...\"` to start."))
+        click.echo("")
+        return
+
+    cap = len(history.entries) if show_all else 20
+    shown = history.entries[:cap]
+
+    click.echo("")
+    click.echo(
+        click.style("Query history", bold=True)
+        + f"  {_dim(f'({len(history.entries)} entr' + ('y' if len(history.entries) == 1 else 'ies') + ' retained)')}"
+    )
+    click.echo("")
+
+    # Header row + entries. Compact one-line-per-entry layout matching
+    # the project's other listing commands so this stays pipeable.
+    for i, entry in enumerate(shown, start=1):
+        ts = entry.timestamp.split("T")[0] if entry.timestamp else ""
+        question = " ".join(entry.question.split())
+        if len(question) > 70:
+            question = question[:67] + "..."
+        confidence_color = {
+            "high": "green",
+            "medium": "yellow",
+            "low": 208,  # orange — same scale as lint warnings
+        }.get(entry.confidence, None)
+        conf_label = (
+            click.style(entry.confidence, fg=confidence_color)
+            if confidence_color is not None
+            else entry.confidence
+        )
+        click.echo(
+            f"  {_dim(str(i).rjust(2))}  "
+            f"{_dim(entry.query_id)}  "
+            f"{_dim(ts)}  "
+            f"{question}  "
+            f"{_dim('—')}  {conf_label}"
+        )
+
+    if len(history.entries) > cap:
+        click.echo("")
+        click.echo(_dim(f"  … {len(history.entries) - cap} more — `wikiloom queries --all` to see all"))
+    click.echo("")
+    click.echo(
+        _dim("`wikiloom queries --show <id>` to view full answer  •  `--save <id>` to promote to a synthesis page")
+    )
+    click.echo("")
+
+
+def _entry_to_legacy_dict(entry) -> dict:
+    """Render a ``QueryHistoryEntry`` in the dict shape that
+    ``_save_query_as_page`` and ``_print_query_detail`` already
+    consume. Avoids touching those renderers when migrating from
+    ``last_query.json`` to ``query_history.json``.
+    """
+    return {
+        "question": entry.question,
+        "answer": entry.answer,
+        "sources_consulted": list(entry.sources or []),
+        "confidence": entry.confidence,
+        "suggest_synthesis": entry.suggest_synthesis,
+        "suggested_followups": list(entry.followups or []),
+        "tokens_in": entry.tokens_in,
+        "tokens_out": entry.tokens_out,
+        "cost_usd": entry.cost_usd,
+        "timestamp": entry.timestamp,
+    }
 
 
 def _save_query_as_page(data: dict, project: Path) -> None:

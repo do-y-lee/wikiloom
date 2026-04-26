@@ -191,7 +191,7 @@ Disable with `[ingest] enable_budget_check = false`.
 
 ## Commands
 
-25 commands grouped by purpose. All commands accept `--project <path>` (defaults to walking upward from the current directory to find `wikiloom.toml`).
+26 commands grouped by purpose. All commands accept `--project <path>` (defaults to walking upward from the current directory to find `wikiloom.toml`).
 
 Run `wikiloom --help` for the command list and `wikiloom <command> --help` for a specific command's flags (e.g. `wikiloom query --help`, `wikiloom ingest --help`).
 
@@ -232,6 +232,7 @@ For unsupported pages, download as PDF and ingest the PDF instead. URL ingests g
 | `wikiloom query "<question>" [--detail] [--max-pages N]` | Ask a question grounded in wiki content. `--detail` shows sources, confidence, and last-modified per source |
 | `wikiloom query --last-detail` | Show detail for the most recent query (no LLM call) |
 | `wikiloom query --save-last` | Save the most recent answer as a `wiki/syntheses/` page |
+| `wikiloom queries [--show <id>] [--save <id>] [--all]` | Browse the rolling cache of past `query` runs. Default lists the 20 most recent (id, timestamp, question snippet, confidence). `--show` prints the full answer + sources for an entry (no LLM call); `--save` promotes that entry to a synthesis page. Retention controlled by `[query] history_size` |
 | `wikiloom show <page> [--field <name>] [--json]` | Show a page's frontmatter. `--field` extracts one field; `chunk_ids` flattens across sources |
 | `wikiloom links <page>` | Show all pages linked to and from a given page |
 | `wikiloom related <page> [-n N] [--save] [--link]` | Find pages semantically similar to one. `--save` writes them into frontmatter; `--link` appends a "Related Pages" wikilink section to the body |
@@ -309,7 +310,7 @@ my-wiki/
     sources.json          # Content-addressed source catalog (committed)
     schema_version.json   # Schema marker for future migrations (committed)
     wiki.db               # SQLite query cache + chunks table (gitignored)
-    last_query.json       # Cached last query (gitignored)
+    query_history.json    # Rolling cache of past query results (gitignored)
     ingest_state.json     # Per-chunk progress checkpoint (gitignored)
 ```
 
@@ -353,6 +354,10 @@ synthesis_window_days = 60
 
 [search]
 engine = "grep"
+
+[query]
+history_enabled = true          # Cache successful query results in _registry/query_history.json
+history_size    = 100           # How many past queries to retain (newest first; older are trimmed)
 
 [embeddings]
 provider = "fastembed"          # local, no API key needed
@@ -609,6 +614,8 @@ Tab-separated keeps column positions stable when fields like titles or descripti
 **Customize the synthesis prompt.** Open `.wikiloom/prompts/ingest.md` and iterate — every page WikiLoom produces is a function of that prompt + the chunk. The default works but is generic. For domain-specific corpora, tailored prompts produce noticeably better output.
 
 **Read `wiki/log.md` to see what happened.** Every operation appends a structured event with timestamps, token usage, and cost. Useful for cost reviews and auditing.
+
+**Browse past query answers without re-running them.** Every successful `wikiloom query` run is appended to `_registry/query_history.json` (newest first, default 100 entries). `wikiloom queries` lists recent runs; `wikiloom queries --show <id>` reprints the full answer + sources without an LLM call; `wikiloom queries --save <id>` promotes any past entry to a synthesis page. **Privacy note:** the file is gitignored (per-machine cache, not project state) but stored in plaintext on disk and may contain sensitive prompts. Disable with `[query] history_enabled = false` in `wikiloom.toml`, or shrink retention via `history_size`.
 
 **Switching LLM providers.** Either re-init in a fresh directory with `--provider` / `--model`, or edit `[llm] provider` + `default_model` (and optionally `ingest_model` / `query_model`) in `wikiloom.toml` directly. WikiLoom uses litellm under the hood, so any provider it supports works. The model name follows litellm's naming convention.
 

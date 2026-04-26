@@ -191,6 +191,26 @@ class EmbeddingsConfig:
 
 
 @dataclass
+class QueryConfig:
+    """Settings for ``wikiloom query`` history retention.
+
+    ``history_enabled`` controls whether each successful query appends
+    a full record (question, answer, sources, metrics) to
+    ``_registry/query_history.json``. The file is gitignored — it's
+    per-machine cache, not project state — but may contain sensitive
+    prompts. Set to ``False`` to skip writing entirely.
+
+    ``history_size`` caps how many entries are retained. Older entries
+    are trimmed on each append. 100 covers ~3 months of moderate use
+    and stays well under 2 MB on disk; bias toward more rather than
+    less since querying is paid and remembering is free.
+    """
+
+    history_enabled: bool = True
+    history_size: int = 100
+
+
+@dataclass
 class Config:
     project: ProjectConfig = field(default_factory=ProjectConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
@@ -199,6 +219,7 @@ class Config:
     search: SearchConfig = field(default_factory=SearchConfig)
     ingest: IngestConfig = field(default_factory=IngestConfig)
     embeddings: EmbeddingsConfig = field(default_factory=EmbeddingsConfig)
+    query: QueryConfig = field(default_factory=QueryConfig)
     project_root: Path = field(default_factory=Path.cwd)
 
     @classmethod
@@ -241,6 +262,8 @@ class Config:
         if "embeddings" in data:
             cfg.embeddings = EmbeddingsConfig(
                 **_filter(EmbeddingsConfig, data["embeddings"]))
+        if "query" in data:
+            cfg.query = QueryConfig(**_filter(QueryConfig, data["query"]))
         return cfg
 
 
