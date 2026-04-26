@@ -2,6 +2,10 @@
 
 WikiLoom turns raw documents into a persistent, compounding knowledge base. Ingest a PDF, markdown file, or URL — the LLM reads the source and writes structured wiki pages with deterministic linking, structural provenance, and human-edit protection. Every operation is committed to git automatically.
 
+Inspired by Andrej Karpathy's [LLM wiki gist](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f).
+
+**Why WikiLoom vs. naive RAG?** Instead of re-embedding documents into an opaque vector store, WikiLoom builds a persistent, human-readable knowledge graph — deterministic wikilinking, structural provenance back to source chunks, and atomic git commits on every operation.
+
 > **Heads up: WikiLoom calls paid LLM APIs by default.** Anthropic, OpenAI, and Google providers cost money — typically cents per document ingested. A pre-flight budget check refuses runs that would exceed `monthly_budget_usd` in `wikiloom.toml` (default $50/mo). For zero-cost local operation, use the `ollama` provider — see [Provider options](#provider-options).
 
 ## Table of contents
@@ -19,6 +23,7 @@ WikiLoom turns raw documents into a persistent, compounding knowledge base. Inge
   - [Observability](#observability)
 - [Project structure](#project-structure)
 - [Configuration](#configuration)
+- [Provider options](#provider-options)
 - [Workflows](#workflows)
 - [Tips](#tips)
 - [Development](#development)
@@ -26,33 +31,33 @@ WikiLoom turns raw documents into a persistent, compounding knowledge base. Inge
 
 ## How it works
 
-```
-source file (PDF/MD/URL)
-    |
-    v
-[extract + chunk]  -->  [LLM synthesis]  -->  [deterministic linker]  -->  wiki/
-    |                        |                        |
-    |                    JSON output             spaCy NER +
-    |                    validated               rapidfuzz matching
-    |                    per schema               inserts [[wikilinks]]
-    v                        v                        v
-raw/ copy              pages written            backlinks rebuilt
-                       sources + chunk_ids      stubs auto-created
-                       in frontmatter           pending.json for
-                                                low-confidence links
-                                |
-                                v
-                       atomic git commit (ingest:)
+```mermaid
+flowchart TD
+    src["source file<br/>(PDF / MD / URL)"]
+    extract["extract + chunk"]
+    synth["LLM synthesis"]
+    link["deterministic linker"]
+    wiki[("wiki/")]
+    commit["atomic git commit<br/><i>ingest:</i>"]
+
+    src --> extract --> synth --> link --> wiki --> commit
+
+    extract -. side output .-> raw["raw/ copy"]
+    synth -. validated .-> schema["JSON schema check<br/>→ pages written with<br/>sources + chunk_ids in frontmatter"]
+    link -. uses .-> ner["spaCy NER + rapidfuzz match<br/>→ inserts wikilinks, rebuilds backlinks<br/>→ stubs auto-created<br/>→ pending.json for low-confidence links"]
+
+    classDef sideNote fill:#f6f8fa,stroke:#d0d7de,color:#57606a,font-style:italic;
+    class raw,schema,ner sideNote;
 ```
 
 The LLM handles judgment (reading sources, extracting claims, assessing confidence). Everything after the LLM call is deterministic: linking, backlink graph, index regeneration, git commit. Every WikiLoom command that modifies state auto-commits with a classifying prefix (`ingest:`, `lint:`, `merge:`, etc.) so you never have to type `git`.
 
 ## Installation
 
-Requires Python 3.10+.
+Requires Python 3.10–3.13. spaCy (used by the linking engine) ships prebuilt wheels for 3.10–3.13 but does not yet publish a wheel for 3.14 — on 3.14 pip falls back to a source build that typically fails on spaCy's Cython/Thinc deps. If you're on 3.14, use a 3.10–3.13 virtualenv until spaCy publishes a matching wheel.
 
 ```bash
-git clone <repo-url> && cd wikiloom
+git clone https://github.com/do-y-lee/wikiloom.git && cd wikiloom
 pip install -e ".[dev]"
 
 # Required for the linking engine
@@ -247,7 +252,7 @@ For unsupported pages, download as PDF and ingest the PDF instead. URL ingests g
 
 | Command | Description |
 |---|---|
-| `wikiloom lint [--fix \| --check-only]` | Run health checks (broken links, missing frontmatter, duplicates, dormant candidates). `--fix` applies auto-repairs (broken links, frontmatter only — never auto-marks dormant) |
+| `wikiloom lint [--fix]` | Run health checks (broken links, missing frontmatter, duplicates, dormant candidates). Default is check-only — prints a report and exits 1 if issues are found. `--fix` applies auto-repairs (broken links, frontmatter only — never auto-marks dormant) |
 | `wikiloom relink` | Re-run the linker across every page (useful when new pages were added that earlier pages should link to) |
 | `wikiloom review` | List low-confidence link candidates from `pending.json` |
 | `wikiloom review --accept-all` | Insert every pending link into its source page |
@@ -514,7 +519,7 @@ If `wikiloom ingest` aborts mid-way (rate limit, credit exhaustion):
 wikiloom ingest path/to/paper.pdf --force
 ```
 
-`--force` re-processes all chunks (including ones that succeeded the first time). Auto-resume from a checkpoint is planned for a future release.
+`--force` re-processes all chunks (including ones that succeeded the first time).
 
 ### Find what already exists before writing manually
 
@@ -615,7 +620,7 @@ pytest -m live               # Run live-API tests (requires ANTHROPIC_API_KEY)
 pytest tests/test_llm.py     # Just the LLM client unit tests
 ```
 
-359 tests across 24 test modules. All deterministic in the default suite; live API tests live in `test_llm_live.py` and are skipped unless explicitly requested.
+Extensive pytest suite. All deterministic in the default run; live API tests live in `test_llm_live.py` and are skipped unless explicitly requested.
 
 ### Customizing prompts
 
