@@ -299,7 +299,10 @@ def test_post_flight_budget_warning_reads_dict_events(
 
     # Set an unreachably low budget so the warning fires.
     toml_path = project / "wikiloom.toml"
-    import tomllib
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        import tomli as tomllib  # type: ignore[no-redef]
 
     with toml_path.open("rb") as f:
         cfg = tomllib.load(f)

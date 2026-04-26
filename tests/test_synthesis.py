@@ -573,7 +573,10 @@ def test_run_synthesis_update_proposals_accumulate(
 
     assert len(result.pages_to_update) == 2
     additions = [u.additions_markdown for u in result.pages_to_update]
-    assert additions == ["First addition", "Second addition"]
+    # Order is not guaranteed: ThreadPoolExecutor lets chunks race for the
+    # mock's FIFO response queue. The contract under test is "both updates
+    # are kept", not which chunk consumed which response.
+    assert sorted(additions) == ["First addition", "Second addition"]
 
 
 # ----------------------------------------------------------------------
