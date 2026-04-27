@@ -4466,6 +4466,7 @@ def merge(winner: str, loser: str, yes: bool, project: Path | None) -> None:
     """
     from wikiloom.locking import FileLock
     from wikiloom.merge import merge_pages
+    from wikiloom.registry import Registry
 
     if project is None:
         project = _find_project_root(Path.cwd())
@@ -4487,15 +4488,42 @@ def merge(winner: str, loser: str, yes: bool, project: Path | None) -> None:
 
     _require_clean_tree(project, "merge")
 
+    # Pre-validate before showing the preview — it's confusing to
+    # confirm a destructive operation on pages that don't exist.
+    registry = Registry(project / "_registry")
+    winner_entry = registry.get_page(winner)
+    loser_entry = registry.get_page(loser)
+    _missing_tip = (
+        "\nTip: run `wikiloom search <keyword>` to find the right "
+        "page_id, or `wikiloom duplicates` to see candidate pairs."
+    )
+    if winner_entry is None:
+        raise click.ClickException(
+            f"Winner page not found in manifest: {winner}{_missing_tip}"
+        )
+    if loser_entry is None:
+        raise click.ClickException(
+            f"Loser page not found in manifest: {loser}{_missing_tip}"
+        )
+
     if not yes:
-        click.echo(f"Merge: {loser}  →  {winner}")
+        click.echo("")
+        click.echo(
+            click.style("Merge", bold=True)
+            + f"  {click.style(loser, fg='cyan')}  →  "
+            f"{click.style(winner, fg='cyan')}"
+        )
+        click.echo("")
         click.echo("This will:")
-        click.echo(f"  - append {loser}'s body into {winner}")
-        click.echo(f"  - rewrite all [[{loser}]] wikilinks to [[{winner}]]")
-        click.echo(f"  - move {loser}.md into wiki/archive/")
-        click.echo(f"  - record {loser} as superseded_by {winner}")
-        if not click.confirm("\nProceed?"):
-            click.echo("Aborted.")
+        click.echo(_dim(f"  • append {loser}'s body into {winner}"))
+        click.echo(_dim(f"  • rewrite [[{loser}]] wikilinks to [[{winner}]]"))
+        click.echo(_dim(f"  • move {loser}.md → wiki/archive/"))
+        click.echo(_dim(f"  • record {loser} as superseded_by {winner}"))
+        click.echo("")
+        if not click.confirm("Proceed?"):
+            click.echo("")
+            click.echo(_dim("Aborted."))
+            click.echo("")
             return
 
     try:
@@ -4641,12 +4669,27 @@ def deprecate(
         )
 
     if not yes:
-        click.echo(f"Deprecate: {page_id}  ({entry.title})")
+        click.echo("")
+        click.echo(
+            click.style("Deprecate", bold=True)
+            + f"  {click.style(page_id, fg='cyan')}  "
+            f"{_dim(f'({entry.title})')}"
+        )
+        click.echo("")
+        click.echo("This will:")
+        click.echo(
+            _dim(f"  • move wiki/{page_id}.md → wiki/archive/")
+        )
         if superseded_by:
-            click.echo(f"  superseded_by: {superseded_by}")
-        click.echo(f"  Will move wiki/{page_id}.md → wiki/archive/")
-        if not click.confirm("\nProceed?"):
-            click.echo("Aborted.")
+            click.echo(
+                _dim(f"  • record superseded_by: ")
+                + click.style(superseded_by, fg="cyan")
+            )
+        click.echo("")
+        if not click.confirm("Proceed?"):
+            click.echo("")
+            click.echo(_dim("Aborted."))
+            click.echo("")
             return
 
     with FileLock(project):
@@ -4747,19 +4790,41 @@ def purge(page_id: str, yes: bool, project: Path | None) -> None:
     archive_file = project / "wiki" / "archive" / archive_name
 
     if not yes:
-        click.echo(f"⚠ PURGE: {page_id}  ({entry.title})")
-        click.echo("  This will permanently:")
+        click.echo("")
+        click.echo(
+            f"{click.style('⚠ Purge', fg=208, bold=True)}  "
+            f"{click.style(page_id, fg='cyan')}  "
+            f"{_dim(f'({entry.title})')}"
+        )
+        click.echo("")
+        click.echo(
+            _dim(
+                "This is permanent — recoverable only via "
+                "`git revert`."
+            )
+        )
+        click.echo("This will:")
         if archive_file.exists():
-            click.echo(f"  - delete {archive_file.relative_to(project)}")
+            click.echo(
+                _dim(f"  • delete {archive_file.relative_to(project)}")
+            )
         else:
             click.echo(
-                "  - delete the manifest entry (archive file already missing)")
-        click.echo(f"  - remove the manifest entry for {page_id}")
-        click.echo("  This cannot be undone via wikiloom (only via git revert).")
-        typed = click.prompt(f"\nType the page_id to confirm",
-                             default="", show_default=False)
+                _dim("  • delete the manifest entry (archive file already missing)")
+            )
+        click.echo(
+            _dim(f"  • remove the manifest entry for {page_id}")
+        )
+        click.echo("")
+        typed = click.prompt(
+            "Type the page_id to confirm",
+            default="",
+            show_default=False,
+        )
         if typed.strip() != page_id:
-            click.echo("Aborted: confirmation did not match.")
+            click.echo("")
+            click.echo(_dim("Aborted: confirmation did not match."))
+            click.echo("")
             return
 
     with FileLock(project):
