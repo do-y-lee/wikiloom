@@ -1,5 +1,12 @@
 # WikiLoom
 
+*LLM-maintained knowledge bases with deterministic linking*
+
+[![tests](https://github.com/do-y-lee/wikiloom/actions/workflows/test.yml/badge.svg)](https://github.com/do-y-lee/wikiloom/actions/workflows/test.yml)
+[![PyPI](https://img.shields.io/pypi/v/wikiloom)](https://pypi.org/project/wikiloom/)
+[![Python](https://img.shields.io/pypi/pyversions/wikiloom)](https://pypi.org/project/wikiloom/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 WikiLoom turns raw documents into a persistent, compounding knowledge base. Ingest a PDF, markdown file, or URL — the LLM reads the source and writes structured wiki pages with deterministic linking, structural provenance, and human-edit protection. Every operation is committed to git automatically.
 
 Inspired by Andrej Karpathy's [LLM wiki gist](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f).
@@ -27,6 +34,7 @@ Inspired by Andrej Karpathy's [LLM wiki gist](https://gist.github.com/karpathy/4
 - [Workflows](#workflows)
 - [Tips](#tips)
 - [Development](#development)
+- [Contributing](#contributing)
 - [License](#license)
 
 ## How it works
@@ -640,6 +648,10 @@ Edit files under `.wikiloom/prompts/`. Each project's prompts override the packa
 ### Customizing JSON output schemas
 
 Edit files under `.wikiloom/output_formats/`. The synthesis loop validates LLM responses against `ingest_response.json` before accepting them. Tighten the schema to make the LLM's output more reliable.
+
+## Contributing
+
+Issues and pull requests welcome at [github.com/do-y-lee/wikiloom](https://github.com/do-y-lee/wikiloom). For PRs: keep diffs focused, land green tests (`pytest`), and explain the *why* in the PR body — the *what* is in the diff. See [Development](#development) above for local setup.
 
 ## License
 

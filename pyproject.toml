@@ -2,8 +2,40 @@
 name = "wikiloom"
 version = "0.1.0"
 description = "LLM-maintained knowledge bases with deterministic linking"
+readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
+authors = [
+    {name = "Do Lee", email = "do.lee.y@gmail.com"},
+]
+keywords = [
+    "llm",
+    "knowledge-base",
+    "wiki",
+    "pkm",
+    "rag",
+    "claude",
+    "anthropic",
+    "wikilinks",
+    "markdown",
+    "synthesis",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Documentation",
+    "Topic :: Text Processing :: Markup :: Markdown",
+    "Topic :: Office/Business",
+]
 
 dependencies = [
     "click>=8.0",
@@ -23,6 +55,11 @@ dependencies = [
     "fastembed>=0.3",
     "python-dotenv>=1.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/do-y-lee/wikiloom"
+Source = "https://github.com/do-y-lee/wikiloom"
+Issues = "https://github.com/do-y-lee/wikiloom/issues"
 
 [project.optional-dependencies]
 audio = ["openai-whisper>=20231117"]
