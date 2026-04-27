@@ -13,20 +13,21 @@ from wikiloom.cli import _check_and_install_spacy_model
 
 @pytest.fixture
 def model_present(monkeypatch):
-    """Pretend spaCy + the model are installed."""
-    fake_spacy = MagicMock()
-    fake_spacy.load.return_value = MagicMock()
-    monkeypatch.setitem(__import__("sys").modules, "spacy", fake_spacy)
-    return fake_spacy
+    """Pretend the model package is installed (find_spec returns a spec)."""
+    fake_spec = MagicMock()
+    monkeypatch.setattr(
+        "importlib.util.find_spec",
+        lambda name: fake_spec if name == "en_core_web_sm" else None,
+    )
+    return fake_spec
 
 
 @pytest.fixture
 def model_missing(monkeypatch):
-    """Pretend spaCy is installed but the model isn't."""
-    fake_spacy = MagicMock()
-    fake_spacy.load.side_effect = OSError("model not found")
-    monkeypatch.setitem(__import__("sys").modules, "spacy", fake_spacy)
-    return fake_spacy
+    """Pretend the model package is not installed (find_spec returns None)."""
+    monkeypatch.setattr(
+        "importlib.util.find_spec", lambda name: None
+    )
 
 
 def test_silent_when_model_already_installed(

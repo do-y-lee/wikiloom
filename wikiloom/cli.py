@@ -294,23 +294,21 @@ def _check_and_install_spacy_model(
     engine fails on the first ingest with a confusing OSError. We
     check at init time so users get one friendly Y/n prompt instead.
 
+    Detection uses ``importlib.util.find_spec`` rather than
+    ``spacy.load`` so the no-op path (model already installed — the
+    common case for repeat users) doesn't pay the 5–15s cold
+    ``import spacy`` tax. Models are installed as standalone Python
+    packages, so a sys.path scan is enough to know whether one is
+    present; we only need spaCy itself if we're about to download.
+
     Honors ``--no-interactive`` and non-TTY stdin (CI mode): prints
     the manual install command but doesn't auto-download. Same posture
     as ``_maybe_create_env_file``.
     """
-    try:
-        import spacy
-    except ImportError:
-        # spaCy itself is a hard dep in pyproject.toml, so this
-        # branch is defensive — we'd hit it only in a broken install.
-        # Bail silently rather than crash init.
-        return
+    import importlib.util
 
-    try:
-        spacy.load(model_name)
+    if importlib.util.find_spec(model_name) is not None:
         return  # already installed; nothing to do
-    except (OSError, IOError):
-        pass  # not installed — fall through to the prompt path
 
     install_cmd = f"python -m spacy download {model_name}"
 
