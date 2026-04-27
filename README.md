@@ -13,7 +13,7 @@ Inspired by Andrej Karpathy's [LLM wiki gist](https://gist.github.com/karpathy/4
 
 **Why WikiLoom vs. naive RAG?** Instead of re-embedding documents into an opaque vector store, WikiLoom builds a persistent, human-readable knowledge graph — deterministic wikilinking, structural provenance back to source chunks, and atomic git commits on every operation.
 
-> **Heads up: WikiLoom calls paid LLM APIs by default.** Anthropic, OpenAI, and Google providers cost money — typically cents per document ingested. A pre-flight budget check refuses runs that would exceed `monthly_budget_usd` in `wikiloom.toml` (default $50/mo). For zero-cost local operation, use the `ollama` provider — see [Provider options](#provider-options).
+> **Heads-up: WikiLoom calls paid LLM APIs by default.** Anthropic, OpenAI, and Google providers cost money — typically cents per document ingested. A pre-flight budget check refuses runs that would exceed `monthly_budget_usd` in `wikiloom.toml` (default $50/mo). For zero-cost local operation, use the `ollama` provider — see [Provider options](#provider-options).
 
 ## Table of contents
 
@@ -107,6 +107,8 @@ wikiloom show concepts/transformer
 ```
 
 That's it. Every step above auto-commits to git.
+
+**Heads-up on first-run downloads:** the very first command that uses embeddings (`ingest`, `query`, or `related`) downloads the default `fastembed` model (~150MB) into the local cache and pauses for ~1 minute. Subsequent calls reuse the cached weights and are fast. If you'd rather use a different embedding backend or disable embeddings entirely, see [Provider options](#provider-options).
 
 **Tip on cost:** ingest is the token-heavy operation. For a significant
 saving, configure a cheap model for ingest and a stronger model for
@@ -213,7 +215,7 @@ Run `wikiloom --help` for the command list and `wikiloom <command> --help` for a
 |---|---|
 | `wikiloom init <name> [--domain <text>] [--provider <id>] [--model <id>] [--no-interactive]` | Create a new project: directory tree, config, scaffolded indexes, git repo, and per-project README. `--provider` picks from `anthropic` (default), `openai`, `google`, `ollama`. An interactive prompt offers to paste your API key into `.env`; `--no-interactive` skips it (CI-friendly) |
 | `wikiloom save [-m "msg"] [--dry-run]` | Commit your manual edits with a `human-edit:` prefix. Covers pages under `wiki/`, `wikiloom.toml`, and prompts under `.wikiloom/prompts/` — one command for every human-editable file. Auto-bumps `frontmatter.modified`, freshens dormant → active |
-| `wikiloom rebuild-cache` | Regenerate the SQLite query cache from manifest + frontmatter (recovery tool; not normally needed) |
+| `wikiloom rebuild-cache` | Regenerate the SQLite query cache from manifest + frontmatter. Required after switching the `[embeddings]` provider or model so existing pages get re-embedded in the new vector space; otherwise occasional recovery tool |
 
 ### Ingestion
 
@@ -257,7 +259,7 @@ For unsupported pages, download as PDF and ingest the PDF instead. URL ingests g
 | Command | Description |
 |---|---|
 | `wikiloom merge <winner> <loser> [--yes]` | Combine two pages: union bodies (preserving human regions), rewrite inbound `[[loser]]` wikilinks to `[[winner]]`, deprecate the loser |
-| `wikiloom deprecate <page> [--superseded-by <other>] [--yes]` | Soft-remove a page: move to `wiki/archive/`, set `status: deprecated` |
+| `wikiloom deprecate <page> [--superseded-by <other>] [--yes]` | Soft-remove a page: move to `wiki/archive/`, set `status: deprecated`. With `--superseded-by`, also rewrites every inbound `[[X]]` wikilink across non-archived pages to the replacement |
 | `wikiloom purge <page> [--yes]` | Permanently remove an already-deprecated page (deletes the archive file AND the manifest entry). Requires typed confirmation by default |
 | `wikiloom dormant` | List candidates (active pages past their window) |
 | `wikiloom dormant --list-marked` | List currently-marked dormant pages |
@@ -454,11 +456,13 @@ the frontier reasoning of Sonnet / 2.5-pro / gpt-5.
 
 ### Embedding providers
 
-| Provider | Where it runs | Requirements | Disk impact |
-|---|---|---|---|
-| `fastembed` | Local | Bundled with the default install | ~150MB on first use |
-| `openai` | OpenAI API | `OPENAI_API_KEY`; `pip install openai` | none |
-| `sentence-transformers` | Local | `pip install sentence-transformers` | ~500MB on first use |
+| Provider | Where it runs | Requirements | Default model | Disk impact |
+|---|---|---|---|---|
+| `fastembed` | Local | Bundled with the default install | `BAAI/bge-small-en-v1.5` | ~150MB on first use |
+| `openai` | OpenAI API | `OPENAI_API_KEY`; `pip install openai` | `text-embedding-3-small` | none |
+| `sentence-transformers` | Local | `pip install sentence-transformers` | `all-MiniLM-L6-v2` | ~500MB on first use |
+
+The `model` field in `[embeddings]` is optional — omit it to use the provider's default (column above).
 
 **Default (fastembed):**
 ```toml
