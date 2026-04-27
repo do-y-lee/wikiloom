@@ -283,6 +283,85 @@ def _maybe_create_env_file(
     return "empty"
 
 
+def _check_and_install_spacy_model(
+    *, no_interactive: bool, model_name: str = "en_core_web_sm"
+) -> None:
+    """Detect spaCy's linking model; offer to install if missing.
+
+    spaCy doesn't ship ``en_core_web_sm`` in its wheel, so
+    ``pip install wikiloom`` doesn't pull it. Without it the linking
+    engine fails on the first ingest with a confusing OSError. We
+    check at init time so users get one friendly Y/n prompt instead.
+
+    Honors ``--no-interactive`` and non-TTY stdin (CI mode): prints
+    the manual install command but doesn't auto-download. Same posture
+    as ``_maybe_create_env_file``.
+    """
+    try:
+        import spacy
+    except ImportError:
+        # spaCy itself is a hard dep in pyproject.toml, so this
+        # branch is defensive — we'd hit it only in a broken install.
+        # Bail silently rather than crash init.
+        return
+
+    try:
+        spacy.load(model_name)
+        return  # already installed; nothing to do
+    except (OSError, IOError):
+        pass  # not installed — fall through to the prompt path
+
+    install_cmd = f"python -m spacy download {model_name}"
+
+    click.echo("")
+    click.echo(
+        f"The linking engine needs spaCy's "
+        f"{click.style(model_name, fg='cyan')} model (~12MB)."
+    )
+
+    if no_interactive or not sys.stdin.isatty():
+        click.echo(
+            f"  {_dim('Install with:')} {click.style(install_cmd, fg='cyan')}"
+        )
+        click.echo("")
+        return
+
+    if not click.confirm("Download now?", default=True):
+        click.echo(
+            f"  {_dim('Install later with:')} "
+            f"{click.style(install_cmd, fg='cyan')}"
+        )
+        click.echo("")
+        return
+
+    import subprocess
+
+    click.echo("")
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "spacy", "download", model_name],
+            check=False,
+        )
+    except FileNotFoundError:
+        warning = "⚠ Couldn't run spaCy. Install manually with:"
+        click.echo(
+            f"  {_dim(warning)} {click.style(install_cmd, fg='cyan')}"
+        )
+        click.echo("")
+        return
+
+    if result.returncode == 0:
+        click.echo(f"  {_check()} {model_name} installed")
+    else:
+        # Don't fail init on download error — the project is already
+        # scaffolded and the user can finish the install later.
+        click.echo(
+            f"  {_dim('⚠ Download failed (exit ' + str(result.returncode) + '). Install manually with:')} "
+            f"{click.style(install_cmd, fg='cyan')}"
+        )
+    click.echo("")
+
+
 @main.command()
 @click.argument("name")
 @click.option("--path", type=click.Path(path_type=Path), default=None,
@@ -365,6 +444,8 @@ def init(
         api_key_env=api_key_env,
         no_interactive=no_interactive,
     )
+
+    _check_and_install_spacy_model(no_interactive=no_interactive)
 
     click.echo(click.style("Next steps", bold=True))
     click.echo("")
