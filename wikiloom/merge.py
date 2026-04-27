@@ -103,7 +103,7 @@ def merge_pages(
     winner_entry.modified = now_iso()
 
     backlinks = BacklinkRegistry(project_root / "_registry", wiki_dir=wiki_dir)
-    rewrote = _rewrite_inbound_links(
+    rewrote = rewrite_inbound_links(
         wiki_dir, backlinks, loser_page_id, winner_page_id
     )
 
@@ -227,7 +227,7 @@ def _union_sources(a: list[dict], b: list[dict]) -> list[dict]:
     return out
 
 
-def _rewrite_inbound_links(
+def rewrite_inbound_links(
     wiki_dir: Path,
     backlinks: BacklinkRegistry,
     loser_page_id: str,
@@ -237,6 +237,12 @@ def _rewrite_inbound_links(
 
     Preserves any ``|display text`` segment. Returns the list of
     page_ids whose bodies were modified.
+
+    Used by both ``wikiloom merge`` (loser → winner) and
+    ``wikiloom deprecate --superseded-by`` (deprecated → replacement).
+    Archived source pages are skipped automatically because the
+    backlinks rebuilder excludes ``wiki/archive/`` from its walk —
+    historical content stays as-is.
     """
     inbound_sources: list[str] = []
     for edge in backlinks.edges:

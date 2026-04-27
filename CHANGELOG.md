@@ -20,7 +20,12 @@ Initial public release.
   ignored) controls auto-insert vs. pending review.
 - **Page lifecycle** — `active → dormant → deprecated → purged` with per-type
   configurable dormant windows. `wikiloom merge`, `deprecate`, `purge`, and
-  `dormant` cover the full lifecycle.
+  `dormant` cover the full lifecycle. `deprecate --superseded-by <Y>`
+  automatically rewrites every inbound `[[X]]` wikilink on active /
+  dormant / stub pages to `[[Y]]`, matching what `merge` does — no
+  broken links left behind. Without `--superseded-by`, the preview
+  surfaces a warning naming the active pages that will end up with
+  broken links so the user can re-run with a replacement.
 - **Human-edit protection** — `<!-- wikiloom:auto -->` marker preserves manual
   edits across re-ingest. `wikiloom save` commits human edits with a
   `human-edit:` prefix; writer commands block on uncommitted manual changes.

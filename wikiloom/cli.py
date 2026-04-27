@@ -4635,7 +4635,9 @@ def deprecate(
       \x1b[36mwikiloom deprecate concepts/old-page --superseded-by concepts/new-page\x1b[0m
       \x1b[36mwikiloom deprecate concepts/old-page --yes\x1b[0m
     """
+    from wikiloom.backlinks import BacklinkRegistry
     from wikiloom.locking import FileLock
+    from wikiloom.merge import rewrite_inbound_links
     from wikiloom.registry import Registry
 
     if project is None:
@@ -4668,6 +4670,16 @@ def deprecate(
             f"page_id for the replacement page."
         )
 
+    # Count inbound links from non-archived sources. Backlinks rebuild
+    # already excludes the archive directory, so anything in
+    # ``backlinks.edges`` originates from active / dormant / stub pages.
+    backlinks = BacklinkRegistry(
+        project / "_registry", wiki_dir=project / "wiki"
+    )
+    inbound_sources = sorted(
+        {edge.source for edge in backlinks.edges if edge.target == page_id}
+    )
+
     if not yes:
         click.echo("")
         click.echo(
@@ -4685,6 +4697,40 @@ def deprecate(
                 _dim(f"  • record superseded_by: ")
                 + click.style(superseded_by, fg="cyan")
             )
+            if inbound_sources:
+                click.echo(
+                    _dim(
+                        f"  • rewrite {len(inbound_sources)} inbound "
+                        f"[[{page_id}]] link(s) to "
+                    )
+                    + click.style(f"[[{superseded_by}]]", fg="cyan")
+                )
+        elif inbound_sources:
+            # No replacement supplied — surface the breakage risk and
+            # the actionable next step so the user can abort and re-run.
+            click.echo("")
+            click.echo(
+                f"{click.style('⚠', fg=208, bold=True)} "
+                f"{len(inbound_sources)} active page(s) link to this page; "
+                f"deprecating without --superseded-by will leave those "
+                f"links broken."
+            )
+            preview_cap = 5
+            for src in inbound_sources[:preview_cap]:
+                click.echo(_dim(f"  • {src}"))
+            if len(inbound_sources) > preview_cap:
+                click.echo(
+                    _dim(f"  … and {len(inbound_sources) - preview_cap} more")
+                )
+            click.echo("")
+            click.echo(
+                _dim(
+                    "Tip: re-run with `--superseded-by <replacement>` "
+                    "to redirect them automatically, or proceed and run "
+                    "`wikiloom lint --fix` afterward to strip the "
+                    "broken wrappers."
+                )
+            )
         click.echo("")
         if not click.confirm("Proceed?"):
             click.echo("")
@@ -4692,10 +4738,23 @@ def deprecate(
             click.echo("")
             return
 
+    rewrote_pages: list[str] = []
     with FileLock(project):
         from wikiloom.search import IndexUpdater
 
         original_path = project / "wiki" / f"{page_id}.md"
+        # Rewrite inbound links BEFORE moving the page file — the
+        # rewrite walks the wiki tree, and the page being deprecated
+        # is the canonical owner of its old slug. After deprecate_page
+        # the file moves to archive/, so any pages that still link to
+        # the original slug get fixed up in this step.
+        if superseded_by and inbound_sources:
+            rewrote_pages = rewrite_inbound_links(
+                project / "wiki",
+                backlinks,
+                page_id,
+                superseded_by,
+            )
         archive_path = registry.deprecate_page(
             page_id,
             superseded_by=superseded_by,
@@ -4703,6 +4762,11 @@ def deprecate(
             emit_event=True,
         )
         registry.save()
+        # Rebuild backlinks so the freshly-rewritten edges are
+        # reflected in backlinks.json (and the archived page's own
+        # outbound edges are dropped).
+        backlinks.rebuild()
+        backlinks.save()
         # Rebuild indexes so the deprecated page disappears from the
         # category/root indexes.
         index_paths = IndexUpdater(
@@ -4710,10 +4774,13 @@ def deprecate(
         ).rebuild_all()
         # Original path is gone (file moved) — incremental sync will
         # drop the old row. The archive file is a new page_id so it
-        # gets upserted too.
+        # gets upserted too. Rewritten source pages need to land in
+        # the cache too so query/lint see the new edges.
         touched = [original_path]
         if archive_path is not None:
             touched.append(archive_path)
+        for src in rewrote_pages:
+            touched.append(project / "wiki" / f"{src}.md")
         touched.extend(index_paths)
         _sync_cache(project, changed_files=touched)
         suffix = f" (superseded by {superseded_by})" if superseded_by else ""
@@ -4726,6 +4793,10 @@ def deprecate(
     if archive_path is not None:
         click.echo(
             _dim(f"  archived to {archive_path.relative_to(project)}")
+        )
+    if rewrote_pages:
+        click.echo(
+            _dim(f"  rewrote inbound links in {len(rewrote_pages)} page(s)")
         )
     click.echo(_dim("  to undo: `git revert HEAD`"))
     click.echo("")

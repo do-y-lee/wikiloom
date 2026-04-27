@@ -102,6 +102,158 @@ def test_deprecate_records_superseded_by(project: Path) -> None:
     assert entry.superseded_by == "concepts/new"
 
 
+def _add_active_page_with_link(
+    project_root: Path,
+    page_id: str,
+    target_page_id: str,
+    title: str = "Linker",
+) -> None:
+    """Write an active page whose body links to ``target_page_id``."""
+    wiki_dir = project_root / "wiki"
+    registry = Registry(project_root / "_registry", wiki_dir=wiki_dir)
+    entry = PageEntry(
+        title=title,
+        type=page_id.split("/", 1)[0].rstrip("s"),
+        page_id=page_id,
+        created="2026-04-19T10:00:00Z",
+        modified="2026-04-19T10:00:00Z",
+    )
+    registry.register_page(page_id, entry)
+    registry.save()
+    page_path = wiki_dir / f"{page_id}.md"
+    write_page(
+        page_path,
+        Frontmatter(
+            title=title,
+            type=entry.type,
+            created=entry.created,
+            modified=entry.modified,
+            summary=f"Summary of {title}",
+        ),
+        f"# {title}\n\nSee [[{target_page_id}]] for details.\n",
+    )
+
+
+def test_deprecate_with_superseded_by_rewrites_inbound_links(
+    project: Path,
+) -> None:
+    """When --superseded-by is given, every active inbound [[X]] link
+    is rewritten to [[Y]] in place. Mirrors what `wikiloom merge` does."""
+    from wikiloom.backlinks import BacklinkRegistry
+
+    _add_active_page(project, "concepts/old")
+    _add_active_page(project, "concepts/new")
+    _add_active_page_with_link(
+        project, "concepts/linker-1", "concepts/old", title="Linker 1",
+    )
+    _add_active_page_with_link(
+        project, "concepts/linker-2", "concepts/old", title="Linker 2",
+    )
+
+    # Rebuild backlinks so the inbound edges are visible to deprecate.
+    backlinks = BacklinkRegistry(
+        project / "_registry", wiki_dir=project / "wiki"
+    )
+    backlinks.rebuild()
+    backlinks.save()
+    repo = git.Repo(project)
+    repo.git.add("-A", "--", "wiki", "_registry")
+    repo.index.commit("seed: backlinks")
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "deprecate", "concepts/old",
+            "--superseded-by", "concepts/new",
+            "--yes",
+            "--project", str(project),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+
+    linker_1 = (
+        project / "wiki" / "concepts" / "linker-1.md"
+    ).read_text(encoding="utf-8")
+    linker_2 = (
+        project / "wiki" / "concepts" / "linker-2.md"
+    ).read_text(encoding="utf-8")
+    assert "[[concepts/new]]" in linker_1
+    assert "[[concepts/old]]" not in linker_1
+    assert "[[concepts/new]]" in linker_2
+    assert "[[concepts/old]]" not in linker_2
+
+
+def test_deprecate_without_superseded_by_does_not_rewrite_links(
+    project: Path,
+) -> None:
+    """No --superseded-by → leave inbound links as-is. Lint surfaces them
+    later. The pre-deprecation preview warns the user, but with --yes
+    we skip the prompt and proceed."""
+    from wikiloom.backlinks import BacklinkRegistry
+
+    _add_active_page(project, "concepts/old")
+    _add_active_page_with_link(
+        project, "concepts/linker", "concepts/old",
+    )
+    backlinks = BacklinkRegistry(
+        project / "_registry", wiki_dir=project / "wiki"
+    )
+    backlinks.rebuild()
+    backlinks.save()
+    repo = git.Repo(project)
+    repo.git.add("-A", "--", "wiki", "_registry")
+    repo.index.commit("seed: backlinks")
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["deprecate", "concepts/old", "--yes", "--project", str(project)],
+    )
+
+    assert result.exit_code == 0, result.output
+    linker_body = (
+        project / "wiki" / "concepts" / "linker.md"
+    ).read_text(encoding="utf-8")
+    # Link untouched — broken-link warning will surface in next lint.
+    assert "[[concepts/old]]" in linker_body
+
+
+def test_deprecate_preview_warns_about_inbound_links(
+    project: Path,
+) -> None:
+    """Without --superseded-by, the preview surfaces an orange ⚠
+    warning naming the active pages that link to the target."""
+    from wikiloom.backlinks import BacklinkRegistry
+
+    _add_active_page(project, "concepts/old")
+    _add_active_page_with_link(
+        project, "concepts/linker", "concepts/old",
+    )
+    backlinks = BacklinkRegistry(
+        project / "_registry", wiki_dir=project / "wiki"
+    )
+    backlinks.rebuild()
+    backlinks.save()
+    repo = git.Repo(project)
+    repo.git.add("-A", "--", "wiki", "_registry")
+    repo.index.commit("seed: backlinks")
+
+    runner = CliRunner()
+    # Decline the prompt so the command exits without acting.
+    result = runner.invoke(
+        main,
+        ["deprecate", "concepts/old", "--project", str(project)],
+        input="n\n",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "1 active page" in result.output
+    assert "concepts/linker" in result.output
+    assert "--superseded-by" in result.output
+
+
 def test_deprecate_refuses_unknown_superseded_by(project: Path) -> None:
     _add_active_page(project, "concepts/foo")
     runner = CliRunner()
