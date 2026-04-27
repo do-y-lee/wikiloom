@@ -41,6 +41,7 @@ _COMMAND_CATEGORIES: list[tuple[str, list[str]]] = [
             "contradictions",
             "related",
             "query",
+            "queries",
             "source",
         ],
     ),
