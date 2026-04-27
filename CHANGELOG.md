@@ -46,6 +46,12 @@ Initial public release.
   sentence-transformers. Independent of the LLM provider.
 - **Pre-flight budget enforcement** — refuses ingest runs that would exceed
   `[llm] monthly_budget_usd` (default $50/mo).
+- **Stochastic-output retries with live progress** — synthesis retries up
+  to `[llm] parse_retry_count` times (default 2) when the LLM returns
+  unparseable JSON *or* JSON that fails schema validation (e.g. missing
+  the `confidence` field on a proposed page — the failure mode hit
+  during dogfooding on Haiku). Retries and final failures surface live
+  (`↻` and `✗` glyphs) instead of being hidden in the post-run summary.
 - **Per-chunk page context (Layer 1)** — semantic retrieval of top-K
   similar pages injected into the synthesis prompt to reduce duplicate page
   creation.

@@ -382,11 +382,43 @@ def ingest(
 
             check_mark = _check()
 
-            def _on_chunk_done(n: int, total: int, tokens: int, cost: float) -> None:
-                # Columns: ✓  N/TOTAL   NN,NNN tok   $0.0045
+            def _on_chunk_done(
+                n: int, total: int, tokens: int, cost: float, retries: int
+            ) -> None:
+                # Columns: ✓  N/TOTAL   NN,NNN tok   $0.0045   [(retry K)]
+                suffix = (
+                    f"   {_dim(f'(retry {retries})')}" if retries > 0 else ""
+                )
                 click.echo(
                     f"  {check_mark} {n}/{total}   "
-                    f"{tokens:,} tok   ${cost:.4f}"
+                    f"{tokens:,} tok   ${cost:.4f}{suffix}"
+                )
+
+            def _on_chunk_retry(
+                n: int,
+                total: int,
+                attempt: int,
+                max_attempts: int,
+                reason: str,
+            ) -> None:
+                # ↻  N/TOTAL   parse error, retrying (1/2): <short reason>
+                short = reason.split("\n", 1)[0]
+                if len(short) > 60:
+                    short = short[:57] + "..."
+                click.echo(
+                    f"  {click.style('↻', fg='yellow')} {n}/{total}   "
+                    f"{_dim(f'parse error, retrying ({attempt}/{max_attempts}):')} "
+                    f"{_dim(short)}"
+                )
+
+            def _on_chunk_failed(n: int, total: int, reason: str) -> None:
+                # ✗  N/TOTAL   <short reason>
+                short = reason.split("\n", 1)[0]
+                if len(short) > 80:
+                    short = short[:77] + "..."
+                click.echo(
+                    f"  {click.style('✗', fg=208)} {n}/{total}   "
+                    f"{_dim(short)}"
                 )
 
             effective_workers = max(
@@ -416,10 +448,13 @@ def ingest(
                 project_root=project_root,
                 state=ingest_state,
                 progress_callback=_on_chunk_done,
+                retry_callback=_on_chunk_retry,
+                failure_callback=_on_chunk_failed,
                 use_page_context=effective_page_context,
                 page_context_top_k=full_cfg.ingest.page_context_top_k,
                 embedder=synthesis_embedder,
                 max_workers=full_cfg.ingest.max_workers,
+                parse_retry_count=full_cfg.llm.parse_retry_count,
             )
 
             result.total_tokens_in = synthesis.total_tokens_in

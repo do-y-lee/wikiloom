@@ -45,6 +45,13 @@ class LLMConfig:
     query_model: str = ""
     max_tokens_per_operation: int = 8000
     monthly_budget_usd: float = 50.0
+    # Retries for stochastic structured-output failures (model returned
+    # non-JSON or otherwise unparseable text). Retry yield decays fast:
+    # ~80% of bad responses recover on retry 1, ~95% by retry 2,
+    # diminishing returns beyond that. Set to 0 to disable retries
+    # entirely. Doesn't apply to network errors or rate limits — those
+    # are handled separately in the LLM client.
+    parse_retry_count: int = 2
 
     def for_ingest(self) -> str:
         return self.ingest_model or self.default_model

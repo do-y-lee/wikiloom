@@ -343,6 +343,7 @@ ingest_model  = ""                    # Optional override for `wikiloom ingest`
 query_model   = ""                    # Optional override for `wikiloom query`
 max_tokens_per_operation = 8000
 monthly_budget_usd = 50.0             # Pre-flight refuses runs that exceed this
+parse_retry_count    = 2              # Retries when the LLM returns unparseable JSON; set to 0 to disable
 
 [linking]
 ner_model = "en_core_web_sm"

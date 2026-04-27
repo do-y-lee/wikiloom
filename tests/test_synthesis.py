@@ -750,10 +750,12 @@ def test_run_synthesis_invokes_progress_callback(
     chunk_ids = ["c1", "c2"]
     llm = _mock_llm_client([_ok_response(), _ok_response()])
 
-    calls: list[tuple[int, int, int, float]] = []
+    calls: list[tuple[int, int, int, float, int]] = []
 
-    def cb(n: int, total: int, tokens: int, cost: float) -> None:
-        calls.append((n, total, tokens, cost))
+    def cb(
+        n: int, total: int, tokens: int, cost: float, retries: int
+    ) -> None:
+        calls.append((n, total, tokens, cost, retries))
 
     run_synthesis(
         chunks=chunks,
@@ -768,6 +770,291 @@ def test_run_synthesis_invokes_progress_callback(
     assert calls[0][0] == 1  # chunk 1
     assert calls[1][0] == 2  # chunk 2
     assert calls[0][1] == 2  # total
+    # No retries on the happy path.
+    assert calls[0][4] == 0
+    assert calls[1][4] == 0
+
+
+# ----------------------------------------------------------------------
+# Parse-error retry behavior
+# ----------------------------------------------------------------------
+
+
+def _make_format_error(message: str = "Expecting value") -> LLMResponseFormatError:
+    return LLMResponseFormatError(
+        model="test", raw_text="<garbage>", parse_error=message,
+    )
+
+
+def _mock_llm_with_call_order(responses: list[Any]) -> MagicMock:
+    """Mock that returns responses in raw call order, ignoring chunk index.
+
+    Use this for retry tests where the same chunk needs to yield a
+    different response on each successive synthesize() call. Safe only
+    when all chunks resolve sequentially (max_workers=1 or len(chunks)
+    == 1) — the chunk-index-based dispatch in '_mock_llm_client' is
+    the right choice for everything else.
+    """
+    client = MagicMock()
+    bound: list[Any] = []
+    for r in responses:
+        if isinstance(r, Exception):
+            bound.append(r)
+        else:
+            bound.append(
+                SynthesizeResult(
+                    result=r,
+                    metrics=LLMCallMetrics(
+                        tokens_in=100, tokens_out=200, cost_usd=0.0015,
+                        model="claude-sonnet-4-20250514",
+                    ),
+                )
+            )
+    queue = list(bound)
+
+    def side_effect(*args: Any, **kwargs: Any) -> Any:
+        if not queue:
+            raise AssertionError("mock LLM client ran out of responses")
+        nxt = queue.pop(0)
+        if isinstance(nxt, Exception):
+            raise nxt
+        return nxt
+
+    client.synthesize.side_effect = side_effect
+    return client
+
+
+def test_run_synthesis_succeeds_after_one_retry(
+    project: Path, registry: Registry, monkeypatch
+) -> None:
+    """Parse error on first attempt, success on second — counted as 1 retry."""
+    monkeypatch.setattr("time.sleep", lambda _s: None)  # skip jitter delay
+
+    chunks = [_chunk("a", 0, 1)]
+    chunk_ids = ["c1"]
+    # First call raises, second call returns ok.
+    llm = _mock_llm_with_call_order(
+        [_make_format_error(), _ok_response()]
+    )
+
+    progress_calls: list[tuple] = []
+    retry_calls: list[tuple] = []
+    failure_calls: list[tuple] = []
+
+    result = run_synthesis(
+        chunks=chunks,
+        chunk_ids=chunk_ids,
+        registry=registry,
+        llm_client=llm,
+        project_root=project,
+        progress_callback=lambda *args: progress_calls.append(args),
+        retry_callback=lambda *args: retry_calls.append(args),
+        failure_callback=lambda *args: failure_calls.append(args),
+        parse_retry_count=2,
+    )
+
+    assert result.chunks_processed == 1
+    assert result.chunks_failed == 0
+    assert len(progress_calls) == 1
+    assert progress_calls[0][4] == 1  # retries = 1
+    assert len(retry_calls) == 1
+    assert retry_calls[0][2] == 1  # attempt number
+    assert retry_calls[0][3] == 2  # max_attempts
+    assert len(failure_calls) == 0
+
+
+def test_run_synthesis_fails_after_exhausting_retries(
+    project: Path, registry: Registry, monkeypatch
+) -> None:
+    """All attempts produce parse errors → chunk marked failed, failure callback fires."""
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+
+    chunks = [_chunk("a", 0, 1)]
+    chunk_ids = ["c1"]
+    # 3 errors: first attempt + 2 retries (parse_retry_count=2).
+    llm = _mock_llm_with_call_order(
+        [_make_format_error("err1"), _make_format_error("err2"), _make_format_error("err3")]
+    )
+
+    progress_calls: list[tuple] = []
+    retry_calls: list[tuple] = []
+    failure_calls: list[tuple] = []
+
+    result = run_synthesis(
+        chunks=chunks,
+        chunk_ids=chunk_ids,
+        registry=registry,
+        llm_client=llm,
+        project_root=project,
+        progress_callback=lambda *args: progress_calls.append(args),
+        retry_callback=lambda *args: retry_calls.append(args),
+        failure_callback=lambda *args: failure_calls.append(args),
+        parse_retry_count=2,
+    )
+
+    assert result.chunks_processed == 0
+    assert result.chunks_failed == 1
+    # No success-progress fired
+    assert progress_calls == []
+    # Two retry attempts before giving up
+    assert len(retry_calls) == 2
+    # One failure callback fired with the final error
+    assert len(failure_calls) == 1
+
+
+def test_run_synthesis_disables_retry_when_count_is_zero(
+    project: Path, registry: Registry, monkeypatch
+) -> None:
+    """parse_retry_count=0 → first parse error becomes immediate failure."""
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+
+    chunks = [_chunk("a", 0, 1)]
+    chunk_ids = ["c1"]
+    llm = _mock_llm_with_call_order([_make_format_error()])
+
+    retry_calls: list[tuple] = []
+    failure_calls: list[tuple] = []
+
+    result = run_synthesis(
+        chunks=chunks,
+        chunk_ids=chunk_ids,
+        registry=registry,
+        llm_client=llm,
+        project_root=project,
+        retry_callback=lambda *args: retry_calls.append(args),
+        failure_callback=lambda *args: failure_calls.append(args),
+        parse_retry_count=0,
+    )
+
+    assert result.chunks_failed == 1
+    assert retry_calls == []
+    assert len(failure_calls) == 1
+
+
+def test_run_synthesis_succeeds_after_schema_retry(
+    project: Path, registry: Registry, monkeypatch
+) -> None:
+    """Schema validation failures (e.g. missing required field) are
+    retried on the same path as parse errors. Recovery on retry 1
+    counts as 1 retry."""
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+
+    chunks = [_chunk("a", 0, 1)]
+    chunk_ids = ["c1"]
+    # Bad response: pages_to_create entry is missing the required
+    # `confidence` field (the exact failure mode hit during dogfooding).
+    bad_response = _ok_response(
+        creates=[
+            {
+                "title": "Foo",
+                "type": "concept",
+                "suggested_slug": "foo",
+                "content_markdown": "body",
+                # confidence intentionally missing
+                "claims": [],
+            }
+        ]
+    )
+    good_response = _ok_response(
+        creates=[_create_page("foo", "Foo")]
+    )
+    llm = _mock_llm_with_call_order([bad_response, good_response])
+
+    progress_calls: list[tuple] = []
+    retry_calls: list[tuple] = []
+
+    result = run_synthesis(
+        chunks=chunks,
+        chunk_ids=chunk_ids,
+        registry=registry,
+        llm_client=llm,
+        project_root=project,
+        progress_callback=lambda *args: progress_calls.append(args),
+        retry_callback=lambda *args: retry_calls.append(args),
+        parse_retry_count=2,
+    )
+
+    assert result.chunks_processed == 1
+    assert result.chunks_failed == 0
+    assert len(progress_calls) == 1
+    assert progress_calls[0][4] == 1  # retried once
+    assert len(retry_calls) == 1
+    assert "schema validation" in retry_calls[0][4]
+
+
+def test_run_synthesis_fails_after_exhausting_schema_retries(
+    project: Path, registry: Registry, monkeypatch
+) -> None:
+    """Three consecutive schema failures → chunk marked failed,
+    failure callback fires with the schema-validation reason."""
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+
+    chunks = [_chunk("a", 0, 1)]
+    chunk_ids = ["c1"]
+    bad_response = _ok_response(
+        creates=[
+            {
+                "title": "Foo",
+                "type": "concept",
+                "suggested_slug": "foo",
+                "content_markdown": "body",
+                # confidence missing — fails validation
+                "claims": [],
+            }
+        ]
+    )
+    llm = _mock_llm_with_call_order([bad_response, bad_response, bad_response])
+
+    failure_calls: list[tuple] = []
+
+    result = run_synthesis(
+        chunks=chunks,
+        chunk_ids=chunk_ids,
+        registry=registry,
+        llm_client=llm,
+        project_root=project,
+        failure_callback=lambda *args: failure_calls.append(args),
+        parse_retry_count=2,
+    )
+
+    assert result.chunks_failed == 1
+    assert len(failure_calls) == 1
+    assert "schema validation" in failure_calls[0][2]
+
+
+def test_run_synthesis_does_not_retry_provider_errors(
+    project: Path, registry: Registry, monkeypatch
+) -> None:
+    """LLMProviderError (rate limit, auth, quota) has its own client-side
+    retry; the synthesis loop should not double-retry on top of that."""
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+
+    chunks = [_chunk("a", 0, 1)]
+    chunk_ids = ["c1"]
+    fake_exc = LLMProviderError(
+        model="test", call_type="synthesize", original=RuntimeError("rate limit"),
+    )
+    llm = _mock_llm_with_call_order([fake_exc])
+
+    retry_calls: list[tuple] = []
+    failure_calls: list[tuple] = []
+
+    result = run_synthesis(
+        chunks=chunks,
+        chunk_ids=chunk_ids,
+        registry=registry,
+        llm_client=llm,
+        project_root=project,
+        retry_callback=lambda *args: retry_calls.append(args),
+        failure_callback=lambda *args: failure_calls.append(args),
+        parse_retry_count=2,
+    )
+
+    assert result.chunks_failed == 1
+    # No retry attempts on provider errors.
+    assert retry_calls == []
+    # Failure surfaces live.
+    assert len(failure_calls) == 1
 
 
 # ----------------------------------------------------------------------

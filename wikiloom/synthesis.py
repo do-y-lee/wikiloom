@@ -109,8 +109,27 @@ class SynthesisResult:
     notes: list[str]
 
 
-ProgressCallback = Callable[[int, int, int, float], None]
-"""``(chunk_number, chunk_total, tokens_this_chunk, cost_this_chunk)``."""
+ProgressCallback = Callable[[int, int, int, float, int], None]
+"""``(chunk_number, chunk_total, tokens_this_chunk, cost_this_chunk, retries)``.
+
+``retries`` is how many retry attempts were needed before this chunk
+succeeded; ``0`` means it succeeded on the first try.
+"""
+
+RetryCallback = Callable[[int, int, int, int, str], None]
+"""``(chunk_number, chunk_total, attempt, max_attempts, reason)``.
+
+Fired the moment a retry is *about* to happen, so users see the
+system trying instead of staring at silence.
+"""
+
+FailureCallback = Callable[[int, int, str], None]
+"""``(chunk_number, chunk_total, reason)``.
+
+Fired when all retries are exhausted and the chunk is being given up
+on. Surfaces the failure live instead of hiding it in the final
+summary.
+"""
 
 
 # ----------------------------------------------------------------------
@@ -420,16 +439,29 @@ def _process_one_chunk(
     project_root: Path,
     embedder: Any | None,
     page_context_top_k: int,
-) -> tuple[int, SynthesizeResult | None, Exception | None]:
+    parse_retry_count: int = 2,
+    retry_callback: RetryCallback | None = None,
+) -> tuple[int, SynthesizeResult | None, Exception | None, int]:
     """Worker body for a single chunk's synthesis call.
 
     Runs in a ThreadPoolExecutor worker thread. Does prompt rendering
     (including optional per-chunk retrieval) and the LLM call. Returns
     errors rather than raising so the main thread can aggregate
     results from every chunk deterministically without losing any to
-    an in-flight exception. The chunk_index is returned so the main
-    thread can sort results back into source order.
+    an in-flight exception.
+
+    Retries on ``LLMResponseFormatError`` (the LLM returned text the
+    client couldn't parse as JSON) up to ``parse_retry_count`` times
+    with brief jitter between attempts, since these are stochastic
+    one-off model misfires that usually clear on a re-prompt. Provider
+    errors (rate limits, auth, quota) are caught separately and
+    returned without retry — those have their own retry handling
+    inside the LLM client. The trailing int in the return tuple is the
+    number of retries actually used (0 = succeeded first try).
     """
+    import random
+    import time as _time
+
     try:
         if per_chunk_retrieval:
             from wikiloom.page_context import (
@@ -454,10 +486,57 @@ def _process_one_chunk(
             chunk_total=chunk_total,
             manifest_context=chunk_context,
         )
-        llm_result = llm_client.synthesize(system_prompt, user_prompt)
-        return (chunk_index, llm_result, None)
-    except (LLMProviderError, LLMResponseFormatError) as exc:
-        return (chunk_index, None, exc)
+    except LLMProviderError as exc:
+        # Failures during prompt setup (e.g. embedder issues bubbling
+        # up as provider errors) — no retry, surface immediately.
+        return (chunk_index, None, exc, 0)
+
+    last_format_exc: LLMResponseFormatError | None = None
+    max_attempts = max(1, parse_retry_count + 1)
+    for attempt_index in range(max_attempts):
+        try:
+            llm_result = llm_client.synthesize(system_prompt, user_prompt)
+            # Schema validation: structurally-valid JSON can still be
+            # missing required fields (e.g. Haiku occasionally drops
+            # the `confidence` field on proposed pages). Treat that as
+            # a format error so retries cover it on the same code path
+            # as JSON-parse errors — both are stochastic LLM misfires
+            # that usually clear on a re-prompt.
+            validation_errors = validate_ingest_response(llm_result.result)
+            if validation_errors:
+                short = "; ".join(validation_errors[:3])
+                raise LLMResponseFormatError(
+                    model=llm_result.metrics.model,
+                    raw_text=str(llm_result.result),
+                    parse_error=f"schema validation: {short}",
+                )
+            return (chunk_index, llm_result, None, attempt_index)
+        except LLMResponseFormatError as exc:
+            last_format_exc = exc
+            attempts_remaining = max_attempts - attempt_index - 1
+            if attempts_remaining > 0:
+                if retry_callback is not None:
+                    retry_callback(
+                        chunk_index,
+                        chunk_total,
+                        attempt_index + 1,
+                        parse_retry_count,
+                        str(exc),
+                    )
+                # Brief jitter to "shake loose" non-determinism in the
+                # model's response. Not exponential backoff — these
+                # aren't transport errors.
+                _time.sleep(0.5 + random.random())
+                continue
+            return (chunk_index, None, exc, attempt_index)
+        except LLMProviderError as exc:
+            # Provider errors (rate limits, auth, quota) have their
+            # own retry handling inside the client. Don't double-retry.
+            return (chunk_index, None, exc, attempt_index)
+
+    # Defensive: loop should always return inside, but if max_attempts
+    # was somehow 0 we land here.
+    return (chunk_index, None, last_format_exc, 0)
 
 
 def run_synthesis(
@@ -468,10 +547,13 @@ def run_synthesis(
     project_root: Path,
     state: IngestState | None = None,
     progress_callback: ProgressCallback | None = None,
+    retry_callback: RetryCallback | None = None,
+    failure_callback: FailureCallback | None = None,
     use_page_context: bool = True,
     page_context_top_k: int = 10,
     embedder: Any | None = None,
     max_workers: int = 2,
+    parse_retry_count: int = 2,
 ) -> SynthesisResult:
     """Run LLM synthesis across every chunk and return aggregated results.
 
@@ -555,7 +637,9 @@ def run_synthesis(
         ct = int(chunk.metadata.get("chunk_total", len(chunks)))
         indexed_inputs.append((ci, ct, chunk, chunk_id))
 
-    results: dict[int, tuple[SynthesizeResult | None, Exception | None, str, int]] = {}
+    results: dict[
+        int, tuple[SynthesizeResult | None, Exception | None, str, int, int]
+    ] = {}
     provider_failures = 0
     abort_trigger: tuple[int, int, Exception] | None = None
     completed_count = 0
@@ -576,6 +660,8 @@ def run_synthesis(
                 project_root=project_root,
                 embedder=embedder,
                 page_context_top_k=page_context_top_k,
+                parse_retry_count=parse_retry_count,
+                retry_callback=retry_callback,
             ): (ci, ct, chunk_id)
             for (ci, ct, chunk, chunk_id) in indexed_inputs
         }
@@ -583,11 +669,13 @@ def run_synthesis(
         for future in as_completed(future_to_meta):
             meta_ci, meta_ct, meta_chunk_id = future_to_meta[future]
             try:
-                ci_returned, llm_result, err = future.result()
+                ci_returned, llm_result, err, retries = future.result()
             except Exception as exc:  # unexpected worker crash / cancellation
-                ci_returned, llm_result, err = meta_ci, None, exc
+                ci_returned, llm_result, err, retries = meta_ci, None, exc, 0
 
-            results[ci_returned] = (llm_result, err, meta_chunk_id, meta_ct)
+            results[ci_returned] = (
+                llm_result, err, meta_chunk_id, meta_ct, retries
+            )
             completed_count += 1
 
             # Live progress: fire callback as each future finishes, using
@@ -602,7 +690,14 @@ def run_synthesis(
                     meta_ct,
                     chunk_total_tokens,
                     llm_result.metrics.cost_usd,
+                    retries,
                 )
+            elif failure_callback is not None and err is not None:
+                # Surface the failure live instead of hiding it in the
+                # final summary. Trim multi-line errors to one line so
+                # the progress stream stays scannable.
+                reason = str(err).split("\n", 1)[0]
+                failure_callback(ci_returned + 1, meta_ct, reason)
 
             if isinstance(err, LLMProviderError):
                 provider_failures += 1
@@ -625,7 +720,7 @@ def run_synthesis(
     # dedup, state writes, and page-proposal ordering are deterministic
     # regardless of which worker finished first.
     for ci in sorted(results.keys()):
-        llm_result, err, chunk_id, ct = results[ci]
+        llm_result, err, chunk_id, ct, _retries = results[ci]
 
         if isinstance(err, LLMProviderError) or isinstance(err, LLMResponseFormatError):
             failed += 1
@@ -653,16 +748,10 @@ def run_synthesis(
         total_out += llm_result.metrics.tokens_out
         total_cost += llm_result.metrics.cost_usd
 
-        validation_errors = validate_ingest_response(llm_result.result)
-        if validation_errors:
-            failed += 1
-            short = "; ".join(validation_errors[:3])
-            notes.append(
-                f"chunk {ci + 1}/{ct}: schema validation failed: {short}"
-            )
-            if state is not None:
-                state.mark_chunk_failed(ci, short)
-            continue
+        # Schema validation now happens inside _process_one_chunk so it
+        # benefits from the retry loop. Anything that reaches here has
+        # already passed validation; the worker would otherwise have
+        # raised LLMResponseFormatError.
 
         data = llm_result.result
 
