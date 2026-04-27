@@ -62,7 +62,11 @@ The LLM handles judgment (reading sources, extracting claims, assessing confiden
 
 ## Installation
 
-Requires Python 3.10–3.13. spaCy (used by the linking engine) ships prebuilt wheels for 3.10–3.13 but does not yet publish a wheel for 3.14 — on 3.14 pip falls back to a source build that typically fails on spaCy's Cython/Thinc deps. If you're on 3.14, use a 3.10–3.13 virtualenv until spaCy publishes a matching wheel.
+**Supported Python versions:**
+
+- **Linux, Windows, Apple Silicon Macs:** Python 3.10–3.13.
+- **Intel Macs:** Python 3.10–3.12. `onnxruntime` (a transitive dependency for embeddings) no longer publishes Intel macOS wheels for Python 3.13+.
+- **Python 3.14:** not yet supported on any platform — spaCy hasn't published a 3.14 wheel.
 
 ```bash
 git clone https://github.com/do-y-lee/wikiloom.git && cd wikiloom
