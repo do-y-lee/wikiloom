@@ -1,0 +1,16 @@
+flowchart TD
+    src["source file<br/>(PDF / MD / URL)"]
+    extract["extract + chunk"]
+    synth["LLM synthesis"]
+    link["deterministic linker"]
+    wiki[("wiki/")]
+    commit["atomic git commit<br/><i>ingest:</i>"]
+
+    src --> extract --> synth --> link --> wiki --> commit
+
+    extract -. side output .-> raw["raw/ copy"]
+    synth -. validated .-> schema["JSON schema check<br/>→ pages written with<br/>sources + chunk_ids in frontmatter"]
+    link -. uses .-> ner["spaCy NER + rapidfuzz match<br/>→ inserts wikilinks, rebuilds backlinks<br/>→ stubs auto-created<br/>→ pending.json for low-confidence links"]
+
+    classDef sideNote fill:#f6f8fa,stroke:#d0d7de,color:#57606a,font-style:italic;
+    class raw,schema,ner sideNote;

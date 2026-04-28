@@ -1,6 +1,6 @@
 # WikiLoom
 
-*LLM-maintained knowledge bases with deterministic linking*
+_LLM-maintained knowledge bases with deterministic linking_
 
 [![tests](https://github.com/do-y-lee/wikiloom/actions/workflows/test.yml/badge.svg)](https://github.com/do-y-lee/wikiloom/actions/workflows/test.yml)
 [![PyPI](https://img.shields.io/pypi/v/wikiloom)](https://pypi.org/project/wikiloom/)
@@ -39,24 +39,7 @@ Inspired by Andrej Karpathy's [LLM wiki gist](https://gist.github.com/karpathy/4
 
 ## How it works
 
-```mermaid
-flowchart TD
-    src["source file<br/>(PDF / MD / URL)"]
-    extract["extract + chunk"]
-    synth["LLM synthesis"]
-    link["deterministic linker"]
-    wiki[("wiki/")]
-    commit["atomic git commit<br/><i>ingest:</i>"]
-
-    src --> extract --> synth --> link --> wiki --> commit
-
-    extract -. side output .-> raw["raw/ copy"]
-    synth -. validated .-> schema["JSON schema check<br/>→ pages written with<br/>sources + chunk_ids in frontmatter"]
-    link -. uses .-> ner["spaCy NER + rapidfuzz match<br/>→ inserts wikilinks, rebuilds backlinks<br/>→ stubs auto-created<br/>→ pending.json for low-confidence links"]
-
-    classDef sideNote fill:#f6f8fa,stroke:#d0d7de,color:#57606a,font-style:italic;
-    class raw,schema,ner sideNote;
-```
+![Ingest pipeline](https://raw.githubusercontent.com/do-y-lee/wikiloom/main/docs/img/wikiloom_ingest_pipeline.svg)
 
 The LLM handles judgment (reading sources, extracting claims, assessing confidence). Everything after the LLM call is deterministic: linking, backlink graph, index regeneration, git commit. Every WikiLoom command that modifies state auto-commits with a classifying prefix (`ingest:`, `lint:`, `merge:`, etc.) so you never have to type `git`.
 
@@ -152,6 +135,7 @@ For **normal updates** (re-ingesting a different source that updates the page), 
 <!-- wikiloom:auto -->
 
 ## Architecture
+
 ... (LLM-generated content)
 ```
 
@@ -168,15 +152,15 @@ wikiloom source <chunk_id>                            # see the original chunk t
 
 Every command that modifies wiki content auto-commits with a classifying prefix:
 
-| Prefix | Created by |
-|---|---|
-| `init:` | `wikiloom init` |
-| `ingest:` | `wikiloom ingest` |
-| `lint:` | `wikiloom lint --fix` |
-| `relink:` / `review:` / `related:` | linker workflow commands |
-| `merge:` / `deprecate:` | page lifecycle commands |
-| `dormant:` | `wikiloom dormant` mark/unmark |
-| `human-edit:` | **you**, via `wikiloom save` after editing pages, `wikiloom.toml`, or prompts by hand |
+| Prefix                             | Created by                                                                            |
+| ---------------------------------- | ------------------------------------------------------------------------------------- |
+| `init:`                            | `wikiloom init`                                                                       |
+| `ingest:`                          | `wikiloom ingest`                                                                     |
+| `lint:`                            | `wikiloom lint --fix`                                                                 |
+| `relink:` / `review:` / `related:` | linker workflow commands                                                              |
+| `merge:` / `deprecate:`            | page lifecycle commands                                                               |
+| `dormant:`                         | `wikiloom dormant` mark/unmark                                                        |
+| `human-edit:`                      | **you**, via `wikiloom save` after editing pages, `wikiloom.toml`, or prompts by hand |
 
 Writer commands also **block** if you have uncommitted edits under `wiki/`, telling you to run `wikiloom save` first — so manual page edits never accidentally land inside an `ingest:` commit. Dirty `wikiloom.toml` or prompt edits produce a passive nudge but don't block, since they can't collide with an auto-commit's output.
 
@@ -211,25 +195,25 @@ Run `wikiloom --help` for the command list and `wikiloom <command> --help` for a
 
 ### Project lifecycle
 
-| Command | Description |
-|---|---|
+| Command                                                                                      | Description                                                                                                                                                                                                                                                                                |
+| -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `wikiloom init <name> [--domain <text>] [--provider <id>] [--model <id>] [--no-interactive]` | Create a new project: directory tree, config, scaffolded indexes, git repo, and per-project README. `--provider` picks from `anthropic` (default), `openai`, `google`, `ollama`. An interactive prompt offers to paste your API key into `.env`; `--no-interactive` skips it (CI-friendly) |
-| `wikiloom save [-m "msg"] [--dry-run]` | Commit your manual edits with a `human-edit:` prefix. Covers pages under `wiki/`, `wikiloom.toml`, and prompts under `.wikiloom/prompts/` — one command for every human-editable file. Auto-bumps `frontmatter.modified`, freshens dormant → active |
-| `wikiloom rebuild-cache` | Regenerate the SQLite query cache from manifest + frontmatter. Required after switching the `[embeddings]` provider or model so existing pages get re-embedded in the new vector space; otherwise occasional recovery tool |
+| `wikiloom save [-m "msg"] [--dry-run]`                                                       | Commit your manual edits with a `human-edit:` prefix. Covers pages under `wiki/`, `wikiloom.toml`, and prompts under `.wikiloom/prompts/` — one command for every human-editable file. Auto-bumps `frontmatter.modified`, freshens dormant → active                                        |
+| `wikiloom rebuild-cache`                                                                     | Regenerate the SQLite query cache from manifest + frontmatter. Required after switching the `[embeddings]` provider or model so existing pages get re-embedded in the new vector space; otherwise occasional recovery tool                                                                 |
 
 ### Ingestion
 
-| Command | Description |
-|---|---|
+| Command                                                       | Description                                                                                                                                                                        |
+| ------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `wikiloom ingest <file-or-url> [--force] [--no-page-context]` | Ingest a source, synthesize pages, link, commit. `--force` re-runs even if the source was already ingested. `--no-page-context` disables per-chunk semantic retrieval for this run |
 
 **What ingests well**
 
-| Tier | Formats | Notes |
-|---|---|---|
-| **Best — clean extraction, strong synthesis** | `.md`, `.txt`, `.rst`, text-based `.pdf`, URLs (`http://`, `https://`) | Markdown / plain text are native. PDFs need a text layer — scanned PDFs extract as empty (no OCR). The URL extractor strips nav, ads, and boilerplate before synthesis. |
-| **Good — supported with caveats** | `.docx`, `.pptx`, code files (`.py`, `.sql`, `.js`, `.ts`, `.tsx`, `.jsx`, `.go`, `.rs`, `.java`, `.rb`, `.cs`, `.cpp`, `.c`, `.sh`), config / IaC (`.yaml`, `.yml`, `.json`, `.toml`, `.dockerfile`, `.tf`, `.hcl`, `.proto`, `.graphql`) | Office docs flatten tables / layout and skip embedded images. Code and config ingest as plain text with language context — strong on docs, comments, and schemas; weaker on pure algorithmic code (the LLM tends to re-describe behavior rather than extract domain knowledge). |
-| **Not supported today** | `.xls`, `.xlsx`, `.csv` (large), images (`.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`), standalone `.html` | Excel: export to `.csv` or `.md` first. Large CSV tables don't synthesize well — small ones may work as plain text. Images currently emit a placeholder (no vision / OCR). For HTML, host at a URL and ingest the URL instead. |
+| Tier                                          | Formats                                                                                                                                                                                                                                    | Notes                                                                                                                                                                                                                                                                           |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Best — clean extraction, strong synthesis** | `.md`, `.txt`, `.rst`, text-based `.pdf`, URLs (`http://`, `https://`)                                                                                                                                                                     | Markdown / plain text are native. PDFs need a text layer — scanned PDFs extract as empty (no OCR). The URL extractor strips nav, ads, and boilerplate before synthesis.                                                                                                         |
+| **Good — supported with caveats**             | `.docx`, `.pptx`, code files (`.py`, `.sql`, `.js`, `.ts`, `.tsx`, `.jsx`, `.go`, `.rs`, `.java`, `.rb`, `.cs`, `.cpp`, `.c`, `.sh`), config / IaC (`.yaml`, `.yml`, `.json`, `.toml`, `.dockerfile`, `.tf`, `.hcl`, `.proto`, `.graphql`) | Office docs flatten tables / layout and skip embedded images. Code and config ingest as plain text with language context — strong on docs, comments, and schemas; weaker on pure algorithmic code (the LLM tends to re-describe behavior rather than extract domain knowledge). |
+| **Not supported today**                       | `.xls`, `.xlsx`, `.csv` (large), images (`.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`), standalone `.html`                                                                                                                                     | Excel: export to `.csv` or `.md` first. Large CSV tables don't synthesize well — small ones may work as plain text. Images currently emit a placeholder (no vision / OCR). For HTML, host at a URL and ingest the URL instead.                                                  |
 
 **URL ingestion:** `wikiloom ingest https://example.com/page` works on **static HTML sites** — documentation, blog posts, Wikipedia, most MkDocs/Docusaurus/Sphinx-rendered docs. The `http://` or `https://` scheme is required — bare hostnames like `example.com/page` are treated as local file paths and fail with "No such file." It **does not work** on:
 
@@ -241,53 +225,53 @@ For unsupported pages, download as PDF and ingest the PDF instead. URL ingests g
 
 ### Reading and exploring
 
-| Command | Description |
-|---|---|
-| `wikiloom query "<question>" [--detail] [--max-pages N]` | Ask a question grounded in wiki content. `--detail` shows sources, confidence, and last-modified per source |
-| `wikiloom query --last-detail` | Show detail for the most recent query (no LLM call) |
-| `wikiloom query --save-last` | Save the most recent answer as a `wiki/syntheses/` page |
-| `wikiloom queries [--show <id>] [--save <id>] [--all]` | Browse the rolling cache of past `query` runs. Default lists the 20 most recent (id, timestamp, question snippet, confidence). `--show` prints the full answer + sources for an entry (no LLM call); `--save` promotes that entry to a synthesis page. Retention controlled by `[query] history_size` |
-| `wikiloom show <page> [--field <name>] [--json]` | Show a page's frontmatter. `--field` extracts one field; `chunk_ids` flattens across sources |
-| `wikiloom links <page>` | Show all pages linked to and from a given page |
-| `wikiloom related <page> [-n N] [--save] [--link]` | Find pages semantically similar to one. `--save` writes them into frontmatter; `--link` appends a "Related Pages" wikilink section to the body |
-| `wikiloom orphans` | List pages with no inbound or outbound wikilinks |
-| `wikiloom duplicates [--review] [--auto-merge]` | Find near-duplicate pairs by slug fuzzy match + embedding cosine. `--review` walks each pair interactively; `--auto-merge` batches obvious singular/plural variants |
-| `wikiloom source <chunk_id>` | Print the exact source text the LLM saw for a chunk |
+| Command                                                  | Description                                                                                                                                                                                                                                                                                           |
+| -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `wikiloom query "<question>" [--detail] [--max-pages N]` | Ask a question grounded in wiki content. `--detail` shows sources, confidence, and last-modified per source                                                                                                                                                                                           |
+| `wikiloom query --last-detail`                           | Show detail for the most recent query (no LLM call)                                                                                                                                                                                                                                                   |
+| `wikiloom query --save-last`                             | Save the most recent answer as a `wiki/syntheses/` page                                                                                                                                                                                                                                               |
+| `wikiloom queries [--show <id>] [--save <id>] [--all]`   | Browse the rolling cache of past `query` runs. Default lists the 20 most recent (id, timestamp, question snippet, confidence). `--show` prints the full answer + sources for an entry (no LLM call); `--save` promotes that entry to a synthesis page. Retention controlled by `[query] history_size` |
+| `wikiloom show <page> [--field <name>] [--json]`         | Show a page's frontmatter. `--field` extracts one field; `chunk_ids` flattens across sources                                                                                                                                                                                                          |
+| `wikiloom links <page>`                                  | Show all pages linked to and from a given page                                                                                                                                                                                                                                                        |
+| `wikiloom related <page> [-n N] [--save] [--link]`       | Find pages semantically similar to one. `--save` writes them into frontmatter; `--link` appends a "Related Pages" wikilink section to the body                                                                                                                                                        |
+| `wikiloom orphans`                                       | List pages with no inbound or outbound wikilinks                                                                                                                                                                                                                                                      |
+| `wikiloom duplicates [--review] [--auto-merge]`          | Find near-duplicate pairs by slug fuzzy match + embedding cosine. `--review` walks each pair interactively; `--auto-merge` batches obvious singular/plural variants                                                                                                                                   |
+| `wikiloom source <chunk_id>`                             | Print the exact source text the LLM saw for a chunk                                                                                                                                                                                                                                                   |
 
 ### Page lifecycle
 
-| Command | Description |
-|---|---|
-| `wikiloom merge <loser> <winner> [--yes]` | Combine two pages — LOSER first, WINNER second (matches "merge X into Y"). Union bodies (preserving human regions), rewrite inbound `[[loser]]` wikilinks to `[[winner]]`, deprecate the loser |
-| `wikiloom deprecate <page> [--superseded-by <other>] [--yes]` | Soft-remove a page: move to `wiki/archive/`, set `status: deprecated`. With `--superseded-by`, also rewrites every inbound `[[X]]` wikilink across non-archived pages to the replacement |
-| `wikiloom purge <page> [--yes]` | Permanently remove an already-deprecated page (deletes the archive file AND the manifest entry). Requires typed confirmation by default |
-| `wikiloom dormant` | List candidates (active pages past their window) |
-| `wikiloom dormant --list-marked` | List currently-marked dormant pages |
-| `wikiloom dormant --windows` | Show window config by type |
-| `wikiloom dormant <page> [--unmark]` | Manually mark/unmark a page as dormant |
-| `wikiloom dormant --review` | Walk through dormant candidates interactively |
+| Command                                                       | Description                                                                                                                                                                                    |
+| ------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `wikiloom merge <loser> <winner> [--yes]`                     | Combine two pages — LOSER first, WINNER second (matches "merge X into Y"). Union bodies (preserving human regions), rewrite inbound `[[loser]]` wikilinks to `[[winner]]`, deprecate the loser |
+| `wikiloom deprecate <page> [--superseded-by <other>] [--yes]` | Soft-remove a page: move to `wiki/archive/`, set `status: deprecated`. With `--superseded-by`, also rewrites every inbound `[[X]]` wikilink across non-archived pages to the replacement       |
+| `wikiloom purge <page> [--yes]`                               | Permanently remove an already-deprecated page (deletes the archive file AND the manifest entry). Requires typed confirmation by default                                                        |
+| `wikiloom dormant`                                            | List candidates (active pages past their window)                                                                                                                                               |
+| `wikiloom dormant --list-marked`                              | List currently-marked dormant pages                                                                                                                                                            |
+| `wikiloom dormant --windows`                                  | Show window config by type                                                                                                                                                                     |
+| `wikiloom dormant <page> [--unmark]`                          | Manually mark/unmark a page as dormant                                                                                                                                                         |
+| `wikiloom dormant --review`                                   | Walk through dormant candidates interactively                                                                                                                                                  |
 
 ### Maintenance
 
-| Command | Description |
-|---|---|
-| `wikiloom lint [--fix]` | Run health checks (broken links, missing frontmatter, duplicates, dormant candidates). Default is check-only — prints a report and exits 1 if issues are found. `--fix` applies auto-repairs (broken links, frontmatter only — never auto-marks dormant) |
-| `wikiloom relink` | Re-run the linker across every page (useful when new pages were added that earlier pages should link to) |
-| `wikiloom review` | List low-confidence link candidates from `pending.json` |
-| `wikiloom review --accept-all` | Insert every pending link into its source page |
-| `wikiloom review --clear` | Discard all pending candidates |
-| `wikiloom reindex` | Regenerate root and sub-index files |
-| `wikiloom protect` | Scan for pages whose human-edit flag drifted from git history |
-| `wikiloom protect --sync` | Apply git truth to the manifest + frontmatter |
+| Command                        | Description                                                                                                                                                                                                                                              |
+| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `wikiloom lint [--fix]`        | Run health checks (broken links, missing frontmatter, duplicates, dormant candidates). Default is check-only — prints a report and exits 1 if issues are found. `--fix` applies auto-repairs (broken links, frontmatter only — never auto-marks dormant) |
+| `wikiloom relink`              | Re-run the linker across every page (useful when new pages were added that earlier pages should link to)                                                                                                                                                 |
+| `wikiloom review`              | List low-confidence link candidates from `pending.json`                                                                                                                                                                                                  |
+| `wikiloom review --accept-all` | Insert every pending link into its source page                                                                                                                                                                                                           |
+| `wikiloom review --clear`      | Discard all pending candidates                                                                                                                                                                                                                           |
+| `wikiloom reindex`             | Regenerate root and sub-index files                                                                                                                                                                                                                      |
+| `wikiloom protect`             | Scan for pages whose human-edit flag drifted from git history                                                                                                                                                                                            |
+| `wikiloom protect --sync`      | Apply git truth to the manifest + frontmatter                                                                                                                                                                                                            |
 
 ### Observability
 
-| Command | Description |
-|---|---|
-| `wikiloom status` | Project overview: page counts by type/status, human-edited count, backlinks, chunks, sources, last event, total tokens + cost |
-| `wikiloom log [-n N]` | Recent LLM / system events from `wiki/log.md`, newest first |
+| Command                 | Description                                                                                                                     |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `wikiloom status`       | Project overview: page counts by type/status, human-edited count, backlinks, chunks, sources, last event, total tokens + cost   |
+| `wikiloom log [-n N]`   | Recent LLM / system events from `wiki/log.md`, newest first                                                                     |
 | `wikiloom edits [-n N]` | Recent human edits committed via `wikiloom save` (date, author, subject, hash). Complements `wikiloom log` for multi-user audit |
-| `wikiloom cost` | Token usage and spend breakdown by event type, with monthly budget percentage |
+| `wikiloom cost`         | Token usage and spend breakdown by event type, with monthly budget percentage                                                   |
 
 ## Project structure
 
@@ -395,17 +379,19 @@ and generates a matching `.env.example`. Behind the scenes WikiLoom
 delegates to litellm, so the model naming convention follows litellm's
 and other providers litellm supports may also work via manual config.
 
-| Provider preset | Where it runs | Requirements | Default model |
-|---|---|---|---|
-| `anthropic` (default) | Anthropic API | `ANTHROPIC_API_KEY` | `claude-sonnet-4-6` |
-| `openai` | OpenAI API | `OPENAI_API_KEY` | `gpt-5` |
-| `google` | Google AI Studio API (Gemini) | `GEMINI_API_KEY` | `gemini/gemini-2.5-pro` |
-| `ollama` | Local machine | Ollama installed + model pulled locally | `llama3` |
+| Provider preset       | Where it runs                 | Requirements                            | Default model           |
+| --------------------- | ----------------------------- | --------------------------------------- | ----------------------- |
+| `anthropic` (default) | Anthropic API                 | `ANTHROPIC_API_KEY`                     | `claude-sonnet-4-6`     |
+| `openai`              | OpenAI API                    | `OPENAI_API_KEY`                        | `gpt-5`                 |
+| `google`              | Google AI Studio API (Gemini) | `GEMINI_API_KEY`                        | `gemini/gemini-2.5-pro` |
+| `ollama`              | Local machine                 | Ollama installed + model pulled locally | `llama3`                |
 
 **Anthropic (default):**
+
 ```bash
 wikiloom init my-wiki --provider anthropic
 ```
+
 ```toml
 [llm]
 provider = "anthropic"
@@ -413,9 +399,11 @@ default_model = "claude-sonnet-4-6"
 ```
 
 **OpenAI:**
+
 ```bash
 wikiloom init my-wiki --provider openai
 ```
+
 ```toml
 [llm]
 provider = "openai"
@@ -423,9 +411,11 @@ default_model = "gpt-5"
 ```
 
 **Google (Gemini):**
+
 ```bash
 wikiloom init my-wiki --provider google
 ```
+
 ```toml
 [llm]
 provider = "google"
@@ -433,6 +423,7 @@ default_model = "gemini/gemini-2.5-pro"
 ```
 
 **Ollama (local, no API key, no cost):**
+
 ```bash
 # 1. Install Ollama from https://ollama.com and pull a model
 ollama pull llama3
@@ -442,6 +433,7 @@ wikiloom init my-wiki --provider ollama
 # 3. Override model if you want something other than llama3
 wikiloom init my-wiki --provider ollama --model gemma3
 ```
+
 ```toml
 [llm]
 provider = "ollama"
@@ -456,15 +448,16 @@ the frontier reasoning of Sonnet / 2.5-pro / gpt-5.
 
 ### Embedding providers
 
-| Provider | Where it runs | Requirements | Default model | Disk impact |
-|---|---|---|---|---|
-| `fastembed` | Local | Bundled with the default install | `BAAI/bge-small-en-v1.5` | ~150MB on first use |
-| `openai` | OpenAI API | `OPENAI_API_KEY`; `pip install openai` | `text-embedding-3-small` | none |
-| `sentence-transformers` | Local | `pip install sentence-transformers` | `all-MiniLM-L6-v2` | ~500MB on first use |
+| Provider                | Where it runs | Requirements                           | Default model            | Disk impact         |
+| ----------------------- | ------------- | -------------------------------------- | ------------------------ | ------------------- |
+| `fastembed`             | Local         | Bundled with the default install       | `BAAI/bge-small-en-v1.5` | ~150MB on first use |
+| `openai`                | OpenAI API    | `OPENAI_API_KEY`; `pip install openai` | `text-embedding-3-small` | none                |
+| `sentence-transformers` | Local         | `pip install sentence-transformers`    | `all-MiniLM-L6-v2`       | ~500MB on first use |
 
 The `model` field in `[embeddings]` is optional — omit it to use the provider's default (column above).
 
 **Default (fastembed):**
+
 ```toml
 [embeddings]
 provider = "fastembed"
@@ -472,6 +465,7 @@ enabled = true
 ```
 
 **OpenAI:**
+
 ```toml
 [embeddings]
 provider = "openai"
@@ -480,6 +474,7 @@ enabled = true
 ```
 
 **sentence-transformers:**
+
 ```toml
 [embeddings]
 provider = "sentence-transformers"
@@ -488,6 +483,7 @@ enabled = true
 ```
 
 To disable embeddings entirely (FTS-only search, no semantic retrieval):
+
 ```toml
 [embeddings]
 enabled = false
@@ -660,7 +656,7 @@ Edit files under `.wikiloom/output_formats/`. The synthesis loop validates LLM r
 
 ## Contributing
 
-Issues and pull requests welcome at [github.com/do-y-lee/wikiloom](https://github.com/do-y-lee/wikiloom). For PRs: keep diffs focused, land green tests (`pytest`), and explain the *why* in the PR body — the *what* is in the diff. See [Development](#development) above for local setup.
+Issues and pull requests welcome at [github.com/do-y-lee/wikiloom](https://github.com/do-y-lee/wikiloom). For PRs: keep diffs focused, land green tests (`pytest`), and explain the _why_ in the PR body — the _what_ is in the diff. See [Development](#development) above for local setup.
 
 ## License
 
