@@ -258,7 +258,7 @@ For unsupported pages, download as PDF and ingest the PDF instead. URL ingests g
 
 | Command | Description |
 |---|---|
-| `wikiloom merge <winner> <loser> [--yes]` | Combine two pages: union bodies (preserving human regions), rewrite inbound `[[loser]]` wikilinks to `[[winner]]`, deprecate the loser |
+| `wikiloom merge <loser> <winner> [--yes]` | Combine two pages — LOSER first, WINNER second (matches "merge X into Y"). Union bodies (preserving human regions), rewrite inbound `[[loser]]` wikilinks to `[[winner]]`, deprecate the loser |
 | `wikiloom deprecate <page> [--superseded-by <other>] [--yes]` | Soft-remove a page: move to `wiki/archive/`, set `status: deprecated`. With `--superseded-by`, also rewrites every inbound `[[X]]` wikilink across non-archived pages to the replacement |
 | `wikiloom purge <page> [--yes]` | Permanently remove an already-deprecated page (deletes the archive file AND the manifest entry). Requires typed confirmation by default |
 | `wikiloom dormant` | List candidates (active pages past their window) |
@@ -522,7 +522,7 @@ If you forget to save, the next writer command (`ingest`, `lint --fix`, etc.) wi
 
 ```bash
 wikiloom duplicates                   # see suspect pairs with suggested winner
-wikiloom merge concepts/transformer concepts/transformer-architecture
+wikiloom merge concepts/transformer-architecture concepts/transformer
 ```
 
 ### Reconcile contradictions

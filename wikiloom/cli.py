@@ -2549,7 +2549,13 @@ def cost(project: Path | None) -> None:
     click.echo("")
     click.echo(click.style("Usage by event type", bold=True))
     click.echo("")
-    header = f"  {'Event':<16} {'Count':>8} {'Tokens':>12} {'Cost':>10}"
+    # Column widths shared by header and rows so they line up.
+    # Event width is wider than the longest known event type name.
+    EVENT_W, COUNT_W, TOKENS_W, COST_W = 16, 8, 12, 10
+    header = (
+        f"  {'Event':<{EVENT_W}} {'Count':>{COUNT_W}} "
+        f"{'Tokens':>{TOKENS_W}} {'Cost':>{COST_W}}"
+    )
     click.echo(_dim(header))
     for etype in sorted(paid):
         b = paid[etype]
@@ -2559,9 +2565,13 @@ def cost(project: Path | None) -> None:
         total_tokens += t
         total_cost += c
         total_events += n
+        # Pad first, then color — ANSI escape codes don't contribute to
+        # visible width, so f-string padding can't account for them.
+        event_label = click.style(etype.ljust(EVENT_W), fg="cyan")
+        cost_label = _dim(f"${c:.2f}".rjust(COST_W))
         click.echo(
-            f"  {click.style(etype, fg='cyan'):<25} "
-            f"{n:>8} {t:>12,} {_dim(f'${c:>7.2f}')}"
+            f"  {event_label} {n:>{COUNT_W}} "
+            f"{t:>{TOKENS_W},} {cost_label}"
         )
 
     click.echo("")
@@ -3443,7 +3453,7 @@ def stubs(limit: int | None, project: Path | None) -> None:
         _dim(
             f"Tip: `wikiloom show {example_pid}` to inspect, then either "
             f"edit + `wikiloom save`, `wikiloom deprecate {example_pid}`, "
-            f"or `wikiloom merge <winner> {example_pid}`."
+            f"or `wikiloom merge {example_pid} <winner>`."
         )
     )
     click.echo("")
@@ -4441,8 +4451,8 @@ def _run_auto_merge_mode(project: Path, pairs: list, dry_run: bool) -> None:
 
 
 @main.command("merge")
-@click.argument("winner")
 @click.argument("loser")
+@click.argument("winner")
 @click.option(
     "--yes",
     is_flag=True,
@@ -4455,8 +4465,13 @@ def _run_auto_merge_mode(project: Path, pairs: list, dry_run: bool) -> None:
     default=None,
     help="Project root.",
 )
-def merge(winner: str, loser: str, yes: bool, project: Path | None) -> None:
+def merge(loser: str, winner: str, yes: bool, project: Path | None) -> None:
     """Merge LOSER page into WINNER page.
+
+    Argument order matches the natural English reading: LOSER first,
+    WINNER second — "merge LOSER into WINNER". WINNER is the page
+    that survives; LOSER is the one that gets archived. Mirrors the
+    Unix `mv old new` convention.
 
     Combines bodies (loser appended under a "Merged content" section
     for human reconciliation), unions aliases/sources/chunk_ids,
@@ -4465,8 +4480,9 @@ def merge(winner: str, loser: str, yes: bool, project: Path | None) -> None:
 
     \b
     Examples:
-      \x1b[36mwikiloom merge concepts/transformer concepts/transformers\x1b[0m
-      \x1b[36mwikiloom merge entities/openai entities/open-ai --yes\x1b[0m
+      \x1b[36mwikiloom merge <loser> <winner>\x1b[0m
+      \x1b[36mwikiloom merge concepts/transformers concepts/transformer\x1b[0m       # 'transformer' (singular) wins
+      \x1b[36mwikiloom merge entities/open-ai entities/openai --yes\x1b[0m            # 'openai' wins
     """
     from wikiloom.locking import FileLock
     from wikiloom.merge import merge_pages
@@ -4827,12 +4843,18 @@ def purge(page_id: str, yes: bool, project: Path | None) -> None:
     This is destructive — the page cannot be recovered through wikiloom
     after this command (only via git history).
 
+    Pages keep their original page_id after deprecation; use that, not
+    the archive filename. A page deprecated from `concepts/foo` stays
+    purgeable via `wikiloom purge concepts/foo` — NOT
+    `wikiloom purge archive/concepts__foo`. The archive filename is
+    just on-disk storage.
+
     Refuses to run on active pages — deprecate them first with
     `wikiloom deprecate <page_id>`.
 
     \b
     Examples:
-      \x1b[36mwikiloom purge concepts/old-page\x1b[0m
+      \x1b[36mwikiloom purge concepts/old-page\x1b[0m         # the original page_id
       \x1b[36mwikiloom purge concepts/old-page --yes\x1b[0m
     """
     from wikiloom.locking import FileLock
@@ -4854,6 +4876,22 @@ def purge(page_id: str, yes: bool, project: Path | None) -> None:
     registry = Registry(project / "_registry", wiki_dir=project / "wiki")
     entry = registry.get_page(page_id)
     if entry is None:
+        # Common confusion: users see the archive filename in 'ls' and
+        # try to purge it with the path-as-page_id. Detect that shape
+        # and guide them to the original page_id, which is what the
+        # manifest actually keys on.
+        if page_id.startswith("archive/"):
+            flat = page_id[len("archive/"):]
+            # First '__' separates type-dir from slug; remaining '__'
+            # are part of the original slug and should be preserved.
+            suggested = flat.replace("__", "/", 1)
+            raise click.ClickException(
+                f"Page not found: {page_id}\n"
+                f"'archive/...' looks like an archive filename. Pages "
+                f"keep their original page_id after deprecation; use "
+                f"that instead — likely `{suggested}`. The archive "
+                f"filename is just on-disk storage."
+            )
         raise click.ClickException(_page_not_found_message(page_id))
     if entry.status != "deprecated":
         raise click.ClickException(

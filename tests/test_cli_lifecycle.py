@@ -342,3 +342,26 @@ def test_purge_refuses_unknown_page(project: Path) -> None:
 
     assert result.exit_code != 0
     assert "not found" in result.output
+
+
+def test_purge_archive_path_suggests_original_page_id(
+    project: Path,
+) -> None:
+    """Users sometimes try to purge using the archive filename
+    ('archive/concepts__foo'). The error should detect that pattern
+    and suggest the canonical page_id ('concepts/foo')."""
+    _add_active_page(project, "concepts/foo")
+    runner = CliRunner()
+
+    result = runner.invoke(
+        main,
+        [
+            "purge", "archive/concepts__foo",
+            "--yes",
+            "--project", str(project),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "archive filename" in result.output
+    assert "concepts/foo" in result.output

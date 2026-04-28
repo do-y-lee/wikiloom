@@ -49,7 +49,7 @@ sentences.
 
 If the stub turns out to not be worth a real page:
 - `wikiloom deprecate <page-id>` retires it (kept in archive).
-- `wikiloom merge <winner> <stub-id>` folds it into an existing page
+- `wikiloom merge <stub-id> <winner>` folds it into an existing page
   and rewrites every inbound `[[stub-id]]` wikilink to `[[winner]]`.
 
 *This file was copied from `.wikiloom/templates/stub.md`. The auto-
