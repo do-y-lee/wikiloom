@@ -52,8 +52,7 @@ The LLM handles judgment (reading sources, extracting claims, assessing confiden
 - **Python 3.14:** not yet supported on any platform — spaCy hasn't published a 3.14 wheel.
 
 ```bash
-git clone https://github.com/do-y-lee/wikiloom.git && cd wikiloom
-pip install -e ".[dev]"
+pip install wikiloom
 
 # Required for the linking engine
 python -m spacy download en_core_web_sm
@@ -62,6 +61,14 @@ python -m spacy download en_core_web_sm
 API keys are managed per-project via a `.env` file created during
 `wikiloom init` (see Quick start). If you prefer shell exports, those
 still work and take precedence over `.env`.
+
+### From source
+
+```bash
+git clone https://github.com/do-y-lee/wikiloom.git && cd wikiloom
+pip install -e ".[dev]"
+python -m spacy download en_core_web_sm
+```
 
 ## Quick start
 
