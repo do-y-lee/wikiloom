@@ -336,6 +336,11 @@ def _check_and_install_spacy_model(
     import subprocess
 
     click.echo("")
+    # Status line before launching the subprocess. spaCy's own pip
+    # output can be silent for a few seconds at the start (cold cache
+    # lookup) — without this, the user sees a dead pause after typing
+    # 'y' and may think the tool froze.
+    click.echo(_dim(f"  Downloading {model_name}..."))
     try:
         result = subprocess.run(
             [sys.executable, "-m", "spacy", "download", model_name],
