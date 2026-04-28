@@ -39,7 +39,7 @@ Inspired by Andrej Karpathy's [LLM wiki gist](https://gist.github.com/karpathy/4
 
 ## How it works
 
-![Ingest pipeline](https://raw.githubusercontent.com/do-y-lee/wikiloom/main/docs/img/wikiloom_ingest_pipeline.svg)
+![Ingest pipeline](https://github.com/do-y-lee/wikiloom/raw/main/docs/img/wikiloom_ingest_pipeline.svg)
 
 The LLM handles judgment (reading sources, extracting claims, assessing confidence). Everything after the LLM call is deterministic: linking, backlink graph, index regeneration, git commit. Every WikiLoom command that modifies state auto-commits with a classifying prefix (`ingest:`, `lint:`, `merge:`, etc.) so you never have to type `git`.
 
