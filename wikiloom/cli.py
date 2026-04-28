@@ -366,6 +366,83 @@ def _check_and_install_spacy_model(
     click.echo("")
 
 
+def _maybe_prefetch_fastembed_model(*, no_interactive: bool) -> None:
+    """Offer to download the default fastembed embedding model up front.
+
+    The default config uses fastembed with ``BAAI/bge-small-en-v1.5``
+    (~66 MB). Without prefetch, the download triggers on the first
+    ``wikiloom ingest`` — a poor surprise when synthesis is the
+    user's actual goal. Prefetching at init makes the slow step
+    predictable and labeled.
+
+    Detection: probe the durable cache dir for an existing snapshot.
+    Skip the prompt if the model is already cached. Honors
+    ``--no-interactive`` and non-TTY stdin (CI mode), matching
+    ``_check_and_install_spacy_model``.
+
+    A ``no`` answer doesn't disable fastembed — the config still
+    points at it, so first ingest will download anyway. We tell the
+    user that explicitly so the choice is informed.
+    """
+    from wikiloom.embeddings import FastEmbedBackend, fastembed_cache_dir
+
+    cache_dir = fastembed_cache_dir()
+    model_name = FastEmbedBackend.DEFAULT_MODEL
+
+    # If any snapshot exists under the cache, assume the model is
+    # already downloaded. fastembed's own loader will surface a clear
+    # error later if the snapshot is partial; we don't want to
+    # second-guess that here.
+    if cache_dir.exists() and any(cache_dir.rglob("*.onnx")):
+        return
+
+    config_hint = "wikiloom.toml"
+
+    click.echo("")
+    click.echo(
+        f"The default embedding provider needs fastembed's "
+        f"{click.style(model_name, fg='cyan')} model (~66MB)."
+    )
+    click.echo(
+        _dim(f"  Cache: {cache_dir}")
+    )
+
+    if no_interactive or not sys.stdin.isatty():
+        click.echo(
+            _dim("  Will download automatically on first ingest.")
+        )
+        click.echo("")
+        return
+
+    if not click.confirm("Download now?", default=True):
+        click.echo(
+            _dim(
+                "  Skipped. Will download automatically on first ingest. "
+                f"To use a different embedding provider, edit "
+                f"[embeddings] in {config_hint}."
+            )
+        )
+        click.echo("")
+        return
+
+    click.echo("")
+    click.echo(_dim(f"  Downloading {model_name}..."))
+    try:
+        FastEmbedBackend()  # construction triggers the download
+    except Exception as exc:  # pragma: no cover - network/runtime failures
+        click.echo(
+            f"  {_dim('⚠ Download failed:')} {exc}"
+        )
+        click.echo(
+            _dim("  Will retry automatically on first ingest.")
+        )
+        click.echo("")
+        return
+
+    click.echo(f"  {_check()} {model_name} cached at {cache_dir}")
+    click.echo("")
+
+
 @main.command()
 @click.argument("name")
 @click.option("--path", type=click.Path(path_type=Path), default=None,
@@ -450,6 +527,7 @@ def init(
     )
 
     _check_and_install_spacy_model(no_interactive=no_interactive)
+    _maybe_prefetch_fastembed_model(no_interactive=no_interactive)
 
     click.echo(click.style("Next steps", bold=True))
     click.echo("")

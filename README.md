@@ -98,7 +98,7 @@ wikiloom show concepts/transformer
 
 That's it. Every step above auto-commits to git.
 
-**Heads-up on first-run downloads:** the very first command that uses embeddings (`ingest`, `query`, or `related`) downloads the default `fastembed` model (~150MB) into the local cache and pauses for ~1 minute. Subsequent calls reuse the cached weights and are fast. If you'd rather use a different embedding backend or disable embeddings entirely, see [Provider options](#provider-options).
+**Heads-up on first-run downloads:** the default `fastembed` embedding model (~66MB) is downloaded once and cached in a durable per-user location (`~/Library/Caches/wikiloom/fastembed` on macOS, `~/.cache/wikiloom/fastembed` on Linux, `%LOCALAPPDATA%\wikiloom\Cache\fastembed` on Windows). `wikiloom init` offers to fetch it up front so the slow step is predictable; if you decline (or skip with `--no-interactive`), the first command that needs embeddings (`ingest`, `query`, `related`) will download it instead. Subsequent calls reuse the cached weights. To use a different backend or disable embeddings, see [Provider options](#provider-options).
 
 **Tip on cost:** ingest is the token-heavy operation. For a significant
 saving, configure a cheap model for ingest and a stronger model for
@@ -457,7 +457,7 @@ the frontier reasoning of Sonnet / 2.5-pro / gpt-5.
 
 | Provider                | Where it runs | Requirements                           | Default model            | Disk impact         |
 | ----------------------- | ------------- | -------------------------------------- | ------------------------ | ------------------- |
-| `fastembed`             | Local         | Bundled with the default install       | `BAAI/bge-small-en-v1.5` | ~150MB on first use |
+| `fastembed`             | Local         | Bundled with the default install       | `BAAI/bge-small-en-v1.5` | ~66MB, cached in user cache dir |
 | `openai`                | OpenAI API    | `OPENAI_API_KEY`; `pip install openai` | `text-embedding-3-small` | none                |
 | `sentence-transformers` | Local         | `pip install sentence-transformers`    | `all-MiniLM-L6-v2`       | ~500MB on first use |
 

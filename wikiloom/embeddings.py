@@ -34,6 +34,25 @@ class Embedder(Protocol):
 # ----------------------------------------------------------------------
 
 
+def fastembed_cache_dir() -> Path:
+    """Durable, per-user cache for fastembed ONNX models.
+
+    fastembed's default cache is ``tempfile.gettempdir()`` which on
+    macOS resolves to ``/var/folders/.../T/`` — a directory the OS
+    reaps on a schedule. Reaping is per-file, so the snapshot dir can
+    survive while the large ONNX file inside it disappears, leaving
+    fastembed to crash with a cryptic ``NO_SUCHFILE`` on next load.
+    Routing the cache through ``platformdirs`` lands it in
+    ``~/Library/Caches/wikiloom/fastembed`` (macOS),
+    ``~/.cache/wikiloom/fastembed`` (Linux), or
+    ``%LOCALAPPDATA%\\wikiloom\\Cache\\fastembed`` (Windows) — none
+    of which the OS auto-cleans.
+    """
+    from platformdirs import user_cache_dir
+
+    return Path(user_cache_dir("wikiloom")) / "fastembed"
+
+
 class FastEmbedBackend:
     """ONNX-based local embeddings via fastembed."""
 
@@ -46,7 +65,12 @@ class FastEmbedBackend:
             raise ImportError(
                 "fastembed is not installed. Run: pip install fastembed"
             )
-        self._model = TextEmbedding(model or self.DEFAULT_MODEL)
+        cache_dir = fastembed_cache_dir()
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        self._model = TextEmbedding(
+            model or self.DEFAULT_MODEL,
+            cache_dir=str(cache_dir),
+        )
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
         if not texts:

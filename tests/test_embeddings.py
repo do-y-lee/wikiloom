@@ -9,11 +9,15 @@ from typing import Any
 import git
 import pytest
 
+from unittest.mock import MagicMock, patch
+
 from wikiloom.cache import SQLiteCache
 from wikiloom.embeddings import (
     EmbeddingConfig,
+    FastEmbedBackend,
     cosine_similarity,
     deserialize_embedding,
+    fastembed_cache_dir,
     get_embedder,
     serialize_embedding,
 )
@@ -142,6 +146,34 @@ def test_cosine_similarity_zero_vector_safe() -> None:
 def test_get_embedder_unknown_provider_raises() -> None:
     with pytest.raises(ValueError, match="Unknown embedding provider"):
         get_embedder(EmbeddingConfig(provider="nonexistent"))
+
+
+# ----------------------------------------------------------------------
+# Durable fastembed cache
+# ----------------------------------------------------------------------
+
+
+def test_fastembed_cache_dir_uses_platformdirs() -> None:
+    """Cache path is rooted in platformdirs' user_cache_dir for 'wikiloom'."""
+    from platformdirs import user_cache_dir
+
+    expected_root = Path(user_cache_dir("wikiloom"))
+    cache = fastembed_cache_dir()
+    assert cache == expected_root / "fastembed"
+
+
+def test_fastembed_backend_passes_cache_dir(monkeypatch) -> None:
+    """FastEmbedBackend hands the durable cache path to TextEmbedding."""
+    fake_text_embedding = MagicMock()
+    fake_module = MagicMock(TextEmbedding=fake_text_embedding)
+    monkeypatch.setitem(__import__("sys").modules, "fastembed", fake_module)
+
+    FastEmbedBackend()
+
+    fake_text_embedding.assert_called_once()
+    call = fake_text_embedding.call_args
+    assert call.args[0] == FastEmbedBackend.DEFAULT_MODEL
+    assert call.kwargs["cache_dir"] == str(fastembed_cache_dir())
 
 
 # ----------------------------------------------------------------------
