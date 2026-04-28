@@ -1124,6 +1124,10 @@ def _print_ingest_summary(result: Any) -> None:
         for note in result.notes:
             click.echo(f"  {_dim('•')} {note}")
 
+    # Trailing blank line so the shell prompt has breathing room
+    # below the summary instead of sitting flush against it.
+    click.echo("")
+
 
 def _print_grand_summary(
     outcomes: list[tuple[str, Any]],
