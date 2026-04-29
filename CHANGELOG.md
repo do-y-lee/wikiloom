@@ -5,6 +5,60 @@ All notable changes to WikiLoom are recorded here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2] — 2026-04-29
+
+### Performance
+
+- **Vectorized `cosine_similarity`** — replaces a triple Python loop
+  with a numpy implementation. Speeds up every caller (linker rerank,
+  page-context retrieval, fallback paths) without changing the
+  function signature or the on-disk embedding BLOB format.
+- **Cached embedding matrix in `SQLiteCache.semantic_search`** — the
+  first query deserializes every page embedding into one contiguous
+  numpy matrix; subsequent queries reuse it via a single matmul
+  instead of re-reading SQLite, deserializing, and looping in Python.
+  Invalidated automatically by `full_rebuild` and incremental sync,
+  so callers see no behavior change. Roughly 10–100× speedup on
+  semantic fallback for wikis with thousands of pages.
+- **Batched duplicate detection** — `find_duplicates` replaces an
+  O(n²) Python loop calling `cosine_similarity` and
+  `fuzz.token_sort_ratio` per pair with two batched matrix passes
+  (`process.cdist` for slug similarity, one matmul for embedding
+  similarity). Same input/output contract; same scoring rules.
+- **Single SQLite connection per `SQLiteCache`** — the cache now
+  holds a long-lived connection guarded by an `RLock` instead of
+  opening and closing a fresh connection on every read/write. Saves
+  a few ms per call and removes a per-query handshake from the
+  query path.
+
+### Notes
+
+- Adds `numpy>=1.24` as an explicit runtime dependency. It was
+  already present transitively (via `fastembed` /
+  `sentence-transformers` / `spacy`); the move makes the dependency
+  visible since `wikiloom` now imports it directly.
+
+## [0.1.1] — 2026-04-28
+
+### Fixed
+
+- **Durable fastembed cache** — `FastEmbedBackend` now stores ONNX
+  models under `platformdirs` (`~/Library/Caches/wikiloom/fastembed`
+  on macOS, `~/.cache/wikiloom/fastembed` on Linux,
+  `%LOCALAPPDATA%\wikiloom\Cache\fastembed` on Windows) instead of
+  `tempfile.gettempdir()`. macOS reaped individual files inside the
+  temp dir on a schedule, leaving the snapshot directory present but
+  the large ONNX file missing — fastembed crashed with a cryptic
+  `NO_SUCHFILE` on next load.
+
+### Added
+
+- **`wikiloom init` prefetches the embedding model** — same
+  Y/n / `--no-interactive` / non-TTY semantics as the spaCy
+  download. Declining points the user at the `[embeddings]` section
+  of `wikiloom.toml` so they can disable or swap the provider.
+- **`platformdirs` runtime dependency** for the cache routing above.
+
 ## [0.1.0] — 2026-04-26
 
 Initial public release.

@@ -9,9 +9,12 @@ from __future__ import annotations
 
 import sqlite3
 import sys
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator
+
+import numpy as np
 
 # Batch size for embedding-model calls. Small enough that no single
 # call exceeds fastembed/sentence-transformer backend limits on
@@ -184,6 +187,33 @@ class SQLiteCache:
     def __init__(self, db_path: Path) -> None:
         self.db_path = Path(db_path)
         init_cache(self.db_path)
+        # Long-lived connection — every read/write reuses it instead of
+        # paying the open/close cost per call. ``check_same_thread=False``
+        # is safe because ``self._lock`` serializes every access.
+        self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        self._conn.row_factory = sqlite3.Row
+        self._lock = threading.RLock()
+        # Lazily-loaded embedding matrix for ``semantic_search``. Marked
+        # dirty on every page-write path so the next query reloads.
+        self._emb_matrix: np.ndarray | None = None
+        self._emb_ids: list[str] = []
+        self._emb_norms: np.ndarray | None = None
+        self._emb_dirty = True
+
+    def close(self) -> None:
+        """Close the underlying connection. Idempotent."""
+        with self._lock:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+
+    def __del__(self) -> None:
+        # Best-effort cleanup if the caller didn't call close().
+        try:
+            self.close()
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Connection plumbing
@@ -191,13 +221,17 @@ class SQLiteCache:
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(str(self.db_path))
-        conn.row_factory = sqlite3.Row
-        try:
-            yield conn
-            conn.commit()
-        finally:
-            conn.close()
+        with self._lock:
+            try:
+                yield self._conn
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
+
+    def _invalidate_embeddings(self) -> None:
+        """Mark the cached embedding matrix stale. Called from write paths."""
+        self._emb_dirty = True
 
     # ------------------------------------------------------------------
     # Writes
@@ -353,6 +387,7 @@ class SQLiteCache:
                     ),
                 )
 
+        self._invalidate_embeddings()
         return page_count
 
     def sync_from_files(
@@ -529,6 +564,8 @@ class SQLiteCache:
                     ),
                 )
 
+        self._invalidate_embeddings()
+
     # ------------------------------------------------------------------
     # Reads
     # ------------------------------------------------------------------
@@ -572,30 +609,79 @@ class SQLiteCache:
         Returns the top ``limit`` pages by similarity, excluding pages
         with no embedding. Falls back gracefully: if no embeddings
         exist, returns an empty list.
+
+        Backed by a lazily-loaded numpy matrix cached on the instance:
+        the first call deserializes every page's embedding into one
+        contiguous matrix, and subsequent calls reuse it via a single
+        matmul. The matrix is invalidated by every page-write path
+        (``full_rebuild``, ``_incremental_sync``).
         """
-        from wikiloom.embeddings import cosine_similarity, deserialize_embedding
-
-        with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT * FROM pages WHERE embedding IS NOT NULL"
-            ).fetchall()
-
-        if not rows:
+        self._ensure_embedding_matrix()
+        if self._emb_matrix is None or not self._emb_ids:
             return []
 
-        scored: list[tuple[float, dict[str, Any]]] = []
-        for row in rows:
-            row_dict = dict(row)
-            blob = row_dict.pop("embedding", None)
-            if blob is None:
-                continue
-            page_vec = deserialize_embedding(blob)
-            score = cosine_similarity(query_vector, page_vec)
-            row_dict["similarity"] = score
-            scored.append((score, row_dict))
+        q = np.asarray(query_vector, dtype=np.float32)
+        q_norm = float(np.linalg.norm(q))
+        if q_norm == 0.0:
+            return []
 
-        scored.sort(key=lambda x: x[0], reverse=True)
-        return [row for _, row in scored[:limit]]
+        # cosine = (M · q) / (||M_i|| * ||q||) — one matmul replaces a
+        # Python loop over every page on every query.
+        assert self._emb_norms is not None  # set whenever _emb_matrix is
+        scores = (self._emb_matrix @ q) / (self._emb_norms * q_norm + 1e-12)
+
+        k = min(limit, len(scores))
+        if k == 0:
+            return []
+        # argpartition is O(n); a full sort would be O(n log n).
+        top_idx = np.argpartition(-scores, k - 1)[:k]
+        top_idx = top_idx[np.argsort(-scores[top_idx])]
+        top_ids = [self._emb_ids[i] for i in top_idx]
+
+        # Fetch full rows only for the top-k — much cheaper than the
+        # previous "select *" over every embedded page per query.
+        placeholders = ",".join("?" * len(top_ids))
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM pages WHERE page_id IN ({placeholders})",
+                top_ids,
+            ).fetchall()
+        by_id = {r["page_id"]: dict(r) for r in rows}
+
+        out: list[dict[str, Any]] = []
+        for idx in top_idx:
+            pid = self._emb_ids[idx]
+            row_dict = by_id.get(pid)
+            if row_dict is None:
+                continue
+            row_dict.pop("embedding", None)
+            row_dict["similarity"] = float(scores[idx])
+            out.append(row_dict)
+        return out
+
+    def _ensure_embedding_matrix(self) -> None:
+        """Lazily build the cached embedding matrix used by ``semantic_search``."""
+        if not self._emb_dirty and self._emb_matrix is not None:
+            return
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT page_id, embedding FROM pages "
+                "WHERE embedding IS NOT NULL"
+            ).fetchall()
+        if not rows:
+            self._emb_matrix = None
+            self._emb_ids = []
+            self._emb_norms = None
+            self._emb_dirty = False
+            return
+        self._emb_ids = [r["page_id"] for r in rows]
+        # ``np.frombuffer`` is zero-copy — keeps the on-disk BLOB
+        # format unchanged while exposing it as a numpy view.
+        self._emb_matrix = np.stack([
+            np.frombuffer(r["embedding"], dtype=np.float32) for r in rows
+        ])
+        self._emb_norms = np.linalg.norm(self._emb_matrix, axis=1)
+        self._emb_dirty = False
 
     def get_stale(self, window_days: int = 90) -> list[dict[str, Any]]:
         """Active pages whose ``modified`` is older than ``window_days``.

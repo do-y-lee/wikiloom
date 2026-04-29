@@ -7,11 +7,12 @@ provider needs to be installed.
 
 from __future__ import annotations
 
-import math
 import struct
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
+
+import numpy as np
 
 
 @dataclass
@@ -180,12 +181,13 @@ def load_embedder(project: Path) -> Embedder | None:
 
 def cosine_similarity(a: list[float], b: list[float]) -> float:
     """Cosine similarity between two vectors. Returns -1.0 to 1.0."""
-    dot = sum(x * y for x, y in zip(a, b))
-    norm_a = math.sqrt(sum(x * x for x in a))
-    norm_b = math.sqrt(sum(x * x for x in b))
-    if norm_a == 0 or norm_b == 0:
+    a_arr = np.asarray(a, dtype=np.float32)
+    b_arr = np.asarray(b, dtype=np.float32)
+    norm_a = float(np.linalg.norm(a_arr))
+    norm_b = float(np.linalg.norm(b_arr))
+    if norm_a == 0.0 or norm_b == 0.0:
         return 0.0
-    return dot / (norm_a * norm_b)
+    return float(np.dot(a_arr, b_arr) / (norm_a * norm_b))
 
 
 def serialize_embedding(vector: list[float]) -> bytes:

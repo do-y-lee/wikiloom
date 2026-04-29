@@ -12,9 +12,8 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
-from rapidfuzz import fuzz
-
-from wikiloom.embeddings import cosine_similarity, deserialize_embedding
+import numpy as np
+from rapidfuzz import fuzz, process
 
 
 @dataclass(frozen=True)
@@ -100,43 +99,79 @@ def find_duplicates(
     for row in rows:
         d = dict(row)
         blob = d.pop("embedding", None)
-        d["vector"] = deserialize_embedding(blob) if blob else None
+        d["vector"] = (
+            np.frombuffer(blob, dtype=np.float32) if blob else None
+        )
         pages.append(d)
 
+    n = len(pages)
+    if n < 2:
+        return []
+
+    # Slug similarity in one batched C-level call instead of an O(n²)
+    # Python loop over ``fuzz.token_sort_ratio``. ``process.cdist``
+    # parallelizes across cores when ``workers != 1``.
+    slugs = [_slug_part(p["page_id"]) for p in pages]
+    slug_matrix = process.cdist(
+        slugs, slugs, scorer=fuzz.token_sort_ratio, workers=-1
+    )
+
+    # Embedding similarity for the subset of pages that have vectors.
+    # ``has_vec_idx[k]`` maps the matrix row ``k`` back to the original
+    # ``pages`` index, so we can look up ``emb_sim[ki, kj]`` for any
+    # original pair (i, j) where both have embeddings.
+    has_vec_idx = [i for i, p in enumerate(pages) if p["vector"] is not None]
+    page_to_emb_row: dict[int, int] = {
+        orig: row for row, orig in enumerate(has_vec_idx)
+    }
+    emb_sim: np.ndarray | None = None
+    if has_vec_idx:
+        vecs = np.stack([pages[i]["vector"] for i in has_vec_idx])
+        norms = np.linalg.norm(vecs, axis=1)
+        emb_sim = (vecs @ vecs.T) / (np.outer(norms, norms) + 1e-12)
+
+    # Collect candidate (i, j) pairs from either signal. Both matrices
+    # are filtered to the strict upper triangle so each pair is
+    # considered once and self-pairs are excluded.
+    candidates: set[tuple[int, int]] = set()
+
+    slug_upper = np.triu(slug_matrix, k=1)
+    for i, j in np.argwhere(slug_upper >= slug_threshold):
+        candidates.add((int(i), int(j)))
+
+    if emb_sim is not None:
+        emb_upper = np.triu(emb_sim, k=1)
+        for ki, kj in np.argwhere(emb_upper >= embedding_threshold):
+            oi, oj = has_vec_idx[int(ki)], has_vec_idx[int(kj)]
+            candidates.add((min(oi, oj), max(oi, oj)))
+
     pairs: list[DuplicatePair] = []
-    for i, a in enumerate(pages):
-        for b in pages[i + 1:]:
-            if same_type_only and a["type"] != b["type"]:
-                continue
-            slug_score = fuzz.token_sort_ratio(
-                _slug_part(a["page_id"]), _slug_part(b["page_id"])
+    for i, j in candidates:
+        a, b = pages[i], pages[j]
+        if same_type_only and a["type"] != b["type"]:
+            continue
+        slug_score = float(slug_matrix[i, j])
+        embedding_score = -1.0
+        if emb_sim is not None and i in page_to_emb_row and j in page_to_emb_row:
+            embedding_score = float(
+                emb_sim[page_to_emb_row[i], page_to_emb_row[j]]
             )
-
-            embedding_score = -1.0
-            if a["vector"] is not None and b["vector"] is not None:
-                embedding_score = cosine_similarity(a["vector"], b["vector"])
-
-            slug_hit = slug_score >= slug_threshold
-            embed_hit = embedding_score >= embedding_threshold
-            if not (slug_hit or embed_hit):
-                continue
-
-            pairs.append(
-                DuplicatePair(
-                    page_a=a["page_id"],
-                    page_b=b["page_id"],
-                    title_a=a["title"],
-                    title_b=b["title"],
-                    type_a=a["type"],
-                    type_b=b["type"],
-                    slug_score=slug_score,
-                    embedding_score=embedding_score,
-                    inbound_a=a.get("inbound_links") or 0,
-                    inbound_b=b.get("inbound_links") or 0,
-                    created_a=a.get("created") or "",
-                    created_b=b.get("created") or "",
-                )
+        pairs.append(
+            DuplicatePair(
+                page_a=a["page_id"],
+                page_b=b["page_id"],
+                title_a=a["title"],
+                title_b=b["title"],
+                type_a=a["type"],
+                type_b=b["type"],
+                slug_score=slug_score,
+                embedding_score=embedding_score,
+                inbound_a=a.get("inbound_links") or 0,
+                inbound_b=b.get("inbound_links") or 0,
+                created_a=a.get("created") or "",
+                created_b=b.get("created") or "",
             )
+        )
 
     pairs.sort(key=lambda p: p.combined_score, reverse=True)
     return pairs
