@@ -726,7 +726,7 @@ def run_synthesis(
             failed += 1
             notes.append(f"chunk {ci + 1}/{ct}: {err}")
             if state is not None:
-                state.mark_chunk_failed(ci, str(err))
+                state.mark_chunk_failed(ci, str(err), flush=False)
             continue
 
         if err is not None:
@@ -734,14 +734,14 @@ def run_synthesis(
             failed += 1
             notes.append(f"chunk {ci + 1}/{ct}: unexpected worker error: {err}")
             if state is not None:
-                state.mark_chunk_failed(ci, str(err))
+                state.mark_chunk_failed(ci, str(err), flush=False)
             continue
 
         if llm_result is None:
             failed += 1
             notes.append(f"chunk {ci + 1}/{ct}: no result returned")
             if state is not None:
-                state.mark_chunk_failed(ci, "no result returned")
+                state.mark_chunk_failed(ci, "no result returned", flush=False)
             continue
 
         total_in += llm_result.metrics.tokens_in
@@ -838,7 +838,15 @@ def run_synthesis(
 
         processed += 1
         if state is not None:
-            state.mark_chunk_done(ci)
+            state.mark_chunk_done(ci, flush=False)
+
+    # Single flush after the post-gather loop replaces N per-chunk
+    # writes. Crash safety is preserved because the loop runs after
+    # all parallel synthesis is complete — a crash here only loses
+    # the in-memory page proposals, which the state file couldn't
+    # have rescued anyway.
+    if state is not None:
+        state.save()
 
     if abort_trigger is not None:
         abort_ci, abort_ct, abort_exc = abort_trigger

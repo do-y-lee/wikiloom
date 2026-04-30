@@ -746,6 +746,44 @@ class SQLiteCache:
             ).fetchone()
         return dict(row) if row is not None else None
 
+    def get_pages(self, page_ids: list[str]) -> dict[str, dict[str, Any]]:
+        """Bulk-fetch page rows for the given ids. Missing ids are omitted.
+
+        One ``IN`` query replaces N ``get_page`` calls when callers
+        already have a list of ids — used by the query path's linked-
+        page ranker.
+        """
+        if not page_ids:
+            return {}
+        placeholders = ",".join("?" * len(page_ids))
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM pages WHERE page_id IN ({placeholders})",
+                page_ids,
+            ).fetchall()
+        return {r["page_id"]: dict(r) for r in rows}
+
+    def get_outbound_edges(
+        self, source_page_ids: list[str]
+    ) -> list[dict[str, Any]]:
+        """Return backlink edges originating from any of ``source_page_ids``.
+
+        Mirrors the data ``BacklinkRegistry.edges`` would expose for the
+        same sources, but reads it from the cache's ``backlinks`` table
+        so the JSON file doesn't have to be parsed on every query. The
+        sync path keeps both stores aligned.
+        """
+        if not source_page_ids:
+            return []
+        placeholders = ",".join("?" * len(source_page_ids))
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT source_page, target_page "
+                f"FROM backlinks WHERE source_page IN ({placeholders})",
+                source_page_ids,
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def load_page_embeddings(self) -> dict[str, list[float]]:
         """Return ``{page_id: vector}`` for every page with an embedding.
 

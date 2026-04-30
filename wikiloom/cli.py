@@ -750,6 +750,97 @@ def _format_event_timestamp(iso_str: str) -> str:
         return iso_str
 
 
+def _enrich_events_with_git_hashes(
+    events: list[dict[str, Any]], project_root: Path
+) -> None:
+    """Mutate ``events`` to fill in ``commit`` hashes from git history.
+
+    Query events are written to ``log.md`` *before* their commit lands,
+    so the event entry can't carry the hash. Other event types
+    (ingest, merge, deprecate) capture it via ``emit_*_event`` after
+    the commit. To unify the display without changing the write-side
+    flow, look up the hash post-hoc by matching the commit subject
+    (``<event_type>: <description>``) plus a timestamp window.
+
+    Cheap: one ``git log`` call per ``wikiloom log`` invocation,
+    covering the most recent 200 commits — enough for the default
+    ``--limit 10`` and well past it.
+    """
+    from datetime import datetime
+
+    needs_lookup = [e for e in events if not e.get("commit")]
+    if not needs_lookup:
+        return
+
+    try:
+        import subprocess
+
+        proc = subprocess.run(
+            [
+                "git", "-C", str(project_root), "log",
+                "--pretty=format:%H%x09%aI%x09%s",
+                "--max-count=200",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return
+
+    def _parse(ts: str) -> datetime | None:
+        if not ts:
+            return None
+        try:
+            return datetime.fromisoformat(ts.rstrip("Z").replace("Z", ""))
+        except ValueError:
+            return None
+
+    commits: list[tuple[str, datetime | None, str]] = []
+    for line in proc.stdout.splitlines():
+        parts = line.split("\t", 2)
+        if len(parts) != 3:
+            continue
+        commits.append((parts[0], _parse(parts[1]), parts[2]))
+
+    for event in needs_lookup:
+        ev_type = str(event.get("event_type", ""))
+        ev_desc = str(event.get("description", ""))
+        if not ev_type or not ev_desc:
+            continue
+        prefix = f"{ev_type}: "
+        ev_dt = _parse(str(event.get("timestamp", "")))
+
+        # Commit subject truncates the description to 60 chars + "...".
+        # Both ends may have "..." so strip and compare prefixes.
+        ev_key = ev_desc.rstrip(".").rstrip()
+        best_hash: str | None = None
+        best_delta: float | None = None
+        for h, c_dt, subj in commits:
+            if not subj.startswith(prefix):
+                continue
+            commit_desc = subj[len(prefix):].rstrip(".").rstrip()
+            shorter = min(len(commit_desc), len(ev_key))
+            if shorter == 0:
+                continue
+            if commit_desc[:shorter] != ev_key[:shorter]:
+                continue
+            if ev_dt is None or c_dt is None:
+                # Timestamp comparison unavailable — accept the first match.
+                best_hash = h
+                break
+            delta = abs((c_dt - ev_dt).total_seconds())
+            if best_delta is None or delta < best_delta:
+                best_hash = h
+                best_delta = delta
+        # Reasonable window: commits should land within seconds of the
+        # event being written. 5 minutes leaves slack for slow systems
+        # and avoids matching the wrong commit when descriptions
+        # legitimately repeat.
+        if best_hash and (best_delta is None or best_delta < 300):
+            event["commit"] = best_hash
+
+
 def _page_not_found_message(page_id: str) -> str:
     """Shared error text for commands that take a page_id argument.
 
@@ -2431,6 +2522,10 @@ def log_cmd(limit: int, project: Path | None) -> None:
 
     events = parse_log(project / "wiki" / "log.md")
     shown = events[:limit]
+    # Backfill commit hashes for events (notably ``query``) that are
+    # written to ``log.md`` before their commit lands. Display-side
+    # only — log.md itself stays untouched.
+    _enrich_events_with_git_hashes(shown, project)
 
     if _is_piped():
         # Tab-separated so descriptions with spaces (e.g. merge events

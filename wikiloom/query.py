@@ -12,13 +12,11 @@ from importlib import resources as importlib_resources
 from pathlib import Path
 from typing import Any
 
-from wikiloom.backlinks import BacklinkRegistry
 from wikiloom.cache import SQLiteCache
 from wikiloom.config import Config
 from wikiloom.frontmatter import read_page
 from wikiloom.llm import LLMCallMetrics, LLMClient
 from wikiloom.llm_errors import LLMProviderError, LLMResponseFormatError
-from wikiloom.registry import Registry
 
 PROMPT_FILENAME = "query.md"
 MAX_CONTEXT_PAGES = 5
@@ -171,8 +169,7 @@ def retrieve_context(
     if include_linked and primary_ids and max_linked > 0:
         secondary_ids = _rank_linked_pages(
             primary_ids=primary_ids,
-            registry_dir=registry_dir,
-            wiki_dir=wiki_dir,
+            cache=cache,
             limit=max_linked,
         )
         for pid in secondary_ids:
@@ -206,8 +203,7 @@ def _load_page_context(
 def _rank_linked_pages(
     *,
     primary_ids: list[str],
-    registry_dir: Path,
-    wiki_dir: Path,
+    cache: SQLiteCache,
     limit: int,
 ) -> list[str]:
     """Return up to ``limit`` secondary page_ids ranked by link-hop relevance.
@@ -222,42 +218,40 @@ def _rank_linked_pages(
     4. Sort by ``(reference_count desc, modified desc)`` so shared
        concepts rise and the freshest page breaks ties.
     5. Return the top ``limit``.
+
+    Reads edges and page metadata from the SQLite cache instead of
+    parsing ``backlinks.json`` and ``manifest.json`` per query — the
+    cache mirrors both files via ``sync_from_files``, so the data is
+    equivalent and orders of magnitude cheaper to retrieve.
     """
     if limit <= 0 or not primary_ids:
         return []
 
-    try:
-        backlinks = BacklinkRegistry(registry_dir, wiki_dir=wiki_dir)
-    except Exception:  # noqa: BLE001 — retrieval must not kill the query
-        return []
-
     primary_set = set(primary_ids)
+    edges = cache.get_outbound_edges(primary_ids)
+
     ref_counts: dict[str, int] = {}
-    for edge in backlinks.edges:
-        if edge.source not in primary_set:
+    for edge in edges:
+        target = edge["target_page"]
+        if target in primary_set:
             continue
-        if edge.target in primary_set:
-            continue
-        ref_counts[edge.target] = ref_counts.get(edge.target, 0) + 1
+        ref_counts[target] = ref_counts.get(target, 0) + 1
 
     if not ref_counts:
         return []
 
-    try:
-        registry = Registry(registry_dir)
-    except Exception:  # noqa: BLE001
-        return []
+    target_pages = cache.get_pages(list(ref_counts))
 
     ranked: list[tuple[int, str, str]] = []
     for pid, count in ref_counts.items():
-        entry = registry.get_page(pid)
-        if entry is None:
+        page = target_pages.get(pid)
+        if page is None:
             continue
-        if entry.status in ("deprecated", "archived"):
+        if page.get("status") in ("deprecated", "archived"):
             continue
-        if entry.type in _SECONDARY_EXCLUDE_TYPES:
+        if page.get("type") in _SECONDARY_EXCLUDE_TYPES:
             continue
-        ranked.append((count, entry.modified or "", pid))
+        ranked.append((count, page.get("modified") or "", pid))
 
     # Sort by (count desc, modified desc) — reference_count is the
     # primary signal; recency breaks ties.

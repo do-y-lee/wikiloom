@@ -268,14 +268,41 @@ class LinkingEngine:
         candidates = [c for c in candidates if self._in_safe_zone(c, safe_zones)]
         candidates = [c for c in candidates if c[0].lower().strip() not in STOP_WORDS]
 
+        # Batch-embed every candidate context window in one call rather
+        # than N per-span calls inside ``_resolve_with_rerank``. Skips
+        # candidates that will short-circuit on an exact alias hit
+        # (no embedding needed). If the batch call raises or returns
+        # the wrong shape, the resolver falls back to its per-span
+        # path so behavior degrades gracefully.
+        span_vec_by_index: dict[int, list[float]] = {}
+        contexts: list[str] = []
+        context_owner: list[int] = []
+        for i, (text, _label, start, end) in enumerate(candidates):
+            normalized = text.lower().strip()
+            if not normalized or normalized in self.alias_map:
+                continue
+            contexts.append(self._context_window(body, start, end))
+            context_owner.append(i)
+        if contexts:
+            try:
+                batch_vectors = self.embedder.embed_texts(contexts)
+            except Exception:  # noqa: BLE001 — fall back to per-span
+                batch_vectors = []
+            if batch_vectors and len(batch_vectors) == len(contexts):
+                for ci, vec in zip(context_owner, batch_vectors):
+                    span_vec_by_index[ci] = vec
+
         high_links: list[ResolvedLink] = []
         medium_links: list[ResolvedLink] = []
         pending: list[PendingLink] = []
         linked_targets: set[str] = set()
         resolved_or_pending_texts: set[str] = set()
 
-        for text, label, start, end in candidates:
-            match = self._resolve_with_rerank(text, body, start, end)
+        for i, (text, label, start, end) in enumerate(candidates):
+            match = self._resolve_with_rerank(
+                text, body, start, end,
+                span_vec=span_vec_by_index.get(i),
+            )
             if not match:
                 continue
             if match.page_id == source_page_id:
@@ -414,7 +441,13 @@ class LinkingEngine:
         return sorted(seen.items(), key=lambda x: x[1], reverse=True)[:k]
 
     def _resolve_with_rerank(
-        self, text: str, body: str, start: int, end: int
+        self,
+        text: str,
+        body: str,
+        start: int,
+        end: int,
+        *,
+        span_vec: list[float] | None = None,
     ) -> MatchResult | None:
         """Hybrid resolver: fuzzy pre-filter → cosine rerank.
 
@@ -434,6 +467,13 @@ class LinkingEngine:
         either no candidates, no embeddings on any candidate, or the
         embedder raised. In those cases the span is dropped rather
         than linked; there's no fuzzy-only fallback by design.
+
+        ``span_vec`` is an optional pre-computed embedding for the
+        context window. ``_link_text`` populates it via one batched
+        ``embed_texts`` call so this resolver doesn't have to issue
+        a per-span call for every candidate on the page. When
+        omitted, the resolver embeds the context itself (preserves
+        the original code path for callers that don't pre-batch).
         """
         from wikiloom.embeddings import cosine_similarity
 
@@ -460,14 +500,15 @@ class LinkingEngine:
         if not usable:
             return None
 
-        context = self._context_window(body, start, end)
-        try:
-            span_vectors = self.embedder.embed_texts([context])
-        except Exception:  # noqa: BLE001 — degrade rather than crash a link pass
-            return None
-        if not span_vectors:
-            return None
-        span_vec = span_vectors[0]
+        if span_vec is None:
+            context = self._context_window(body, start, end)
+            try:
+                span_vectors = self.embedder.embed_texts([context])
+            except Exception:  # noqa: BLE001 — degrade rather than crash a link pass
+                return None
+            if not span_vectors:
+                return None
+            span_vec = span_vectors[0]
 
         best_page_id: str | None = None
         best_fuzzy = 0

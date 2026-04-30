@@ -604,10 +604,16 @@ def ingest(
 
             # Regenerate indexes *after* manifest save so sub-indexes
             # read the fresh inbound/outbound counts. All written index
-            # files are staged into the ingest commit below.
-            index_paths: list[Path] = IndexUpdater(
-                project_root / "wiki", registry=registry
-            ).rebuild_all()
+            # files are staged into the ingest commit below. Scoped to
+            # the categories actually touched by this ingest — avoids
+            # walking every sub-index when only one or two changed.
+            touched_ids = list(result.pages_created) + list(result.pages_updated)
+            updater = IndexUpdater(project_root / "wiki", registry=registry)
+            index_paths: list[Path] = (
+                updater.rebuild_for_pages(touched_ids)
+                if touched_ids
+                else updater.rebuild_all()
+            )
         else:
             index_paths = []
 
@@ -872,9 +878,16 @@ def _run_post_ingest_merge(
         touched_paths.append(wiki_dir / f"{loser}.md")
     # Rebuild indexes so archived losers disappear from category/root
     # indexes even when auto_relink is false (post-merge relink is the
-    # other path that would otherwise cover this).
+    # other path that would otherwise cover this). Scoped to the
+    # categories that own a winner or loser in this batch.
     registry = Registry(registry_dir)
-    index_paths = IndexUpdater(wiki_dir, registry=registry).rebuild_all()
+    affected_pages: list[str] = []
+    for winner, loser in applied:
+        affected_pages.append(winner)
+        affected_pages.append(loser)
+    index_paths = IndexUpdater(
+        wiki_dir, registry=registry
+    ).rebuild_for_pages(affected_pages)
     SQLiteCache(registry_dir / "wiki.db").sync_from_files(
         project_root,
         changed_files=touched_paths + list(index_paths),

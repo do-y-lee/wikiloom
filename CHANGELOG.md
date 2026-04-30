@@ -5,6 +5,47 @@ All notable changes to WikiLoom are recorded here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3] — 2026-04-29
+
+### Performance
+
+- **Query path reads from the cache, not the JSON files** — the linked-
+  page ranker (`_rank_linked_pages`) used to instantiate
+  `BacklinkRegistry` and `Registry` on every query, parsing
+  `backlinks.json` and `manifest.json` from disk. Both stores are
+  already mirrored into the SQLite cache, so the ranker now joins on
+  the cache's `backlinks` and `pages` tables directly. Saves the JSON
+  parse cost and removes a per-query handshake from the retrieval
+  path.
+- **Batched ingest state writes** — `IngestState.mark_chunk_done` /
+  `mark_chunk_failed` accept a `flush` keyword. Synthesis's post-
+  gather loop now defers persistence with `flush=False` and flushes
+  once at the end, replacing N per-chunk JSON writes. Crash safety
+  is preserved because the loop runs after parallel synthesis is
+  already complete.
+- **Linker batches embeddings per page** — `_link_text` collects
+  context windows for every candidate span on a page and issues one
+  `embed_texts` call instead of N per-span calls in
+  `_resolve_with_rerank`. Falls back to the per-span path when the
+  batch call raises so behavior degrades gracefully on embedder
+  failures.
+- **Incremental index rebuilds** — `IndexUpdater.rebuild_for_pages`
+  derives affected categories from a touched-page list and only
+  rewrites those sub-index files plus the root index, instead of
+  walking every category every time. Wired into the ingest hot path
+  (post-synthesis indexing) and the post-ingest auto-merge path.
+  Other call sites still use `rebuild_all` when the touched set is
+  unknown (e.g., post-merge relink, `wikiloom rebuild-cache`).
+
+### Fixed
+
+- **`wikiloom log` now shows commit hashes for query events** — query
+  events are written to `log.md` before the commit lands, so the
+  hash couldn't be baked into the file at write time. The log
+  command now backfills missing hashes post-hoc by matching commit
+  subjects (`<event_type>: <description>`) against a recent-commits
+  window. Pure display-side change; `log.md` itself is untouched.
+
 ## [0.1.2] — 2026-04-29
 
 ### Performance

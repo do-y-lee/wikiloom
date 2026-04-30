@@ -163,23 +163,42 @@ class IngestState:
     # Chunk progress
     # ------------------------------------------------------------------
 
-    def mark_chunk_done(self, index: int, page_id: str | None = None) -> None:
-        """Mark chunk ``index`` as completed. Persists to disk."""
+    def mark_chunk_done(
+        self,
+        index: int,
+        page_id: str | None = None,
+        *,
+        flush: bool = True,
+    ) -> None:
+        """Mark chunk ``index`` as completed.
+
+        Persists to disk by default so a crash mid-loop leaves an
+        accurate resume point. Tight inner loops can pass ``flush=False``
+        to defer persistence, but the caller is then responsible for
+        invoking ``save()`` before the in-memory state could be lost.
+        """
         for chunk in self.chunks:
             if chunk.index == index:
                 chunk.done = True
                 chunk.page_id = page_id
                 chunk.error = None
                 break
-        self.save()
+        if flush:
+            self.save()
 
-    def mark_chunk_failed(self, index: int, error: str) -> None:
-        """Record the last failure reason for a chunk. Persists to disk."""
+    def mark_chunk_failed(
+        self, index: int, error: str, *, flush: bool = True
+    ) -> None:
+        """Record the last failure reason for a chunk.
+
+        Same ``flush`` semantics as ``mark_chunk_done``.
+        """
         for chunk in self.chunks:
             if chunk.index == index:
                 chunk.error = error
                 break
-        self.save()
+        if flush:
+            self.save()
 
     def pending_indices(self) -> list[int]:
         """Chunk indices that are not yet done, in order."""

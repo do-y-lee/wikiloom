@@ -105,6 +105,45 @@ class IndexUpdater:
         written.append(self.rebuild_root_index())
         return written
 
+    def rebuild_for_pages(
+        self, page_ids: "set[str] | list[str] | tuple[str, ...]"
+    ) -> list[Path]:
+        """Rebuild only the indexes affected by ``page_ids``.
+
+        Derives the affected category from each ``page_id``'s top-level
+        prefix (``concepts/foo`` → ``concepts``) and rebuilds only
+        those sub-index files plus the root index (whose per-category
+        counts may have shifted).
+
+        Used by the ingest / merge flows that already track which pages
+        changed — avoids walking every category subdirectory when only
+        a couple of categories were touched. Falls back to a full
+        rebuild via ``rebuild_all`` if any caller passes an empty set
+        and still wants something done.
+        """
+        if not page_ids or not self.wiki_dir.exists():
+            return []
+
+        affected: set[str] = set()
+        for pid in page_ids:
+            if "/" in pid:
+                affected.add(pid.split("/", 1)[0])
+        if not affected:
+            return []
+
+        written: list[Path] = []
+        for category in sorted(affected):
+            subdir = self.wiki_dir / category
+            if not subdir.is_dir() or category == "archive":
+                continue
+            written.append(self.rebuild_sub_index(subdir))
+
+        # Root index counts every category, so rebuild it whenever any
+        # sub-index changes.
+        if written:
+            written.append(self.rebuild_root_index())
+        return written
+
     # ------------------------------------------------------------------
     # Sub-index rendering
     # ------------------------------------------------------------------
