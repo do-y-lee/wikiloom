@@ -5,6 +5,35 @@ All notable changes to WikiLoom are recorded here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.4] — 2026-04-30
+
+### Performance
+
+- **Batched spaCy in `link_all` via `nlp.pipe()`** — the linker's
+  multi-page entry point now reads bodies up front and runs spaCy
+  in one batched call instead of per-page `nlp(body)`. Same output;
+  amortizes pipeline overhead across the batch. Roughly 2–3× faster
+  NLP time on ingest-tail link runs. `link_page` accepts an
+  optional pre-computed `Doc` so callers that already have one
+  (notably `link_all`) avoid the redundant parse; direct callers
+  keep working unchanged.
+- **Skip stub pages in the linker** — pages with `status: stub`
+  carry placeholder bodies (`*Stub — awaiting content.*`) that
+  produce no useful link candidates. `link_page` now short-circuits
+  before NLP, and `link_all` drops them from the `nlp.pipe` batch
+  entirely. Source pages are intentionally still linked because
+  their summaries reference real concepts.
+
+### Fixed
+
+- **`wikiloom log` crash on real git output** — the 0.1.3 commit-hash
+  backfill parsed `log.md` timestamps as naive datetimes (after
+  stripping the trailing `Z`) but git's `%aI` format is
+  offset-aware. Subtracting them threw `TypeError: can't subtract
+  offset-naive and offset-aware datetimes` on every `wikiloom log`
+  invocation that contained a query event. Normalize `Z` to
+  `+00:00` so both ends are timezone-aware. Regression test added.
+
 ## [0.1.3] — 2026-04-29
 
 ### Performance

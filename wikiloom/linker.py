@@ -174,15 +174,44 @@ class LinkingEngine:
     # Public API
     # ------------------------------------------------------------------
 
-    def link_page(self, page_path: Path) -> LinkingResult:
-        """Run linking on a single wiki page and write back the result."""
+    @staticmethod
+    def _should_skip(fm: Frontmatter | None) -> bool:
+        """Whether a page is exempt from the linker entirely.
+
+        ``status == "stub"`` pages have placeholder bodies (the
+        boilerplate ``*Stub — awaiting content.*``); running NER on
+        them produces no useful candidates and only burns embedder
+        time. Source pages are intentionally *not* skipped — their
+        summaries carry real concept references that benefit from
+        being wikilinked.
+        """
+        return fm is not None and fm.status == "stub"
+
+    def link_page(
+        self,
+        page_path: Path,
+        *,
+        doc: "spacy.tokens.Doc | None" = None,
+    ) -> LinkingResult:
+        """Run linking on a single wiki page and write back the result.
+
+        ``doc`` is an optional pre-computed spaCy ``Doc``. ``link_all``
+        populates it via one batched ``nlp.pipe`` call so this method
+        doesn't have to invoke spaCy per page. When omitted, the doc
+        is computed inline (preserves the original code path for
+        callers that don't pre-batch).
+        """
         page_path = Path(page_path)
         text = page_path.read_text(encoding="utf-8")
         fm, body = parse_frontmatter(text)
 
+        if self._should_skip(fm):
+            return LinkingResult(page=page_path)
+
         result = self._link_text(
             body,
             source_page_id=page_id_from_path(self.registry.wiki_dir, page_path),
+            doc=doc,
         )
 
         if fm is not None:
@@ -224,11 +253,39 @@ class LinkingEngine:
         wikis without every call site having to drive the loop itself.
 
         Returns the list of pages that actually got at least one link.
+
+        Pre-reads the bodies and runs spaCy in one batched ``nlp.pipe``
+        call before the per-page loop. This amortizes spaCy's
+        pipeline overhead (entity ruler setup, tokenizer state) across
+        the whole batch and is meaningfully faster than per-page
+        ``nlp(body)``. Stub and source pages are filtered out of the
+        batch so they don't pay the NLP cost only to be discarded.
         """
+        # Pre-pass: read bodies for batched NLP. Skip pages we'd drop
+        # anyway so we don't spend NLP time on them.
+        page_bodies: list[tuple[int, str]] = []
+        for i, page in enumerate(pages):
+            try:
+                text = Path(page).read_text(encoding="utf-8")
+            except OSError:
+                continue
+            fm, body = parse_frontmatter(text)
+            if self._should_skip(fm):
+                continue
+            page_bodies.append((i, body))
+
+        docs_by_index: dict[int, Any] = {}
+        if page_bodies:
+            for (i, _), doc in zip(
+                page_bodies,
+                self.nlp.pipe(b for _, b in page_bodies),
+            ):
+                docs_by_index[i] = doc
+
         modified: list[Path] = []
         total = len(pages)
         for i, page in enumerate(pages, start=1):
-            r = self.link_page(page)
+            r = self.link_page(page, doc=docs_by_index.get(i - 1))
             if r.high_confidence_links + r.medium_confidence_links > 0:
                 modified.append(r.page)
             if progress is not None:
@@ -247,13 +304,25 @@ class LinkingEngine:
         pending: list[PendingLink]
         unresolved: list[UnresolvedEntity]
 
-    def _link_text(self, body: str, source_page_id: str) -> _LinkTextResult:
+    def _link_text(
+        self,
+        body: str,
+        source_page_id: str,
+        *,
+        doc: "spacy.tokens.Doc | None" = None,
+    ) -> _LinkTextResult:
         """Apply linking to a body string. Returns the modified body and stats.
 
         Pulled out so it can be tested without writing to disk.
+
+        ``doc`` lets callers (notably ``link_all``) supply a spaCy
+        ``Doc`` that was produced by a batched ``nlp.pipe`` call. If
+        omitted, the doc is computed inline so direct callers
+        (single-page tests, the legacy path) keep working.
         """
         safe_zones = self._compute_safe_zones(body)
-        doc = self.nlp(body)
+        if doc is None:
+            doc = self.nlp(body)
 
         candidates: list[tuple[str, str, int, int]] = [
             (ent.text, ent.label_, ent.start_char, ent.end_char) for ent in doc.ents

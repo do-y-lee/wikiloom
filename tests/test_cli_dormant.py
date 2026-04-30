@@ -235,6 +235,44 @@ def test_log_piped_is_tsv_with_full_fields(project: Path) -> None:
     assert ingest_cols[5] == "abcdef12"
 
 
+def test_log_backfills_commit_hash_for_query_events(project: Path) -> None:
+    """A query event written without a commit hash should pick up the
+    matching commit's hash at display time.
+
+    Query events land in ``log.md`` *before* their commit, so the
+    write-side can't carry the hash. ``wikiloom log`` matches the
+    commit subject (``query: <description>``) against recent git
+    history and backfills the hash for display. Regression guard
+    for the offset-naive vs. offset-aware datetime mismatch that
+    previously crashed this path on real git output.
+    """
+    # Use a current timestamp so the event sits inside the lookup's
+    # 5-minute window relative to the commit that lands a moment later.
+    now_ts = (
+        datetime.now(timezone.utc).isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
+    )
+    log_path = project / "wiki" / "log.md"
+    log_path.write_text(
+        "# Event Log\n\n"
+        f"## [{now_ts}] query | what is a chargeback?\n\n"
+        "- **Tokens used**: 3,541\n"
+        "- **Cost**: $0.0200\n",
+        encoding="utf-8",
+    )
+
+    repo = git.Repo(project)
+    repo.git.add("-A", "--", "wiki")
+    commit = repo.index.commit("query: what is a chargeback?")
+
+    result = CliRunner().invoke(main, ["log", "--project", str(project)])
+
+    assert result.exit_code == 0, result.output
+    lines = [ln for ln in result.output.splitlines() if ln]
+    # Pretty (non-piped) output renders the hash in parentheses.
+    assert any(commit.hexsha[:8] in line for line in lines), result.output
+
+
 def test_orphans_limit_caps_output(project: Path) -> None:
     """`wikiloom orphans -n 1` prints at most one orphan."""
     fresh = _iso(datetime.now(timezone.utc))

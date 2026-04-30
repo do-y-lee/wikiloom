@@ -665,3 +665,90 @@ We tried Flash Attention and it sped up training significantly.
     assert "title: Paper" in written or 'title: "Paper"' in written
     # Wikilink inserted
     assert "[[concepts/flash-attention|" in written
+
+
+@requires_model
+def test_link_page_skips_stub_pages(registry: Registry, project: Path) -> None:
+    """Stub pages have placeholder bodies; linking them is wasted work
+    and produces no useful candidates. ``link_page`` must short-circuit
+    before reading the alias map or invoking spaCy."""
+    eng = LinkingEngine(
+        registry,
+        embedder=_StubEmbedder(),
+        cache=_StubCache(from_registry=registry),
+        config=LinkingConfig(auto_create_stubs=False),
+    )
+
+    page_path = project / "wiki" / "concepts" / "stubby.md"
+    page_path.parent.mkdir(parents=True, exist_ok=True)
+    body_with_link_target = (
+        "We tried Flash Attention and it sped up training significantly.\n"
+    )
+    page_path.write_text(
+        "---\n"
+        'title: "Stubby"\n'
+        "type: concept\n"
+        "status: stub\n"
+        'created: "2026-04-12T00:00:00Z"\n'
+        'modified: "2026-04-12T00:00:00Z"\n'
+        'summary: "Stub"\n'
+        "---\n\n"
+        + body_with_link_target,
+        encoding="utf-8",
+    )
+
+    result = eng.link_page(page_path)
+
+    # No links inserted; result fields default to zero/empty.
+    assert result.high_confidence_links == 0
+    assert result.medium_confidence_links == 0
+    assert result.pending_review == 0
+    assert result.unresolved == []
+
+    # File body is left untouched — even the obvious "Flash Attention"
+    # mention isn't wrapped in a wikilink.
+    written = page_path.read_text()
+    assert "[[concepts/flash-attention|" not in written
+
+
+@requires_model
+def test_link_all_skips_stubs_in_batched_pipe(
+    registry: Registry, project: Path
+) -> None:
+    """The ``nlp.pipe`` pre-pass in ``link_all`` must drop stub pages
+    so spaCy doesn't burn cycles parsing placeholder bodies. Mixed
+    batches of active + stub pages should still produce links on the
+    active ones."""
+    eng = LinkingEngine(
+        registry,
+        embedder=_StubEmbedder(),
+        cache=_StubCache(from_registry=registry),
+        config=LinkingConfig(auto_create_stubs=False),
+    )
+
+    active = project / "wiki" / "concepts" / "active.md"
+    stub = project / "wiki" / "concepts" / "stubby.md"
+    for path, status in ((active, "active"), (stub, "stub")):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "---\n"
+            f'title: "{path.stem.title()}"\n'
+            "type: concept\n"
+            f'status: {status}\n'
+            'created: "2026-04-12T00:00:00Z"\n'
+            'modified: "2026-04-12T00:00:00Z"\n'
+            'summary: "Body"\n'
+            "---\n\n"
+            "We tried Flash Attention and it worked.\n",
+            encoding="utf-8",
+        )
+
+    modified = eng.link_all([active, stub])
+
+    # Only the active page gets linked; stub is skipped.
+    assert active in modified
+    assert stub not in modified
+    # Active body has the wikilink inserted.
+    assert "[[concepts/flash-attention|" in active.read_text()
+    # Stub body is left untouched.
+    assert "[[concepts/flash-attention|" not in stub.read_text()

@@ -789,10 +789,15 @@ def _enrich_events_with_git_hashes(
         return
 
     def _parse(ts: str) -> datetime | None:
+        # Normalize trailing ``Z`` to ``+00:00`` so ``fromisoformat``
+        # returns a timezone-aware datetime. Git's ``%aI`` format
+        # already carries an offset, so making both aware lets the
+        # subtraction below work without the offset-mismatch
+        # TypeError we'd otherwise hit on the first event lookup.
         if not ts:
             return None
         try:
-            return datetime.fromisoformat(ts.rstrip("Z").replace("Z", ""))
+            return datetime.fromisoformat(ts.replace("Z", "+00:00"))
         except ValueError:
             return None
 
