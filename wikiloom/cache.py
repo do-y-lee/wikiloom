@@ -192,10 +192,8 @@ class SQLiteCache:
         # is safe because ``self._lock`` serializes every access.
         self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
-        # Performance PRAGMAs. WAL is database-scoped and persists; the
-        # rest are connection-scoped. The cache is a derived artifact —
-        # corrupted? run ``wikiloom rebuild-cache``. So the small
-        # durability tradeoff (one fsync per txn instead of two) is fine.
+        # Cache is regenerable via ``wikiloom rebuild-cache`` — durability
+        # tradeoff of synchronous=NORMAL is acceptable.
         self._conn.executescript(
             """
             PRAGMA journal_mode=WAL;
@@ -627,16 +625,12 @@ class SQLiteCache:
         with no embedding. Falls back gracefully: if no embeddings
         exist, returns an empty list.
 
-        ``exclude_statuses`` filters out pages with the given statuses
-        (e.g., ``("deprecated",)``) at the matmul step so the top-K
-        is computed over the eligible rows only. Fewer than ``limit``
-        rows may be returned if the filter is restrictive.
+        ``exclude_statuses`` masks rows with the given statuses (e.g.,
+        ``("deprecated",)``); fewer than ``limit`` rows may be returned
+        if the filter is restrictive.
 
-        Backed by a lazily-loaded numpy matrix cached on the instance:
-        the first call deserializes every page's embedding into one
-        contiguous matrix, and subsequent calls reuse it via a single
-        matmul. The matrix is invalidated by every page-write path
-        (``full_rebuild``, ``_incremental_sync``).
+        Backed by a lazily-loaded numpy matrix cached on the instance,
+        invalidated by every page-write path.
         """
         self._ensure_embedding_matrix()
         if self._emb_matrix is None or not self._emb_ids:
@@ -647,8 +641,7 @@ class SQLiteCache:
         if q_norm == 0.0:
             return []
 
-        # cosine = (M · q) / (||M_i|| * ||q||) — one matmul replaces a
-        # Python loop over every page on every query.
+        # cosine = (M · q) / (||M_i|| * ||q||)
         assert self._emb_norms is not None  # set whenever _emb_matrix is
         scores = (self._emb_matrix @ q) / (self._emb_norms * q_norm + 1e-12)
 
@@ -665,14 +658,11 @@ class SQLiteCache:
         # argpartition is O(n); a full sort would be O(n log n).
         top_idx = np.argpartition(-scores, k - 1)[:k]
         top_idx = top_idx[np.argsort(-scores[top_idx])]
-        # Drop rows masked out by ``exclude_statuses``.
         top_idx = top_idx[np.isfinite(scores[top_idx])]
         if len(top_idx) == 0:
             return []
         top_ids = [self._emb_ids[i] for i in top_idx]
 
-        # Fetch full rows only for the top-k — much cheaper than the
-        # previous "select *" over every embedded page per query.
         placeholders = ",".join("?" * len(top_ids))
         with self._connect() as conn:
             rows = conn.execute(

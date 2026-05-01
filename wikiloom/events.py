@@ -81,11 +81,6 @@ def append_event(log_path: Path, event: WikiEvent) -> None:
       function or risk corrupting ``wiki/log.md``.
 
     The file is created with a header on first write if it doesn't exist.
-
-    Uses true append mode (``open("a")``) instead of read-concat-write
-    so cost is constant per call. The previous implementation rewrote
-    the entire log on every event, turning N events over a project's
-    lifetime into O(N^2) cumulative I/O.
     """
     entry = event.to_log_entry()
     if log_path.exists():

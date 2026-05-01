@@ -40,17 +40,12 @@ def retrieve_candidates_for_chunk(
 ) -> list[PageCandidate]:
     """Return the top-K existing pages most similar to ``chunk_text``.
 
-    Embeds the chunk and delegates ranking to ``SQLiteCache.semantic_search``,
-    which reuses a process-cached embedding matrix and runs one matmul per
-    call instead of a Python loop over every page.
-
     Deprecated pages are excluded; dormant pages are kept since they are
     valid update targets that the LLM should see to avoid duplicate
     creation.
 
     ``cache`` may be passed in so concurrent workers share a single
-    matrix (built once on the first call). When omitted, a transient
-    cache is created and closed for this call.
+    ``SQLiteCache`` instance.
 
     Returns an empty list gracefully when:
 

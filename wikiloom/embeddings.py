@@ -162,12 +162,8 @@ def load_embedder(project: Path) -> Embedder | None:
     missing, or the backend fails to import. Callers can pass the result
     straight into ``SQLiteCache.full_rebuild`` / ``sync_from_files``.
 
-    The loaded embedder is cached at module level keyed by
-    ``(provider, model)`` so repeated calls within one process — across
-    ingest stages, post-merge relinks, dormant-review loops, etc. —
-    reuse the same instance instead of paying the 1-3 s ONNX/SBert
-    cold-load tax each time. Call ``clear_embedder_cache()`` to reset
-    (used by tests; production callers don't need to).
+    Cached at module level keyed by ``(provider, model)``;
+    ``clear_embedder_cache()`` resets for tests.
     """
     global _cached_embedder, _cached_embedder_key
 
@@ -196,12 +192,7 @@ def load_embedder(project: Path) -> Embedder | None:
 
 
 def clear_embedder_cache() -> None:
-    """Reset the module-level ``load_embedder`` cache.
-
-    Tests use this between cases so a cached embedder from one test
-    doesn't leak into the next (e.g., when a later test changes
-    project config and expects a fresh load).
-    """
+    """Reset the module-level ``load_embedder`` cache."""
     global _cached_embedder, _cached_embedder_key
     _cached_embedder = None
     _cached_embedder_key = None

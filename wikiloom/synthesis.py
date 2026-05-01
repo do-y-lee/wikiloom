@@ -610,11 +610,7 @@ def run_synthesis(
     fallback_manifest_context = render_manifest_context(registry)
     per_chunk_retrieval = use_page_context and embedder is not None
 
-    # Build the page-context cache once and share it across every
-    # worker. The cache lazily constructs an in-memory embedding matrix
-    # on first use and reuses it for every subsequent chunk — replacing
-    # what used to be M Python-level cosine calls per chunk with one
-    # matmul against a cached matrix.
+    # Shared across workers so the embedding matrix is built once.
     page_context_cache: Any | None = None
     if per_chunk_retrieval:
         from wikiloom.cache import SQLiteCache
