@@ -5,6 +5,89 @@ All notable changes to WikiLoom are recorded here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.5] — 2026-05-01
+
+### Performance
+
+- **Per-chunk page-context retrieval reuses the cached embedding
+  matrix** — `retrieve_candidates_for_chunk` opened a fresh SQLite
+  connection per chunk and Python-looped `deserialize_embedding`
+  + `cosine_similarity` over every page, completely bypassing
+  the `SQLiteCache._emb_matrix` cache added in 0.1.2. On a 5K-
+  page wiki ingesting 50 chunks that's 250K deserializes and
+  250K cosine calls. Now delegates to `SQLiteCache.semantic_search`
+  and `run_synthesis` shares one cache instance across every
+  worker — one matmul per chunk against the cached `(M, D)`
+  matrix regardless of wiki size. `semantic_search` gains an
+  `exclude_statuses` kwarg that masks deprecated rows at the
+  matmul step, preserving the previous SQL filter's semantics.
+- **Module-level `load_embedder` cache** — every prior call
+  reloaded the 100–300 MB ONNX/SBert model from disk (~1–3 s
+  cold). A single `wikiloom ingest` paid this 3× (synthesis +
+  linker + cache sync); a `dormant review` over N pages paid
+  it N× because `_sync_cache` fires per candidate. Now cached
+  at module level keyed by `(provider, model)`; subsequent
+  calls within one process return the same instance. Tests
+  get isolation via a new `clear_embedder_cache()` helper plus
+  an autouse fixture in `tests/conftest.py`.
+- **Event log uses true append mode** — `append_event` read
+  `wiki/log.md` in full, concatenated the new entry, and
+  rewrote the file on every event. With ingest, lint, merge,
+  deprecate, relink, and save all emitting events, that was
+  O(N) per call and O(N²) cumulative I/O over a project's
+  lifetime. Now opens in append mode and writes only the new
+  entry; header-on-first-write is preserved.
+- **SQLite cache opens with WAL + perf PRAGMAs** — the cache
+  connection ran with default `journal_mode=DELETE` and
+  `synchronous=FULL`, fsyncing twice per transaction. Switched
+  to `journal_mode=WAL`, `synchronous=NORMAL`,
+  `temp_store=MEMORY`, and `mmap_size=256MB`. Roughly 5–10×
+  faster writes on rebuild paths and readers no longer block
+  on writers. The cache is regenerable via `wikiloom
+  rebuild-cache`, so the durability tradeoff is acceptable.
+- **Cached alias keys list in `LinkingEngine`** — `_resolve`
+  and `_resolve_top_k` rebuilt `list(self.alias_map.keys())`
+  on every span. With M aliases and N spans across a link
+  pass that's N list reconstructions of size M per pass.
+  Built once in `__init__` and refreshed alongside the alias
+  map in `refresh()`.
+- **Registry hoisted out of `_dormant_review` loop** —
+  `Registry(project / "_registry")` was rebuilt on every
+  iteration, re-reading and re-parsing `manifest.json` per
+  candidate. A 100-candidate review session ran 100 manifest
+  loads. Now built once next to `BacklinkRegistry`.
+- **Batched cache inserts with `executemany`** — `full_rebuild`
+  and `_incremental_sync` inserted pages, FTS rows, aliases,
+  and backlinks one `conn.execute()` at a time inside Python
+  loops. On a 1K-page rebuild that's roughly 5K Python→C
+  round-trips just from boundary crossing. Now builds the
+  row lists up front and dispatches each table with one
+  `executemany` call.
+
+### Upgrade notes
+
+- WAL mode creates `wiki.db-wal` and `wiki.db-shm` sidecar
+  files next to `_registry/wiki.db`. The scaffolded
+  `.gitignore` for new projects now uses `_registry/wiki.db*`
+  to cover the sidecars. **Existing projects need to widen
+  their `.gitignore` line manually** — change
+  `_registry/wiki.db` to `_registry/wiki.db*`. Otherwise the
+  sidecars will appear as untracked files in `git status`
+  after the next ingest.
+
+### Documentation
+
+- New **Performance invariants** section in `CLAUDE.md` —
+  each bullet anchors a rule to a real cache or helper
+  (`SQLiteCache.semantic_search`, the module-level
+  `load_embedder` cache, the long-lived `SQLiteCache._conn`
+  with its WAL PRAGMAs, the alias keys cache, the
+  `executemany` rule, the explicit "don't construct
+  `Registry` / `SQLiteCache` / `load_embedder` /
+  `BacklinkRegistry` inside loops" list) so future
+  contributors reach for the existing fast path instead of
+  reinventing a slow one.
+
 ## [0.1.4] — 2026-04-30
 
 ### Performance
