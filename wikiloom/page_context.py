@@ -9,12 +9,12 @@ exists on the chunk's topic before deciding UPDATE vs CREATE.
 
 from __future__ import annotations
 
-import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from wikiloom.embeddings import cosine_similarity, deserialize_embedding
+if TYPE_CHECKING:
+    from wikiloom.cache import SQLiteCache
 
 
 @dataclass
@@ -35,11 +35,23 @@ def retrieve_candidates_for_chunk(
     embedder: Any,
     top_k: int = 10,
     min_similarity: float = 0.60,
+    *,
+    cache: "SQLiteCache | None" = None,
 ) -> list[PageCandidate]:
     """Return the top-K existing pages most similar to ``chunk_text``.
 
-    Embeds the chunk, scores every page in the cache by cosine
-    similarity, and returns the top-K above ``min_similarity``.
+    Embeds the chunk and delegates ranking to ``SQLiteCache.semantic_search``,
+    which reuses a process-cached embedding matrix and runs one matmul per
+    call instead of a Python loop over every page.
+
+    Deprecated pages are excluded; dormant pages are kept since they are
+    valid update targets that the LLM should see to avoid duplicate
+    creation.
+
+    ``cache`` may be passed in so concurrent workers share a single
+    matrix (built once on the first call). When omitted, a transient
+    cache is created and closed for this call.
+
     Returns an empty list gracefully when:
 
     - the cache is missing (fresh project)
@@ -58,45 +70,33 @@ def retrieve_candidates_for_chunk(
         return []
     query_vec = list(vectors[0])
 
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
+    from wikiloom.cache import SQLiteCache
+
+    owns_cache = cache is None
+    if cache is None:
+        cache = SQLiteCache(db_path)
     try:
-        # Include both active and dormant pages — dormant pages are
-        # valid update targets and the LLM should see them so it can
-        # propose freshening updates rather than creating duplicates.
-        rows = conn.execute(
-            "SELECT page_id, type, title, summary, status, embedding "
-            "FROM pages "
-            "WHERE status != 'deprecated' AND embedding IS NOT NULL"
-        ).fetchall()
-    finally:
-        conn.close()
-
-    scored: list[PageCandidate] = []
-    for row in rows:
-        blob = row["embedding"]
-        if blob is None:
-            continue
-        try:
-            page_vec = deserialize_embedding(blob)
-        except Exception:
-            continue
-        score = cosine_similarity(query_vec, page_vec)
-        if score < min_similarity:
-            continue
-        scored.append(
-            PageCandidate(
-                page_id=row["page_id"],
-                type=row["type"],
-                title=row["title"],
-                summary=row["summary"] or "",
-                similarity=score,
-                status=row["status"] or "active",
-            )
+        hits = cache.semantic_search(
+            query_vec,
+            limit=top_k,
+            exclude_statuses=("deprecated",),
         )
+    finally:
+        if owns_cache:
+            cache.close()
 
-    scored.sort(key=lambda c: c.similarity, reverse=True)
-    return scored[:top_k]
+    return [
+        PageCandidate(
+            page_id=h["page_id"],
+            type=h["type"],
+            title=h["title"],
+            summary=h.get("summary") or "",
+            similarity=h["similarity"],
+            status=h.get("status") or "active",
+        )
+        for h in hits
+        if h["similarity"] >= min_similarity
+    ]
 
 
 def render_candidates(candidates: list[PageCandidate]) -> str:

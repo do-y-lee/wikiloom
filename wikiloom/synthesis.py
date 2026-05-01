@@ -439,6 +439,7 @@ def _process_one_chunk(
     project_root: Path,
     embedder: Any | None,
     page_context_top_k: int,
+    page_context_cache: Any | None = None,
     parse_retry_count: int = 2,
     retry_callback: RetryCallback | None = None,
 ) -> tuple[int, SynthesizeResult | None, Exception | None, int]:
@@ -474,6 +475,7 @@ def _process_one_chunk(
                 project_root=project_root,
                 embedder=embedder,
                 top_k=page_context_top_k,
+                cache=page_context_cache,
             )
             chunk_context = render_candidates(candidates)
         else:
@@ -608,6 +610,19 @@ def run_synthesis(
     fallback_manifest_context = render_manifest_context(registry)
     per_chunk_retrieval = use_page_context and embedder is not None
 
+    # Build the page-context cache once and share it across every
+    # worker. The cache lazily constructs an in-memory embedding matrix
+    # on first use and reuses it for every subsequent chunk — replacing
+    # what used to be M Python-level cosine calls per chunk with one
+    # matmul against a cached matrix.
+    page_context_cache: Any | None = None
+    if per_chunk_retrieval:
+        from wikiloom.cache import SQLiteCache
+
+        db_path = project_root / "_registry" / "wiki.db"
+        if db_path.exists():
+            page_context_cache = SQLiteCache(db_path)
+
     pages_to_create: list[PageProposal] = []
     pages_to_update: list[PageProposal] = []
     entities: set[str] = set()
@@ -660,6 +675,7 @@ def run_synthesis(
                 project_root=project_root,
                 embedder=embedder,
                 page_context_top_k=page_context_top_k,
+                page_context_cache=page_context_cache,
                 parse_retry_count=parse_retry_count,
                 retry_callback=retry_callback,
             ): (ci, ct, chunk_id)
@@ -709,6 +725,9 @@ def run_synthesis(
                     for f in future_to_meta:
                         if not f.done():
                             f.cancel()
+
+    if page_context_cache is not None:
+        page_context_cache.close()
 
     # Snapshot of existing manifest page_ids for the slug-collision
     # guard. Mutable — we extend it as this ingest's own creates land,

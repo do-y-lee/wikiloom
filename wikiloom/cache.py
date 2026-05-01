@@ -197,6 +197,7 @@ class SQLiteCache:
         # dirty on every page-write path so the next query reloads.
         self._emb_matrix: np.ndarray | None = None
         self._emb_ids: list[str] = []
+        self._emb_statuses: list[str] = []
         self._emb_norms: np.ndarray | None = None
         self._emb_dirty = True
 
@@ -602,13 +603,22 @@ class SQLiteCache:
             return [dict(row) for row in rows]
 
     def semantic_search(
-        self, query_vector: list[float], limit: int = 5
+        self,
+        query_vector: list[float],
+        limit: int = 5,
+        *,
+        exclude_statuses: tuple[str, ...] | None = None,
     ) -> list[dict[str, Any]]:
         """Cosine similarity search against page embeddings.
 
         Returns the top ``limit`` pages by similarity, excluding pages
         with no embedding. Falls back gracefully: if no embeddings
         exist, returns an empty list.
+
+        ``exclude_statuses`` filters out pages with the given statuses
+        (e.g., ``("deprecated",)``) at the matmul step so the top-K
+        is computed over the eligible rows only. Fewer than ``limit``
+        rows may be returned if the filter is restrictive.
 
         Backed by a lazily-loaded numpy matrix cached on the instance:
         the first call deserializes every page's embedding into one
@@ -630,12 +640,23 @@ class SQLiteCache:
         assert self._emb_norms is not None  # set whenever _emb_matrix is
         scores = (self._emb_matrix @ q) / (self._emb_norms * q_norm + 1e-12)
 
+        if exclude_statuses:
+            excluded = set(exclude_statuses)
+            mask = np.array(
+                [s not in excluded for s in self._emb_statuses], dtype=bool
+            )
+            scores = np.where(mask, scores, -np.inf)
+
         k = min(limit, len(scores))
         if k == 0:
             return []
         # argpartition is O(n); a full sort would be O(n log n).
         top_idx = np.argpartition(-scores, k - 1)[:k]
         top_idx = top_idx[np.argsort(-scores[top_idx])]
+        # Drop rows masked out by ``exclude_statuses``.
+        top_idx = top_idx[np.isfinite(scores[top_idx])]
+        if len(top_idx) == 0:
+            return []
         top_ids = [self._emb_ids[i] for i in top_idx]
 
         # Fetch full rows only for the top-k — much cheaper than the
@@ -665,16 +686,18 @@ class SQLiteCache:
             return
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT page_id, embedding FROM pages "
+                "SELECT page_id, status, embedding FROM pages "
                 "WHERE embedding IS NOT NULL"
             ).fetchall()
         if not rows:
             self._emb_matrix = None
             self._emb_ids = []
+            self._emb_statuses = []
             self._emb_norms = None
             self._emb_dirty = False
             return
         self._emb_ids = [r["page_id"] for r in rows]
+        self._emb_statuses = [(r["status"] or "active") for r in rows]
         # ``np.frombuffer`` is zero-copy — keeps the on-disk BLOB
         # format unchanged while exposing it as a numpy view.
         self._emb_matrix = np.stack([
