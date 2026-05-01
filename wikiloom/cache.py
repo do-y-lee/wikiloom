@@ -192,6 +192,18 @@ class SQLiteCache:
         # is safe because ``self._lock`` serializes every access.
         self._conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        # Performance PRAGMAs. WAL is database-scoped and persists; the
+        # rest are connection-scoped. The cache is a derived artifact —
+        # corrupted? run ``wikiloom rebuild-cache``. So the small
+        # durability tradeoff (one fsync per txn instead of two) is fine.
+        self._conn.executescript(
+            """
+            PRAGMA journal_mode=WAL;
+            PRAGMA synchronous=NORMAL;
+            PRAGMA temp_store=MEMORY;
+            PRAGMA mmap_size=268435456;
+            """
+        )
         self._lock = threading.RLock()
         # Lazily-loaded embedding matrix for ``semantic_search``. Marked
         # dirty on every page-write path so the next query reloads.

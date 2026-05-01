@@ -30,7 +30,7 @@ RAW_SUBDIRS = [
 
 GITIGNORE_CONTENT = """\
 # WikiLoom — derived / transient state
-_registry/wiki.db
+_registry/wiki.db*
 _registry/query_history.json
 _registry/last_query.json
 _registry/ingest_state.json
