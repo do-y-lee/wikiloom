@@ -130,6 +130,8 @@ class LinkingEngine:
             self.nlp = nlp
 
         self.alias_map: dict[str, str] = registry.get_all_aliases()
+        # Cached keys list for rapidfuzz lookups.
+        self._alias_keys: list[str] = list(self.alias_map.keys())
         self._build_entity_ruler()
 
         # Hybrid is the only path; both dependencies are required. Call
@@ -168,6 +170,7 @@ class LinkingEngine:
         creating stubs) so subsequent ``link_page`` calls see them.
         """
         self.alias_map = self.registry.get_all_aliases()
+        self._alias_keys = list(self.alias_map.keys())
         self._build_entity_ruler()
 
     # ------------------------------------------------------------------
@@ -210,13 +213,15 @@ class LinkingEngine:
 
         result = self._link_text(
             body,
-            source_page_id=page_id_from_path(self.registry.wiki_dir, page_path),
+            source_page_id=page_id_from_path(
+                self.registry.wiki_dir, page_path),
             doc=doc,
         )
 
         if fm is not None:
             # Preserve frontmatter when writing back
-            page_path.write_text(render_frontmatter(fm) + "\n" + result.body, encoding="utf-8")
+            page_path.write_text(render_frontmatter(
+                fm) + "\n" + result.body, encoding="utf-8")
         else:
             page_path.write_text(result.body, encoding="utf-8")
 
@@ -334,8 +339,10 @@ class LinkingEngine:
                 )
 
         candidates = self._dedupe_candidates(candidates)
-        candidates = [c for c in candidates if self._in_safe_zone(c, safe_zones)]
-        candidates = [c for c in candidates if c[0].lower().strip() not in STOP_WORDS]
+        candidates = [
+            c for c in candidates if self._in_safe_zone(c, safe_zones)]
+        candidates = [c for c in candidates if c[0].lower().strip()
+                      not in STOP_WORDS]
 
         # Batch-embed every candidate context window in one call rather
         # than N per-span calls inside ``_resolve_with_rerank``. Skips
@@ -468,7 +475,7 @@ class LinkingEngine:
             return None
         best = process.extractOne(
             normalized,
-            list(self.alias_map.keys()),
+            self._alias_keys,
             scorer=fuzz.token_sort_ratio,
             score_cutoff=self.config.fuzzy_prefilter_threshold,
         )
@@ -497,7 +504,7 @@ class LinkingEngine:
             return [(self.alias_map[normalized], 100)]
         matches = process.extract(
             normalized,
-            list(self.alias_map.keys()),
+            self._alias_keys,
             scorer=fuzz.token_sort_ratio,
             score_cutoff=score_cutoff,
             limit=k * 3,  # overshoot to survive the alias→page_id dedup
@@ -565,7 +572,8 @@ class LinkingEngine:
 
         self._ensure_page_embeddings_loaded()
         embeddings = self._page_embeddings or {}
-        usable = [(pid, fscore) for pid, fscore in candidates if pid in embeddings]
+        usable = [(pid, fscore)
+                  for pid, fscore in candidates if pid in embeddings]
         if not usable:
             return None
 
@@ -723,7 +731,7 @@ class LinkingEngine:
             return body
         for link in sorted(links, key=lambda l: l.start, reverse=True):
             wikilink = f"[[{link.page_id}|{link.original_text}]]"
-            body = body[: link.start] + wikilink + body[link.end :]
+            body = body[: link.start] + wikilink + body[link.end:]
         return body
 
     # ------------------------------------------------------------------
