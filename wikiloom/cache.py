@@ -344,59 +344,73 @@ class SQLiteCache:
                     embedder, texts, progress=progress
                 )
 
-            for i, (page_id, entry, body_text, _) in enumerate(page_entries):
-                conn.execute(
-                    """
-                    INSERT INTO pages (
-                        page_id, title, type, status, summary,
-                        created, modified, source_count,
-                        inbound_links, outbound_links,
-                        confidence, human_edited, content_hash,
-                        embedding
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        page_id,
-                        entry.title,
-                        entry.type,
-                        entry.status,
-                        entry.summary,
-                        entry.created,
-                        entry.modified,
-                        entry.source_count,
-                        entry.inbound_link_count,
-                        entry.outbound_link_count,
-                        entry.confidence,
-                        1 if entry.human_edited else 0,
-                        None,
-                        embedding_blobs[i],
-                    ),
+            page_rows = [
+                (
+                    page_id,
+                    entry.title,
+                    entry.type,
+                    entry.status,
+                    entry.summary,
+                    entry.created,
+                    entry.modified,
+                    entry.source_count,
+                    entry.inbound_link_count,
+                    entry.outbound_link_count,
+                    entry.confidence,
+                    1 if entry.human_edited else 0,
+                    None,
+                    embedding_blobs[i],
                 )
-                conn.execute(
-                    "INSERT INTO pages_fts (page_id, title, summary, body) VALUES (?, ?, ?, ?)",
-                    (page_id, entry.title, entry.summary or "", body_text),
+                for i, (page_id, entry, _, _) in enumerate(page_entries)
+            ]
+            fts_rows = [
+                (page_id, entry.title, entry.summary or "", body_text)
+                for page_id, entry, body_text, _ in page_entries
+            ]
+            alias_rows = [
+                (alias.lower(), page_id)
+                for page_id, entry, _, _ in page_entries
+                for alias in entry.aliases
+            ]
+            backlink_rows = [
+                (
+                    edge.source,
+                    edge.target,
+                    edge.context,
+                    edge.confidence,
+                    edge.linked_at,
                 )
-                for alias in entry.aliases:
-                    conn.execute(
-                        "INSERT OR IGNORE INTO aliases (alias, page_id) VALUES (?, ?)",
-                        (alias.lower(), page_id),
-                    )
+                for edge in backlinks.edges
+            ]
 
-            for edge in backlinks.edges:
-                conn.execute(
-                    """
-                    INSERT OR REPLACE INTO backlinks (
-                        source_page, target_page, context, confidence, linked_at
-                    ) VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (
-                        edge.source,
-                        edge.target,
-                        edge.context,
-                        edge.confidence,
-                        edge.linked_at,
-                    ),
-                )
+            conn.executemany(
+                """
+                INSERT INTO pages (
+                    page_id, title, type, status, summary,
+                    created, modified, source_count,
+                    inbound_links, outbound_links,
+                    confidence, human_edited, content_hash,
+                    embedding
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                page_rows,
+            )
+            conn.executemany(
+                "INSERT INTO pages_fts (page_id, title, summary, body) VALUES (?, ?, ?, ?)",
+                fts_rows,
+            )
+            conn.executemany(
+                "INSERT OR IGNORE INTO aliases (alias, page_id) VALUES (?, ?)",
+                alias_rows,
+            )
+            conn.executemany(
+                """
+                INSERT OR REPLACE INTO backlinks (
+                    source_page, target_page, context, confidence, linked_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                backlink_rows,
+            )
 
         self._invalidate_embeddings()
         return page_count
@@ -496,84 +510,88 @@ class SQLiteCache:
             texts = [t[3] for t in to_upsert]
             embedding_blobs = _embed_in_batches(embedder, texts)
 
-        with self._connect() as conn:
-            for page_id in to_delete:
-                conn.execute(
-                    "DELETE FROM pages WHERE page_id = ?", (page_id,)
-                )
-                conn.execute(
-                    "DELETE FROM aliases WHERE page_id = ?", (page_id,)
-                )
-                conn.execute(
-                    "DELETE FROM pages_fts WHERE page_id = ?", (page_id,)
-                )
+        delete_ids = [(page_id,) for page_id in to_delete] + [
+            (page_id,) for page_id, _, _, _ in to_upsert
+        ]
+        page_rows = [
+            (
+                page_id,
+                entry.title,
+                entry.type,
+                entry.status,
+                entry.summary,
+                entry.created,
+                entry.modified,
+                entry.source_count,
+                entry.inbound_link_count,
+                entry.outbound_link_count,
+                entry.confidence,
+                1 if entry.human_edited else 0,
+                None,
+                embedding_blobs[i],
+            )
+            for i, (page_id, entry, _, _) in enumerate(to_upsert)
+        ]
+        fts_rows = [
+            (page_id, entry.title, entry.summary or "", body_text)
+            for page_id, entry, body_text, _ in to_upsert
+        ]
+        alias_rows = [
+            (alias.lower(), page_id)
+            for page_id, entry, _, _ in to_upsert
+            for alias in entry.aliases
+        ]
+        backlink_rows = [
+            (
+                edge.source,
+                edge.target,
+                edge.context,
+                edge.confidence,
+                edge.linked_at,
+            )
+            for edge in backlinks.edges
+        ]
 
-            for i, (page_id, entry, body_text, _) in enumerate(to_upsert):
-                conn.execute(
-                    "DELETE FROM pages WHERE page_id = ?", (page_id,)
-                )
-                conn.execute(
-                    "DELETE FROM aliases WHERE page_id = ?", (page_id,)
-                )
-                conn.execute(
-                    "DELETE FROM pages_fts WHERE page_id = ?", (page_id,)
-                )
-                conn.execute(
-                    """
-                    INSERT INTO pages (
-                        page_id, title, type, status, summary,
-                        created, modified, source_count,
-                        inbound_links, outbound_links,
-                        confidence, human_edited, content_hash,
-                        embedding
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        page_id,
-                        entry.title,
-                        entry.type,
-                        entry.status,
-                        entry.summary,
-                        entry.created,
-                        entry.modified,
-                        entry.source_count,
-                        entry.inbound_link_count,
-                        entry.outbound_link_count,
-                        entry.confidence,
-                        1 if entry.human_edited else 0,
-                        None,
-                        embedding_blobs[i],
-                    ),
-                )
-                conn.execute(
-                    "INSERT INTO pages_fts (page_id, title, summary, body) VALUES (?, ?, ?, ?)",
-                    (page_id, entry.title, entry.summary or "", body_text),
-                )
-                for alias in entry.aliases:
-                    conn.execute(
-                        "INSERT OR IGNORE INTO aliases (alias, page_id) VALUES (?, ?)",
-                        (alias.lower(), page_id),
-                    )
+        with self._connect() as conn:
+            conn.executemany("DELETE FROM pages WHERE page_id = ?", delete_ids)
+            conn.executemany("DELETE FROM aliases WHERE page_id = ?", delete_ids)
+            conn.executemany(
+                "DELETE FROM pages_fts WHERE page_id = ?", delete_ids
+            )
+
+            conn.executemany(
+                """
+                INSERT INTO pages (
+                    page_id, title, type, status, summary,
+                    created, modified, source_count,
+                    inbound_links, outbound_links,
+                    confidence, human_edited, content_hash,
+                    embedding
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                page_rows,
+            )
+            conn.executemany(
+                "INSERT INTO pages_fts (page_id, title, summary, body) VALUES (?, ?, ?, ?)",
+                fts_rows,
+            )
+            conn.executemany(
+                "INSERT OR IGNORE INTO aliases (alias, page_id) VALUES (?, ?)",
+                alias_rows,
+            )
 
             # Refresh backlinks. Cheap — just a JSON read + row re-insert.
             # Keeps graph-walking queries (backlinks, related, orphans)
             # current after merge/rename/link edits.
             conn.execute("DELETE FROM backlinks")
-            for edge in backlinks.edges:
-                conn.execute(
-                    """
-                    INSERT OR REPLACE INTO backlinks (
-                        source_page, target_page, context, confidence, linked_at
-                    ) VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (
-                        edge.source,
-                        edge.target,
-                        edge.context,
-                        edge.confidence,
-                        edge.linked_at,
-                    ),
-                )
+            conn.executemany(
+                """
+                INSERT OR REPLACE INTO backlinks (
+                    source_page, target_page, context, confidence, linked_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                backlink_rows,
+            )
 
         self._invalidate_embeddings()
 
