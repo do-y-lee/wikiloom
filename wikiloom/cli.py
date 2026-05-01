@@ -4076,6 +4076,7 @@ def _dormant_review(project: Path) -> None:
 
     bl = BacklinkRegistry(project / "_registry")
     graph = bl.graph
+    registry = Registry(project / "_registry")
 
     total = len(candidates)
     marked = 0
@@ -4093,7 +4094,6 @@ def _dormant_review(project: Path) -> None:
     start = _time.monotonic()
 
     for i, candidate in enumerate(sorted(candidates, key=lambda x: -x.age_days), start=1):
-        registry = Registry(project / "_registry")
         entry = registry.get_page(candidate.page_id)
         if entry is None:
             continue
