@@ -151,13 +151,26 @@ def get_embedder(config: EmbeddingConfig | None = None) -> Embedder:
     return backend_cls(model=config.model)
 
 
+_cached_embedder: Embedder | None = None
+_cached_embedder_key: tuple[str, str] | None = None
+
+
 def load_embedder(project: Path) -> Embedder | None:
     """Read project config and return an embedder if embeddings are enabled.
 
     Returns ``None`` when embeddings are disabled, the config file is
     missing, or the backend fails to import. Callers can pass the result
     straight into ``SQLiteCache.full_rebuild`` / ``sync_from_files``.
+
+    The loaded embedder is cached at module level keyed by
+    ``(provider, model)`` so repeated calls within one process — across
+    ingest stages, post-merge relinks, dormant-review loops, etc. —
+    reuse the same instance instead of paying the 1-3 s ONNX/SBert
+    cold-load tax each time. Call ``clear_embedder_cache()`` to reset
+    (used by tests; production callers don't need to).
     """
+    global _cached_embedder, _cached_embedder_key
+
     try:
         from wikiloom.config import Config
 
@@ -168,10 +181,30 @@ def load_embedder(project: Path) -> Embedder | None:
     if not cfg.embeddings.enabled:
         return None
 
+    key = (cfg.embeddings.provider, cfg.embeddings.model)
+    if _cached_embedder is not None and _cached_embedder_key == key:
+        return _cached_embedder
+
     try:
-        return get_embedder(cfg.embeddings)
+        embedder = get_embedder(cfg.embeddings)
     except (ImportError, ValueError):
         return None
+
+    _cached_embedder = embedder
+    _cached_embedder_key = key
+    return embedder
+
+
+def clear_embedder_cache() -> None:
+    """Reset the module-level ``load_embedder`` cache.
+
+    Tests use this between cases so a cached embedder from one test
+    doesn't leak into the next (e.g., when a later test changes
+    project config and expects a fresh load).
+    """
+    global _cached_embedder, _cached_embedder_key
+    _cached_embedder = None
+    _cached_embedder_key = None
 
 
 # ----------------------------------------------------------------------
