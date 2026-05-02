@@ -141,6 +141,14 @@ class LinkingEngine:
         self.embedder = embedder
         self.cache = cache
         self._page_embeddings: dict[str, list[float]] | None = None
+        # Buffer for batched pending-link writes. ``link_all`` activates
+        # it (sets to ``[]``) so the per-page ``link_page`` calls append
+        # in-memory and a single ``_save_pending`` flush at the end of
+        # the run does one read+rewrite of pending.json instead of N
+        # (the file grows over the run, so per-page rewrites are O(N²)
+        # cumulative work). Standalone ``link_page`` callers see
+        # ``None`` here and persist immediately as before.
+        self._pending_buffer: list[PendingLink] | None = None
 
     # ------------------------------------------------------------------
     # Setup
@@ -195,18 +203,26 @@ class LinkingEngine:
         page_path: Path,
         *,
         doc: "spacy.tokens.Doc | None" = None,
+        body: str | None = None,
+        fm: Frontmatter | None = None,
     ) -> LinkingResult:
         """Run linking on a single wiki page and write back the result.
 
         ``doc`` is an optional pre-computed spaCy ``Doc``. ``link_all``
         populates it via one batched ``nlp.pipe`` call so this method
-        doesn't have to invoke spaCy per page. When omitted, the doc
-        is computed inline (preserves the original code path for
-        callers that don't pre-batch).
+        doesn't have to invoke spaCy per page. ``body`` and ``fm`` are
+        optional pre-read content from the same pre-pass — when
+        provided, the page is not re-read from disk or re-parsed. When
+        omitted (any of them), the missing pieces are computed inline,
+        preserving the original code path for standalone callers.
         """
         page_path = Path(page_path)
-        text = page_path.read_text(encoding="utf-8")
-        fm, body = parse_frontmatter(text)
+        # ``body`` is the sentinel for "caller pre-parsed this page."
+        # ``fm`` can legitimately be ``None`` for a page with no
+        # frontmatter, so it's not a usable signal on its own.
+        if body is None:
+            text = page_path.read_text(encoding="utf-8")
+            fm, body = parse_frontmatter(text)
 
         if self._should_skip(fm):
             return LinkingResult(page=page_path)
@@ -225,9 +241,16 @@ class LinkingEngine:
         else:
             page_path.write_text(result.body, encoding="utf-8")
 
-        # Persist pending links
+        # Persist pending links. During a ``link_all`` run the buffer
+        # is active and we accumulate in memory; the run flushes once
+        # at the end. Outside ``link_all`` the buffer is ``None`` and
+        # we write immediately so single-page callers still see their
+        # entries land in pending.json before the call returns.
         if result.pending:
-            self._save_pending(result.pending)
+            if self._pending_buffer is not None:
+                self._pending_buffer.extend(result.pending)
+            else:
+                self._save_pending(result.pending)
 
         # Optional stub creation
         stubs_created = 0
@@ -267,8 +290,12 @@ class LinkingEngine:
         batch so they don't pay the NLP cost only to be discarded.
         """
         # Pre-pass: read bodies for batched NLP. Skip pages we'd drop
-        # anyway so we don't spend NLP time on them.
+        # anyway so we don't spend NLP time on them. The (body, fm)
+        # tuple is held alongside the spaCy doc and threaded back
+        # into ``link_page`` so neither gets re-read or re-parsed —
+        # halves file I/O and frontmatter parses on a relink.
         page_bodies: list[tuple[int, str]] = []
+        prereads: dict[int, tuple[str, Frontmatter | None]] = {}
         for i, page in enumerate(pages):
             try:
                 text = Path(page).read_text(encoding="utf-8")
@@ -278,6 +305,7 @@ class LinkingEngine:
             if self._should_skip(fm):
                 continue
             page_bodies.append((i, body))
+            prereads[i] = (body, fm)
 
         docs_by_index: dict[int, Any] = {}
         if page_bodies:
@@ -289,12 +317,32 @@ class LinkingEngine:
 
         modified: list[Path] = []
         total = len(pages)
-        for i, page in enumerate(pages, start=1):
-            r = self.link_page(page, doc=docs_by_index.get(i - 1))
-            if r.high_confidence_links + r.medium_confidence_links > 0:
-                modified.append(r.page)
-            if progress is not None:
-                progress(i, total)
+        # Activate the pending-link buffer for the duration of the run.
+        # link_page appends in-memory and we flush once below — turns
+        # an O(N²) per-page read+rewrite of pending.json into one
+        # read+rewrite per ``link_all`` call. ``finally`` ensures a
+        # mid-loop crash still persists everything we collected.
+        self._pending_buffer = []
+        try:
+            for i, page in enumerate(pages, start=1):
+                idx = i - 1
+                preread = prereads.get(idx)
+                body, fm = preread if preread is not None else (None, None)
+                r = self.link_page(
+                    page,
+                    doc=docs_by_index.get(idx),
+                    body=body,
+                    fm=fm,
+                )
+                if r.high_confidence_links + r.medium_confidence_links > 0:
+                    modified.append(r.page)
+                if progress is not None:
+                    progress(i, total)
+        finally:
+            buffered = self._pending_buffer
+            self._pending_buffer = None
+            if buffered:
+                self._save_pending(buffered)
         return modified
 
     # ------------------------------------------------------------------

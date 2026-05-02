@@ -24,6 +24,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   subprocess launches and shared traversal across all paths.
   Speeds up `wikiloom lint` (the only `scan()` caller) on real
   wikis without changing its output.
+- **Linker reuses pre-pass body + frontmatter** —
+  `LinkingEngine.link_all` already pre-read each page's body to
+  feed `nlp.pipe` in a single batched call, then threw the body
+  away. `link_page` then re-read the same file and re-parsed
+  frontmatter on every page, doing exactly twice the disk I/O
+  and frontmatter-parse work the relink needed. `link_page` now
+  takes optional `body` and `fm` kwargs that the pre-pass
+  threads through alongside the spaCy doc; standalone callers
+  still fall back to read+parse. ~Halves file I/O on a relink.
+- **Pending-link writes flush once per `link_all`, not per
+  page** — `_save_pending` did a full read+JSON-parse+rewrite
+  of `_registry/pending.json` for each page that produced
+  pending matches. Cumulative cost grew quadratically with the
+  number of linked pages (the file gets re-serialized larger
+  on every page). `link_all` now activates a `_pending_buffer`
+  on the engine before its loop, `link_page` appends to it
+  in-memory, and the run flushes once in a `finally` so a
+  mid-loop crash still persists what we collected. Standalone
+  `link_page` callers are unchanged. Same on-disk shape, O(N²)
+  → O(N) write work on a full relink.
 
 ### Fixed
 
