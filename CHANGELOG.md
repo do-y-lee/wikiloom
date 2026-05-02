@@ -5,6 +5,26 @@ All notable changes to WikiLoom are recorded here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.6] — 2026-05-01
+
+### Fixed
+
+- **Working tree stays clean after every state-changing command**
+  — `lint --fix`, `reindex`, `relink`, `related --save/--link`,
+  `purge`, and `rebuild-cache` appended a log event to
+  `wiki/log.md` *after* their primary commit (so the event could
+  carry that commit's hash) but never committed the resulting
+  log.md change. The user-visible result was a dirty working
+  tree after every wikiloom command — surfacing in `git status`,
+  failing dirty-tree preflights on the next command, and forcing
+  manual `git add wiki/log.md && git commit` cleanups. Each
+  affected command now lands the log.md change in a small
+  follow-up commit via `_commit_log_tail` (renamed from
+  `_commit_merge_log_tail`, which already used this pattern for
+  merge). Ingest already had the equivalent tail commit; the
+  stale "acceptable staleness" comment in
+  `wikiloom/ingest/processor.py` is updated to match.
+
 ## [0.1.5] — 2026-05-01
 
 ### Performance

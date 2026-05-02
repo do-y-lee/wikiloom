@@ -687,10 +687,11 @@ def ingest(
             catalog.save()
 
         # 13. Log event. Written *after* the commit so the event can
-        # carry the commit hash. The resulting log.md change is picked up
-        # by the next commit (ingest, lint, etc.) — acceptable staleness.
-        # Token + cost fields finally carry real numbers now that C20's
-        # LLMClient populates LLMCallMetrics on every synthesize call.
+        # carry the commit hash; step 16 below picks the resulting
+        # log.md change up in a small follow-up commit so the working
+        # tree stays clean. Token + cost fields finally carry real
+        # numbers now that C20's LLMClient populates LLMCallMetrics on
+        # every synthesize call.
         log_path = project_root / "wiki" / "log.md"
         if log_path.parent.exists():
             event = create_event(

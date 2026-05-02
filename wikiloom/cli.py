@@ -883,14 +883,15 @@ def _auto_commit(project: Path, commit_type: str, description: str) -> str | Non
     return git.commit([], f"{commit_type}: {description}") or None
 
 
-def _commit_merge_log_tail(project: Path, subject: str) -> None:
-    """Commit wiki/log.md after a merge flow.
+def _commit_log_tail(project: Path, subject: str) -> None:
+    """Commit wiki/log.md as a follow-up to a state-changing command.
 
-    MERGE events are appended *after* the primary merge commit lands so
-    the event can record that commit's hash (matching the ingest-tail
-    pattern in processor.py step 16). This follow-up picks up the
-    resulting log.md change. No-ops when the repo or log are missing or
-    when log.md is unchanged.
+    Event entries are appended *after* the primary commit lands so the
+    event can record that commit's hash (matching the ingest-tail
+    pattern in processor.py step 16). This helper picks up the
+    resulting log.md change in a small follow-up commit so the working
+    tree stays clean. No-ops when the repo or log are missing or when
+    log.md is unchanged.
     """
     from wikiloom.git_ops import GitOps
 
@@ -1511,6 +1512,10 @@ def lint(fix: bool, project: Path | None) -> None:
                         git_commit_hash=commit_hash,
                     )
                     append_event(log_path, event)
+                    _commit_log_tail(
+                        project,
+                        f"lint: log repair of {fixes.total_fixed} page(s)",
+                    )
         _print_report(report)
         summary_parts = [f"{fixes.total_fixed} fixed"]
         if fixes.broken_links_fixed:
@@ -1656,6 +1661,10 @@ def reindex(project: Path | None) -> None:
                     git_commit_hash=commit_hash,
                 )
                 append_event(log_path, event)
+                _commit_log_tail(
+                    project,
+                    f"reindex: log rebuild of {len(written)} index file(s)",
+                )
     click.echo("")
     click.echo(
         f"{_check()} Rebuilt {len(written)} index file(s)."
@@ -1771,6 +1780,10 @@ def relink(project: Path | None) -> None:
                     git_commit_hash=commit_hash,
                 )
                 append_event(log_path, event)
+                _commit_log_tail(
+                    project,
+                    f"relink: log update of {len(linked)} page(s)",
+                )
 
     click.echo("")
     click.echo(
@@ -3432,6 +3445,9 @@ def related(page_id: str, limit: int, save: bool, link: bool, project: Path | No
                 git_commit_hash=commit_hash,
             )
             append_event(log_path, event)
+            _commit_log_tail(
+                project, f"related: log update for {page_id}"
+            )
 
         click.echo("")
         click.echo(f"{_check()} Saved: {', '.join(actions)}.")
@@ -4436,7 +4452,7 @@ def _finalize_batch_merge(
             ),
             commit_hash,
         )
-    _commit_merge_log_tail(
+    _commit_log_tail(
         project, f"merge: log {len(applied)} event(s)"
     )
 
@@ -4756,7 +4772,7 @@ def merge(loser: str, winner: str, yes: bool, project: Path | None) -> None:
                 f"{loser} into {winner}",
             )
             emit_merge_event(project, result, commit_hash)
-            _commit_merge_log_tail(
+            _commit_log_tail(
                 project, f"merge: log event for {loser} → {winner}"
             )
     except ValueError as exc:
@@ -5152,6 +5168,9 @@ def purge(page_id: str, yes: bool, project: Path | None) -> None:
                 git_commit_hash=commit_hash,
             )
             append_event(log_path, event)
+            _commit_log_tail(
+                project, f"purge: log removal of {page_id}"
+            )
 
     click.echo("")
     click.echo(
@@ -5834,8 +5853,9 @@ def rebuild_cache(project: Path | None) -> None:
     stats = cache.get_stats()
 
     # Log a REBUILD_CACHE event for the audit trail. The cache itself
-    # is gitignored so there is no commit to attach a hash to; the
-    # log.md change rides on the next ingest/lint/save commit.
+    # is gitignored so there is no preceding commit to attach a hash
+    # to; we still commit the resulting log.md change in a small
+    # follow-up so the working tree stays clean.
     from wikiloom.events import EventType, append_event, create_event
 
     log_path = project / "wiki" / "log.md"
@@ -5848,6 +5868,9 @@ def rebuild_cache(project: Path | None) -> None:
             ),
         )
         append_event(log_path, event)
+        _commit_log_tail(
+            project, f"rebuild-cache: log rebuild of {count} page(s)"
+        )
 
     click.echo("")
     click.echo(
