@@ -485,6 +485,14 @@ class SQLiteCache:
             if rel.name in {"log.md", "index.md"}:
                 continue
             changed_page_ids.append(str(rel.with_suffix("")))
+        # Dedupe while preserving first-seen order. A multi-pair merge
+        # batch (``wikiloom duplicates --review``) hands us a list
+        # where the same page can appear as winner of one pair and
+        # loser of another — or as the surviving winner across
+        # multiple pairs. Without this dedup, the page lands in
+        # ``page_rows`` twice and trips the executemany INSERT's
+        # UNIQUE constraint on ``pages.page_id``.
+        changed_page_ids = list(dict.fromkeys(changed_page_ids))
 
         # Split into rows we can refresh (file + manifest entry exist)
         # vs rows we must drop (file gone and/or manifest entry gone —

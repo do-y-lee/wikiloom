@@ -460,6 +460,38 @@ def test_incremental_sync_empty_list_is_noop(project: Path) -> None:
     assert cache.get_stats()["total_pages"] == 1
 
 
+def test_incremental_sync_dedupes_duplicate_paths(project: Path) -> None:
+    """Duplicate paths in ``changed_files`` must not trip the
+    executemany INSERT's UNIQUE constraint on ``pages.page_id``.
+
+    Regression: ``wikiloom duplicates --review`` builds the
+    ``touched_paths`` list by appending ``(winner.md, loser.md)``
+    per merged pair. When a page is winner of one pair AND loser
+    of another (or winner across multiple pairs), the same path
+    appears twice — and the page row landed in ``page_rows`` twice,
+    crashing the executemany INSERT with
+    ``UNIQUE constraint failed: pages.page_id``. Surfaced in 0.1.6
+    smoke testing.
+    """
+    cache = SQLiteCache(project / "_registry" / "wiki.db")
+    page_path = _add_page(project, "concepts/foo", "Foo")
+    cache.full_rebuild(project)
+
+    # The same path listed twice — the call must succeed and the
+    # page must end up represented exactly once in the cache.
+    cache.sync_from_files(project, changed_files=[page_path, page_path])
+
+    conn = sqlite3.connect(str(project / "_registry" / "wiki.db"))
+    try:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM pages WHERE page_id = ?",
+            ("concepts/foo",),
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert count == 1
+
+
 def test_incremental_sync_ignores_non_page_paths(project: Path) -> None:
     """Non-wiki paths in changed_files don't produce spurious deletes."""
     cache = SQLiteCache(project / "_registry" / "wiki.db")

@@ -5,6 +5,29 @@ All notable changes to WikiLoom are recorded here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.7] — 2026-05-01
+
+> **Note:** 0.1.6 was uploaded to TestPyPI on 2026-05-01 and
+> yanked the same day after smoke testing surfaced the cache
+> sync bug below. 0.1.7 carries the fix plus everything from
+> 0.1.6's changelog. 0.1.6 was never published to PyPI.
+
+### Fixed
+
+- **Cache sync handles duplicate paths in `changed_files`**
+  — `_incremental_sync` translated paths to page_ids without
+  deduping. `wikiloom duplicates --review` builds its sync
+  list by appending `(winner.md, loser.md)` for every merged
+  pair; when a page is winner of one pair *and* loser of
+  another (or winner across multiple pairs), the same path
+  appears twice. Without dedup, the page row landed in
+  `page_rows` twice and the executemany INSERT introduced in
+  0.1.5 crashed with `UNIQUE constraint failed: pages.page_id`
+  at the very end of an otherwise-successful batch review.
+  `_incremental_sync` now dedupes `changed_page_ids` while
+  preserving first-seen order. Same on-disk result; latent
+  prior to 0.1.5's batched INSERT.
+
 ## [0.1.6] — 2026-05-01
 
 ### Performance
