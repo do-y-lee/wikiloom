@@ -283,6 +283,90 @@ def test_latest_commit_type_returns_parsed_prefix(repo: Path) -> None:
 
 
 # ----------------------------------------------------------------------
+# latest_commit_types_bulk
+# ----------------------------------------------------------------------
+
+
+def test_latest_commit_types_bulk_empty_input(repo: Path) -> None:
+    ops = GitOps(repo)
+    assert ops.latest_commit_types_bulk([]) == {}
+
+
+def test_latest_commit_types_bulk_returns_none_for_untouched(repo: Path) -> None:
+    ops = GitOps(repo)
+    ghost = repo / "wiki" / "concepts" / "never-committed.md"
+    result = ops.latest_commit_types_bulk([ghost])
+    assert result == {ghost: None}
+
+
+def test_latest_commit_types_bulk_matches_per_page(repo: Path) -> None:
+    """The bulk walk must agree with N per-page calls. This is the
+    contract the scan() rewrite relies on — same answer, fewer walks."""
+    a = repo / "wiki" / "concepts" / "a.md"
+    b = repo / "wiki" / "concepts" / "b.md"
+    c = repo / "wiki" / "concepts" / "c.md"
+    ops = GitOps(repo)
+
+    _write(a, "a-v1")
+    ops.commit_ingest("a.pdf", [a], {"pages_created": 1})
+    _write(b, "b-v1")
+    ops.commit_ingest("b.pdf", [b], {"pages_created": 1})
+    _write(c, "c-v1")
+    r = git.Repo(repo)
+    r.index.add(["wiki/concepts/c.md"])
+    r.index.commit("hand-written note")
+    # Touch a again with a human edit so its newest commit-type flips.
+    _write(a, "a-v2")
+    ops.commit_human_edit(a)
+
+    bulk = ops.latest_commit_types_bulk([a, b, c])
+    expected = {p: ops.latest_commit_type(p) for p in (a, b, c)}
+    assert bulk == expected
+    # Sanity-check the actual values, not just the agreement with the
+    # per-page version — protects against both implementations being
+    # broken in the same way.
+    assert bulk[a] == "human-edit"
+    assert bulk[b] == "ingest"
+    assert bulk[c] == "unknown"
+
+
+def test_latest_commit_types_bulk_terminates_after_all_paths_resolved(
+    repo: Path,
+) -> None:
+    """Once every requested path has an answer, the walk must stop —
+    otherwise the perf win evaporates on deep histories. We can't
+    observe iter_commits internals, but we can confirm the result is
+    stable across an arbitrarily-long unrelated tail of commits."""
+    page = repo / "wiki" / "concepts" / "x.md"
+    _write(page, "v1")
+    ops = GitOps(repo)
+    ops.commit_ingest("src.pdf", [page], {"pages_created": 1})
+    # Pile up unrelated commits AFTER the page's last touch. They
+    # shouldn't affect the answer for `page` but they extend history.
+    other = repo / "README.md"
+    r = git.Repo(repo)
+    for i in range(10):
+        other.write_text(f"# test {i}\n", encoding="utf-8")
+        r.index.add(["README.md"])
+        r.index.commit(f"chore: bump {i}")
+
+    result = ops.latest_commit_types_bulk([page])
+    assert result == {page: "ingest"}
+
+
+def test_latest_commit_types_bulk_handles_missing_head(tmp_path: Path) -> None:
+    """A fresh repo with no commits has an invalid HEAD. The helper
+    must return None for every path rather than crashing."""
+    r = git.Repo.init(tmp_path)
+    with r.config_writer() as cw:
+        cw.set_value("user", "email", "test@example.com")
+        cw.set_value("user", "name", "Test")
+    ops = GitOps(tmp_path)
+    page = tmp_path / "wiki" / "concepts" / "x.md"
+    assert ops.latest_commit_types_bulk([page]) == {page: None}
+
+
+# ----------------------------------------------------------------------
 # get_changed_files_since
 # ----------------------------------------------------------------------
 

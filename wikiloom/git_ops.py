@@ -289,3 +289,45 @@ class GitOps:
             msg = c.message if isinstance(c.message, str) else c.message.decode("utf-8")
             return _parse_commit_type(msg)
         return None
+
+    def latest_commit_types_bulk(
+        self, file_paths: Iterable[Path]
+    ) -> dict[Path, str | None]:
+        """Bulk variant of :meth:`latest_commit_type` over many files.
+
+        Walks history once, newest-first, and records the parsed
+        commit-type prefix for the first commit that touches each
+        path. Stops as soon as every requested path has an answer or
+        history is exhausted. Equivalent to
+        ``{p: self.latest_commit_type(p) for p in file_paths}`` but
+        does it in one ``iter_commits()`` walk instead of N — pairs
+        with ``HumanEditProtection.scan`` over a full manifest.
+
+        Paths never touched by any commit map to ``None``. Renames
+        are not followed; a page's commit-type comes from the most
+        recent commit that touched its current path.
+        """
+        paths = list(file_paths)
+        result: dict[Path, str | None] = {p: None for p in paths}
+        if not paths or not self.repo.head.is_valid():
+            return result
+
+        rel_to_abs: dict[str, Path] = {self._rel(p): p for p in paths}
+        remaining = set(rel_to_abs)
+
+        for c in self.repo.iter_commits():
+            if not remaining:
+                break
+            # ``stats.files`` keys are repo-relative POSIX paths,
+            # matching ``_rel``. A set intersection trims the work to
+            # just the paths we still need that this commit touched.
+            touched = set(c.stats.files.keys()) & remaining
+            if not touched:
+                continue
+            msg = c.message if isinstance(c.message, str) else c.message.decode("utf-8")
+            commit_type = _parse_commit_type(msg)
+            for rel in touched:
+                result[rel_to_abs[rel]] = commit_type
+            remaining -= touched
+
+        return result

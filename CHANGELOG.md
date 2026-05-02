@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.6] — 2026-05-01
 
+### Performance
+
+- **`HumanEditProtection.scan` resolves every page's last
+  commit-type in one history walk** — `scan()` looped over the
+  full manifest calling `GitOps.latest_commit_type(page_path)`,
+  which under the hood does
+  `iter_commits(paths=rel, max_count=1)` per page. On a 1k-page
+  wiki that's 1k separate `git log` invocations through
+  GitPython, each walking history independently until it finds
+  a commit touching that path. New `latest_commit_types_bulk`
+  helper does a single `iter_commits()` walk newest-first,
+  records the parsed commit-type prefix for each requested path
+  via a set intersection with `commit.stats.files`, and stops
+  the moment every path has an answer. Same result, ~N× fewer
+  subprocess launches and shared traversal across all paths.
+  Speeds up `wikiloom lint` (the only `scan()` caller) on real
+  wikis without changing its output.
+
 ### Fixed
 
 - **Working tree stays clean after every state-changing command**

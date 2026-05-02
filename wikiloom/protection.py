@@ -58,13 +58,29 @@ class HumanEditProtection:
         A page is drifted if git_ops says it's human-edited but the
         manifest says it isn't (or vice versa). Pages with no git
         history are treated as un-edited.
+
+        Resolves every page's last-commit-type in a single
+        ``iter_commits()`` walk via
+        ``GitOps.latest_commit_types_bulk``. Calling
+        ``latest_commit_type`` per page would spawn one git
+        subprocess per manifest entry and re-walk overlapping history
+        N times; on a 1k-page wiki that dominated ``wikiloom lint``.
         """
         drifted: list[DriftedPage] = []
+        candidates: list[tuple[str, Path, "PageEntry"]] = []
         for page_id, entry in self.registry.pages.items():
             page_path = self._page_path(page_id)
             if page_path is None:
                 continue
-            last_type = self.git.latest_commit_type(page_path)
+            candidates.append((page_id, page_path, entry))
+        if not candidates:
+            return drifted
+
+        types = self.git.latest_commit_types_bulk(
+            [p for _, p, _ in candidates]
+        )
+        for page_id, page_path, entry in candidates:
+            last_type = types.get(page_path)
             if last_type is None:
                 continue
             git_says = last_type not in AUTO_COMMIT_TYPES
