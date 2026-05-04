@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
+import numpy as np
 from rapidfuzz import fuzz, process
 
 from wikiloom.config import LinkingConfig
@@ -140,7 +141,16 @@ class LinkingEngine:
         # constructing the engine.
         self.embedder = embedder
         self.cache = cache
-        self._page_embeddings: dict[str, list[float]] | None = None
+        # Page embeddings stored as a single (M, D) float32 matrix plus
+        # a {page_id: row_index} map and pre-computed row norms. This
+        # lets _resolve_with_rerank do one matmul over the candidate
+        # sub-matrix instead of a Python-loop cosine_similarity per
+        # candidate. ``_emb_id_to_idx`` doubles as the "loaded?" flag —
+        # ``None`` means not yet loaded; an empty dict means loaded but
+        # no embeddings available.
+        self._emb_id_to_idx: dict[str, int] | None = None
+        self._emb_matrix: np.ndarray | None = None
+        self._emb_norms: np.ndarray | None = None
         # Buffer for batched pending-link writes. ``link_all`` activates
         # it (sets to ``[]``) so the per-page ``link_page`` calls append
         # in-memory and a single ``_save_pending`` flush at the end of
@@ -599,8 +609,6 @@ class LinkingEngine:
         omitted, the resolver embeds the context itself (preserves
         the original code path for callers that don't pre-batch).
         """
-        from wikiloom.embeddings import cosine_similarity
-
         normalized = text.lower().strip()
         if not normalized:
             return None
@@ -619,9 +627,11 @@ class LinkingEngine:
             return None
 
         self._ensure_page_embeddings_loaded()
-        embeddings = self._page_embeddings or {}
+        idx_map = self._emb_id_to_idx
+        if not idx_map or self._emb_matrix is None or self._emb_norms is None:
+            return None
         usable = [(pid, fscore)
-                  for pid, fscore in candidates if pid in embeddings]
+                  for pid, fscore in candidates if pid in idx_map]
         if not usable:
             return None
 
@@ -635,18 +645,21 @@ class LinkingEngine:
                 return None
             span_vec = span_vectors[0]
 
-        best_page_id: str | None = None
-        best_fuzzy = 0
-        best_cosine = -1.0
-        for page_id, fuzzy_score in usable:
-            cosine = cosine_similarity(span_vec, embeddings[page_id])
-            if cosine > best_cosine:
-                best_cosine = cosine
-                best_fuzzy = fuzzy_score
-                best_page_id = page_id
+        # Vectorized cosine: slice the candidate rows out of the
+        # pre-loaded matrix and do one matmul instead of a Python loop
+        # of per-call cosine_similarity. The 1e-12 epsilon mirrors the
+        # zero-norm fallback in the scalar implementation (returns ~0
+        # cosine for degenerate vectors instead of dividing by zero).
+        idxs = [idx_map[pid] for pid, _ in usable]
+        sub = self._emb_matrix[idxs]
+        sub_norms = self._emb_norms[idxs]
+        span = np.asarray(span_vec, dtype=np.float32)
+        span_norm = float(np.linalg.norm(span))
+        cosines = (sub @ span) / (sub_norms * span_norm + 1e-12)
+        best_idx = int(np.argmax(cosines))
+        best_page_id, best_fuzzy = usable[best_idx]
+        best_cosine = float(cosines[best_idx])
 
-        if best_page_id is None:
-            return None
         return MatchResult(
             page_id=best_page_id,
             score=best_fuzzy,
@@ -678,12 +691,23 @@ class LinkingEngine:
         return "drop"
 
     def _ensure_page_embeddings_loaded(self) -> None:
-        if self._page_embeddings is not None or self.cache is None:
+        if self._emb_id_to_idx is not None or self.cache is None:
             return
         try:
-            self._page_embeddings = self.cache.load_page_embeddings()
+            embs = self.cache.load_page_embeddings()
         except Exception:  # noqa: BLE001 — missing cache shouldn't kill linking
-            self._page_embeddings = {}
+            embs = {}
+        if not embs:
+            self._emb_id_to_idx = {}
+            self._emb_matrix = np.zeros((0, 0), dtype=np.float32)
+            self._emb_norms = np.zeros((0,), dtype=np.float32)
+            return
+        ids = list(embs.keys())
+        self._emb_id_to_idx = {pid: i for i, pid in enumerate(ids)}
+        self._emb_matrix = np.asarray(
+            [embs[pid] for pid in ids], dtype=np.float32
+        )
+        self._emb_norms = np.linalg.norm(self._emb_matrix, axis=1)
 
     @staticmethod
     def _context_window(body: str, start: int, end: int, radius: int = 200) -> str:
