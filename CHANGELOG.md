@@ -5,6 +5,87 @@ All notable changes to WikiLoom are recorded here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.8] — 2026-05-03
+
+### Performance
+
+- **Linker cosine rerank uses one matmul instead of a Python
+  loop** — `_resolve_with_rerank` looped per candidate calling
+  `cosine_similarity(span_vec, embeddings[page_id])`; the helper
+  rewrapped both vectors as numpy arrays and recomputed the span
+  norm on every call, and page embeddings were stored as
+  `list[float]` so each call also rematerialized a numpy array.
+  Page embeddings now load into a single `(M, D)` float32 matrix
+  with precomputed L2 norms; rerank slices the candidate row
+  indices and computes all cosines in one matmul before
+  argmax. Same vectorization that `SQLiteCache.semantic_search`
+  already used. Noticeable on link-heavy wikis with many
+  candidates per span.
+
+- **`wikiloom lint` walks the wiki once instead of three
+  times** — `check_frontmatter`, `check_contradictions`, and
+  `check_promoted_from_update` each ran their own
+  `_iter_content_pages` loop, reading every page from disk and
+  parsing YAML frontmatter independently. `run_all` now
+  populates a per-run `self._fm_cache` keyed by absolute path
+  and clears it in a `finally`; the three checks read from the
+  cache via a `_frontmatter_for` helper that falls back to a
+  fresh read when called standalone. 3× → 1× disk reads + YAML
+  parses per `wikiloom lint`.
+
+- **`wikiloom lint --fix` resolves protection in one git walk
+  instead of per page** — `fix_all` called
+  `_is_protected → is_human_edited → iter_commits(paths=rel,
+  max_count=1)` once per affected page. On a wiki where lint
+  flagged 150 pages that was 150 separate `git log` subprocess
+  invocations. `git_ops` already exposed
+  `latest_commit_types_bulk` (the same helper
+  `HumanEditProtection.scan` uses); `fix_all` now precomputes a
+  `self._protected_paths` set from one bulk call over all
+  candidate paths (broken-link sources ∪ frontmatter issues).
+  Falls back to the per-call query when git is unavailable or
+  doesn't expose the bulk method.
+
+- **Slug-collision guard pre-buckets candidates by type** —
+  `_find_slug_collision` was called once per `pages_to_create`
+  proposal during the post-gather loop and re-filtered the full
+  manifest list by type prefix on every call. New
+  `_bucket_page_ids` builds a `{type_dir: [page_ids]}` map once
+  before the loop; the helper now takes that map and does a
+  dict lookup plus a rapidfuzz scan over just the relevant
+  bucket. In-loop appends switch to `setdefault(...).append(...)`
+  so later chunks in the same ingest still see fresh creates.
+  O(M×N) → O(M) once + O(bucket) per proposal.
+
+- **Chunk inserts batch into one `executemany`** —
+  `persist_chunks` in `chunk_store.py` looped per chunk calling
+  `conn.execute(INSERT)`, so a 50-chunk PDF was 50 separate SQL
+  round-trips. Build the row tuple list in the loop and issue
+  one `executemany` after; same row order, same single commit.
+  Matches the `executemany` pattern already used in
+  `SQLiteCache.full_rebuild` and `_incremental_sync`.
+
+- **Embeddings (de)serialize via numpy bulk byte conversion** —
+  `serialize_embedding` called `struct.pack(f"{n}f", *vector)`,
+  splatting 768 floats per call as positional args through
+  Python; `deserialize_embedding` rebuilt the list with
+  `struct.unpack` the same way. Replaced with
+  `np.asarray(...).tobytes()` and
+  `np.frombuffer(..., dtype=np.float32).tolist()` — same bytes
+  on disk (float32 little-endian either way), but the conversion
+  happens in one C call instead of N. Hot on cache rebuild
+  (every page) and link sessions (every page).
+
+- **Frontmatter parse/render uses libyaml when available** —
+  PyYAML's default `safe_load`/`dump` fall back to the slow
+  pure-Python parser unless `CSafeLoader`/`CSafeDumper` are
+  passed explicitly. Frontmatter parsing happens on every page
+  read across `lint`, search index rebuild, page-context
+  retrieval, merge, save — a steady tax across the CLI. Opt
+  into the libyaml-backed C loader/dumper at module load with
+  a `SafeLoader`/`SafeDumper` fallback for environments without
+  libyaml. 5–10× faster YAML where libyaml is available.
+
 ## [0.1.7] — 2026-05-01
 
 > **Note:** 0.1.6 was uploaded to TestPyPI on 2026-05-01 and
