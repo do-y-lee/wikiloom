@@ -2396,9 +2396,13 @@ def _print_query_detail(data: dict, project: Path) -> None:
 )
 def status(project: Path | None) -> None:
     """Show a project summary: page counts, last ingest, monthly cost."""
-    from wikiloom.cache import SQLiteCache
+    from collections import Counter
+
+    from wikiloom.backlinks import BacklinkRegistry
     from wikiloom.chunk_store import ChunkStore
     from wikiloom.events import parse_log
+    from wikiloom.lint import find_orphan_page_ids
+    from wikiloom.registry import Registry
     from wikiloom.source_catalog import SourceCatalog
 
     if project is None:
@@ -2410,11 +2414,19 @@ def status(project: Path | None) -> None:
 
     _warn_if_dirty(project)
 
-    # Read-only command. Stats come from whatever's in the SQLite cache,
-    # which writer commands keep current.
+    # Read-only command. Counts come from the registry + BacklinkRegistry
+    # directly (the true sources) rather than the SQLite cache aggregate
+    # so a stale or out-of-sync cache can't make ``status`` lie.
     registry_dir = project / "_registry"
-    cache = SQLiteCache(registry_dir / "wiki.db")
-    stats = cache.get_stats()
+    registry_obj = Registry(registry_dir)
+    bl = BacklinkRegistry(registry_dir)
+
+    pages = list(registry_obj.pages.values())
+    by_type = Counter(entry.type for entry in pages)
+    by_status = Counter(entry.status for entry in pages)
+    alias_count = sum(len(entry.aliases) for entry in pages)
+    backlink_count = len(bl.edges)
+    orphan_count = len(find_orphan_page_ids(registry_obj, bl))
 
     sep = _dim("•")
 
@@ -2426,13 +2438,11 @@ def status(project: Path | None) -> None:
 
     # Content section: page-type/status breakdown.
     click.echo(click.style("Content", bold=True))
-    total_pages = stats["total_pages"]
-    by_type = stats.get("by_type") or {}
+    total_pages = len(pages)
     type_parts = [f"{c} {t}" for t, c in sorted(by_type.items())]
     type_suffix = f"  {_dim('(' + ', '.join(type_parts) + ')')}" if type_parts else ""
     click.echo(f"  Pages: {total_pages}{type_suffix}")
 
-    by_status = stats.get("by_status") or {}
     active_n = by_status.get("active", 0)
     stub_n = by_status.get("stub", 0)
     dormant_n = by_status.get("dormant", 0)
@@ -2446,18 +2456,10 @@ def status(project: Path | None) -> None:
 
     # Graph section: linkage health. Uses the shared orphan definition
     # so status, orphans, and lint all report the same count.
-    from wikiloom.backlinks import BacklinkRegistry
-    from wikiloom.lint import find_orphan_page_ids
-    from wikiloom.registry import Registry
-
-    registry_obj = Registry(registry_dir)
-    bl = BacklinkRegistry(registry_dir)
-    orphan_count = len(find_orphan_page_ids(registry_obj, bl))
-
     click.echo(click.style("Graph", bold=True))
     click.echo(
-        f"  {stats['backlinks']} backlinks  {sep}  "
-        f"{stats['aliases']} aliases  {sep}  {orphan_count} orphans"
+        f"  {backlink_count} backlinks  {sep}  "
+        f"{alias_count} aliases  {sep}  {orphan_count} orphans"
     )
     click.echo("")
 
