@@ -206,6 +206,11 @@ class WikiLinter:
         except ValueError:
             self.git = None  # lint can run outside a git repo for tests
 
+        # Per-run frontmatter cache. ``run_all`` populates it once so the
+        # three checks that need fm don't each re-walk + re-read + re-parse
+        # the wiki. Standalone check_* calls leave it None and read fresh.
+        self._fm_cache: dict[Path, Frontmatter | None] | None = None
+
     # ------------------------------------------------------------------
     # Top-level entry points
     # ------------------------------------------------------------------
@@ -219,18 +224,25 @@ class WikiLinter:
         API for callers that only want the duplicates list.
         """
         duplicates, auto_safe = self._duplicates_with_auto_safe()
-        return LintReport(
-            broken_links=self.check_broken_links(),
-            orphans=self.check_orphans(),
-            dormant=self.check_dormant(),
-            duplicates=duplicates,
-            duplicates_auto_safe=auto_safe,
-            frontmatter_issues=self.check_frontmatter(),
-            index_drift=self.check_index_consistency(),
-            contradictions=self.check_contradictions(),
-            stubs=self.check_stubs(),
-            promoted_from_update=self.check_promoted_from_update(),
-        )
+        self._fm_cache = {
+            md_path: parse_frontmatter(md_path.read_text(encoding="utf-8"))[0]
+            for md_path in self._iter_content_pages()
+        }
+        try:
+            return LintReport(
+                broken_links=self.check_broken_links(),
+                orphans=self.check_orphans(),
+                dormant=self.check_dormant(),
+                duplicates=duplicates,
+                duplicates_auto_safe=auto_safe,
+                frontmatter_issues=self.check_frontmatter(),
+                index_drift=self.check_index_consistency(),
+                contradictions=self.check_contradictions(),
+                stubs=self.check_stubs(),
+                promoted_from_update=self.check_promoted_from_update(),
+            )
+        finally:
+            self._fm_cache = None
 
     def _duplicates_with_auto_safe(
         self,
@@ -445,7 +457,7 @@ class WikiLinter:
         issues: list[str] = []
         for md_path in self._iter_content_pages():
             page_id = page_id_from_path(self.wiki_dir, md_path)
-            fm, _ = parse_frontmatter(md_path.read_text(encoding="utf-8"))
+            fm = self._frontmatter_for(md_path)
             if fm is None:
                 issues.append(page_id)
                 continue
@@ -508,7 +520,7 @@ class WikiLinter:
         """
         found: list[Contradiction] = []
         for md_path in self._iter_content_pages():
-            fm, _ = parse_frontmatter(md_path.read_text(encoding="utf-8"))
+            fm = self._frontmatter_for(md_path)
             if fm is None or not fm.contradictions:
                 continue
             page_id = page_id_from_path(self.wiki_dir, md_path)
@@ -544,9 +556,7 @@ class WikiLinter:
             page_path = self._page_path(page_id)
             if page_path is None or not page_path.exists():
                 continue
-            fm, _ = parse_frontmatter(
-                page_path.read_text(encoding="utf-8")
-            )
+            fm = self._frontmatter_for(page_path)
             if fm is not None and fm.promoted_from_update:
                 promoted.append(page_id)
         return sorted(promoted)
@@ -631,6 +641,22 @@ class WikiLinter:
             if md_path.name in ("index.md", "log.md"):
                 continue
             yield md_path
+
+    def _frontmatter_for(self, md_path: Path) -> Frontmatter | None:
+        """Return the parsed frontmatter for ``md_path``.
+
+        Hits ``self._fm_cache`` when ``run_all`` populated it; otherwise
+        reads + parses the file fresh so standalone ``check_*`` callers
+        keep working.
+        """
+        if self._fm_cache is not None and md_path in self._fm_cache:
+            return self._fm_cache[md_path]
+        try:
+            text = md_path.read_text(encoding="utf-8")
+        except OSError:
+            return None
+        fm, _ = parse_frontmatter(text)
+        return fm
 
     def _page_path(self, page_id: str) -> Path | None:
         candidate = self.wiki_dir / f"{page_id}.md"
