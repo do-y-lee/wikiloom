@@ -494,18 +494,25 @@ class SQLiteCache:
         # UNIQUE constraint on ``pages.page_id``.
         changed_page_ids = list(dict.fromkeys(changed_page_ids))
 
-        # Split into rows we can refresh (file + manifest entry exist)
-        # vs rows we must drop (file gone and/or manifest entry gone —
-        # the deprecate/merge path lands here).
+        # Split into rows we refresh vs rows we drop. Only delete when
+        # the registry entry is gone (truly retired). When the entry
+        # still exists but the file moved to ``archive/`` (a deprecate
+        # or merge just happened), keep the row with empty body —
+        # mirrors ``full_rebuild`` so both sync paths produce the same
+        # cache state and ``wikiloom status`` keeps an accurate
+        # deprecated count without a manual rebuild.
         to_upsert: list[tuple[str, Any, str, str]] = []
         to_delete: list[str] = []
         for page_id in changed_page_ids:
             entry = registry.pages.get(page_id)
-            page_path = wiki_dir / f"{page_id}.md"
-            if entry is None or not page_path.exists():
+            if entry is None:
                 to_delete.append(page_id)
                 continue
-            _, body_text = read_page(page_path)
+            page_path = wiki_dir / f"{page_id}.md"
+            if page_path.exists():
+                _, body_text = read_page(page_path)
+            else:
+                body_text = ""
             embed_text = f"{entry.title}\n{entry.summary or ''}\n{body_text}"
             to_upsert.append((page_id, entry, body_text, embed_text))
 

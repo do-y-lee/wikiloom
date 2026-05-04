@@ -447,6 +447,30 @@ def test_incremental_sync_drops_row_for_missing_file(project: Path) -> None:
     assert cache.get_page("concepts/goner") is None
 
 
+def test_incremental_sync_keeps_row_when_file_archived(project: Path) -> None:
+    """Deprecate/merge moves the file to ``archive/`` but keeps the
+    manifest entry. The cache row must stay (refreshed from the registry,
+    body empty) so ``wikiloom status`` reports the deprecated count
+    accurately and the incremental path agrees with ``full_rebuild``.
+    """
+    cache = SQLiteCache(project / "_registry" / "wiki.db")
+    page_path = _add_page(project, "concepts/loser", "Loser")
+    cache.full_rebuild(project)
+    assert cache.get_page("concepts/loser") is not None
+
+    # Simulate the deprecate/merge path: file gone from canonical
+    # location, manifest entry still present with status=deprecated.
+    page_path.unlink()
+    registry = Registry(project / "_registry")
+    registry.pages["concepts/loser"].status = "deprecated"
+    registry.save()
+
+    cache.sync_from_files(project, changed_files=[page_path])
+    row = cache.get_page("concepts/loser")
+    assert row is not None
+    assert row["status"] == "deprecated"
+
+
 def test_incremental_sync_empty_list_is_noop(project: Path) -> None:
     """An empty changed_files must not touch the cache."""
     cache = SQLiteCache(project / "_registry" / "wiki.db")

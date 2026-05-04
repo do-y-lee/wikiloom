@@ -4414,9 +4414,10 @@ def _finalize_batch_merge(
     batch as a whole. No-ops when ``applied`` is empty.
 
     Passes only the winner/loser page paths to the cache sync so
-    the incremental path re-embeds just those rows. Losers are
-    handled via the "file gone" branch of the incremental sync —
-    their rows get dropped since the file has moved to archive/.
+    the incremental path re-embeds just those rows. Losers stay in
+    the cache as ``status=deprecated`` rows with empty body — the
+    incremental sync mirrors ``full_rebuild`` and refreshes from the
+    registry entry when the file has moved to ``archive/``.
     """
     if not applied:
         return
