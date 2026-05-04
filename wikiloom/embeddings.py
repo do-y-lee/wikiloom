@@ -7,7 +7,6 @@ provider needs to be installed.
 
 from __future__ import annotations
 
-import struct
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -216,10 +215,9 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
 
 def serialize_embedding(vector: list[float]) -> bytes:
     """Pack a float vector into bytes for SQLite BLOB storage."""
-    return struct.pack(f"{len(vector)}f", *vector)
+    return np.asarray(vector, dtype=np.float32).tobytes()
 
 
 def deserialize_embedding(blob: bytes) -> list[float]:
     """Unpack a BLOB back into a float vector."""
-    count = len(blob) // 4
-    return list(struct.unpack(f"{count}f", blob))
+    return np.frombuffer(blob, dtype=np.float32).tolist()
