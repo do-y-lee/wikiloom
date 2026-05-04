@@ -320,10 +320,25 @@ _TYPE_TO_DIR = {
 }
 
 
+def _bucket_page_ids(page_ids: list[str]) -> dict[str, list[str]]:
+    """Pre-bucket page_ids by their type directory prefix.
+
+    Built once at the start of the post-gather loop so the per-proposal
+    ``_find_slug_collision`` call doesn't re-filter the full manifest
+    each time. Caller appends to the right bucket as new pages land.
+    """
+    buckets: dict[str, list[str]] = {}
+    for pid in page_ids:
+        type_dir, _, _ = pid.partition("/")
+        if type_dir and type_dir != pid:
+            buckets.setdefault(type_dir, []).append(pid)
+    return buckets
+
+
 def _find_slug_collision(
     proposed_type: str,
     proposed_slug: str,
-    existing_page_ids: list[str],
+    buckets: dict[str, list[str]],
 ) -> str | None:
     """Return an existing page_id that near-matches the proposed one, if any.
 
@@ -335,13 +350,12 @@ def _find_slug_collision(
     Returns the matched existing id or None.
     """
     type_dir = _TYPE_TO_DIR.get(proposed_type)
-    if not type_dir or not proposed_slug or not existing_page_ids:
+    if not type_dir or not proposed_slug:
         return None
-    prefix = f"{type_dir}/"
-    candidates = [p for p in existing_page_ids if p.startswith(prefix)]
+    candidates = buckets.get(type_dir)
     if not candidates:
         return None
-    target = f"{prefix}{proposed_slug}"
+    target = f"{type_dir}/{proposed_slug}"
     best = process.extractOne(
         target,
         candidates,
@@ -725,11 +739,14 @@ def run_synthesis(
     if page_context_cache is not None:
         page_context_cache.close()
 
-    # Snapshot of existing manifest page_ids for the slug-collision
-    # guard. Mutable — we extend it as this ingest's own creates land,
-    # so two chunks proposing near-variants of a new page converge on
-    # a single target rather than producing duplicates of each other.
-    existing_page_ids: list[str] = list(registry.pages.keys())
+    # Pre-bucketed snapshot of existing manifest page_ids for the
+    # slug-collision guard, keyed by type directory ("concepts",
+    # "entities", ...). Mutable — we append as this ingest's own
+    # creates land, so two chunks proposing near-variants of a new
+    # page converge on a single target rather than producing
+    # duplicates of each other. Built once here instead of re-filtering
+    # the full manifest list per proposal.
+    collision_buckets = _bucket_page_ids(list(registry.pages.keys()))
 
     # Post-gather: walk results in chunk_index order so seen_slugs
     # dedup, state writes, and page-proposal ordering are deterministic
@@ -793,7 +810,7 @@ def run_synthesis(
             # always see the existing page through semantic retrieval
             # alone, so this is a deterministic last-mile check.
             collision = _find_slug_collision(
-                ptype, slug, existing_page_ids
+                ptype, slug, collision_buckets
             )
             if collision is not None:
                 pages_to_update.append(
@@ -831,7 +848,9 @@ def run_synthesis(
             # racing to create a second near-variant.
             type_dir = _TYPE_TO_DIR.get(ptype)
             if type_dir and slug:
-                existing_page_ids.append(f"{type_dir}/{slug}")
+                collision_buckets.setdefault(type_dir, []).append(
+                    f"{type_dir}/{slug}"
+                )
 
         for page_data in data.get("pages_to_update", []) or []:
             pages_to_update.append(
