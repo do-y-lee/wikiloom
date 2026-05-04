@@ -8,6 +8,11 @@ from typing import Any
 
 import yaml
 
+try:
+    from yaml import CSafeLoader as _SafeLoader, CSafeDumper as _SafeDumper
+except ImportError:
+    from yaml import SafeLoader as _SafeLoader, SafeDumper as _SafeDumper  # type: ignore[assignment]
+
 
 @dataclass
 class Frontmatter:
@@ -124,7 +129,7 @@ def parse_frontmatter(text: str) -> tuple[Frontmatter | None, str]:
         return None, text
 
     try:
-        data = yaml.safe_load(parts[1])
+        data = yaml.load(parts[1], Loader=_SafeLoader)
     except yaml.YAMLError:
         return None, text
 
@@ -139,7 +144,13 @@ def parse_frontmatter(text: str) -> tuple[Frontmatter | None, str]:
 def render_frontmatter(fm: Frontmatter) -> str:
     """Render a Frontmatter object to a YAML frontmatter string."""
     data = fm.to_dict()
-    yaml_str = yaml.dump(data, default_flow_style=False, sort_keys=False, allow_unicode=True)
+    yaml_str = yaml.dump(
+        data,
+        Dumper=_SafeDumper,
+        default_flow_style=False,
+        sort_keys=False,
+        allow_unicode=True,
+    )
     return f"---\n{yaml_str}---\n"
 
 
