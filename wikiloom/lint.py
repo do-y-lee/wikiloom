@@ -19,7 +19,7 @@ from wikiloom.frontmatter import (
     parse_frontmatter,
     render_frontmatter,
 )
-from wikiloom.git_ops import GitOps
+from wikiloom.git_ops import AUTO_COMMIT_TYPES, GitOps
 from wikiloom.registry import Registry
 from wikiloom.utils import now_iso, page_id_from_path, parse_iso
 
@@ -211,6 +211,13 @@ class WikiLinter:
         # the wiki. Standalone check_* calls leave it None and read fresh.
         self._fm_cache: dict[Path, Frontmatter | None] | None = None
 
+        # Per-run human-edit protection cache. ``fix_all`` populates it
+        # once with one git history walk via ``latest_commit_types_bulk``
+        # instead of N per-file ``git log`` shells. Standalone
+        # ``_is_protected`` calls leave it None and fall back to the
+        # per-file ``is_human_edited`` query.
+        self._protected_paths: set[Path] | None = None
+
     # ------------------------------------------------------------------
     # Top-level entry points
     # ------------------------------------------------------------------
@@ -289,45 +296,59 @@ class WikiLinter:
         """
         fixes = FixReport()
 
-        for broken in report.broken_links:
-            page_path = self._page_path(broken.source)
-            if page_path is None:
-                continue
-            if self._is_protected(page_path):
-                fixes.skipped_human_edited += 1
-                continue
-            if self._strip_broken_wikilink(page_path, broken.target):
-                fixes.broken_links_fixed += 1
+        # Pre-compute protection in one git walk over all pages this
+        # fix_all will touch, instead of one ``git log`` shell per page.
+        candidate_ids: set[str] = {b.source for b in report.broken_links}
+        candidate_ids.update(report.frontmatter_issues)
+        candidate_paths: list[Path] = []
+        for pid in candidate_ids:
+            p = self._page_path(pid)
+            if p is not None:
+                candidate_paths.append(p)
+        self._populate_protected_paths(candidate_paths)
 
-        # Dormant pages are reported but never auto-marked. Marking is
-        # a user decision via `wikiloom dormant <page>` — age alone is
-        # not a verdict on usefulness.
+        try:
+            for broken in report.broken_links:
+                page_path = self._page_path(broken.source)
+                if page_path is None:
+                    continue
+                if self._is_protected(page_path):
+                    fixes.skipped_human_edited += 1
+                    continue
+                if self._strip_broken_wikilink(page_path, broken.target):
+                    fixes.broken_links_fixed += 1
 
-        for page_id in report.frontmatter_issues:
-            page_path = self._page_path(page_id)
-            if page_path is None:
-                continue
-            if self._is_protected(page_path):
-                fixes.skipped_human_edited += 1
-                continue
-            if self._repair_frontmatter(page_path):
-                fixes.frontmatter_repaired += 1
+            # Dormant pages are reported but never auto-marked. Marking is
+            # a user decision via `wikiloom dormant <page>` — age alone is
+            # not a verdict on usefulness.
 
-        # Index drift: regenerate the drifted sub-indexes (and the root
-        # index, since counts may have shifted). Indexes are derived
-        # state — human-edit protection doesn't apply here.
-        if report.index_drift:
-            from wikiloom.search import IndexUpdater
+            for page_id in report.frontmatter_issues:
+                page_path = self._page_path(page_id)
+                if page_path is None:
+                    continue
+                if self._is_protected(page_path):
+                    fixes.skipped_human_edited += 1
+                    continue
+                if self._repair_frontmatter(page_path):
+                    fixes.frontmatter_repaired += 1
 
-            updater = IndexUpdater(self.wiki_dir, registry=self.registry)
-            for name in report.index_drift:
-                subdir = self.wiki_dir / name
-                if subdir.is_dir():
-                    updater.rebuild_sub_index(subdir)
-                    fixes.indexes_rebuilt += 1
-            updater.rebuild_root_index()
+            # Index drift: regenerate the drifted sub-indexes (and the root
+            # index, since counts may have shifted). Indexes are derived
+            # state — human-edit protection doesn't apply here.
+            if report.index_drift:
+                from wikiloom.search import IndexUpdater
 
-        return fixes
+                updater = IndexUpdater(self.wiki_dir, registry=self.registry)
+                for name in report.index_drift:
+                    subdir = self.wiki_dir / name
+                    if subdir.is_dir():
+                        updater.rebuild_sub_index(subdir)
+                        fixes.indexes_rebuilt += 1
+                updater.rebuild_root_index()
+
+            return fixes
+        finally:
+            self._protected_paths = None
 
     # ------------------------------------------------------------------
     # Checks
@@ -663,12 +684,40 @@ class WikiLinter:
         return candidate if candidate.exists() else None
 
     def _is_protected(self, page_path: Path) -> bool:
+        if self._protected_paths is not None:
+            return page_path in self._protected_paths
         if self.git is None:
             return False
         try:
             return self.git.is_human_edited(page_path)
         except ValueError:
             return False
+
+    def _populate_protected_paths(self, paths: list[Path]) -> None:
+        """Pre-compute ``self._protected_paths`` from one git walk.
+
+        Leaves the cache unset (``None``) when git is unavailable or
+        doesn't expose the bulk method (e.g. test fakes that only stub
+        ``is_human_edited``); ``_is_protected`` then falls back to the
+        per-call query for each page.
+        """
+        if self.git is None or not paths:
+            return
+        bulk = getattr(self.git, "latest_commit_types_bulk", None)
+        if bulk is None:
+            return
+        try:
+            commit_types = bulk(paths)
+        except Exception:  # noqa: BLE001 — fall back to per-call query
+            return
+        # Mirror is_human_edited: a path is protected when its most
+        # recent commit type is *not* in AUTO_COMMIT_TYPES. Paths git
+        # has never seen (None) are unprotected — same as the per-file
+        # is_human_edited path, which returns False on missing history.
+        self._protected_paths = {
+            p for p, ctype in commit_types.items()
+            if ctype is not None and ctype not in AUTO_COMMIT_TYPES
+        }
 
     def _window_for_type(self, page_type: str) -> int:
         if page_type == "entity":
