@@ -87,6 +87,7 @@ class ChunkStore:
             # stable even through the delete/insert cycle.
             conn.execute("DELETE FROM chunks WHERE source_hash = ?", (source_hash,))
 
+            rows: list[tuple] = []
             for chunk in chunk_list:
                 chunk_index = int(chunk.metadata.get("chunk_index", 0))
                 chunk_total = int(
@@ -103,13 +104,7 @@ class ChunkStore:
                     token_estimate=chunk.token_estimate,
                     created_at=created,
                 )
-                conn.execute(
-                    """
-                    INSERT INTO chunks (
-                        chunk_id, source_hash, chunk_index, chunk_total,
-                        content_type, text, token_estimate, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
+                rows.append(
                     (
                         record.chunk_id,
                         record.source_hash,
@@ -119,9 +114,19 @@ class ChunkStore:
                         record.text,
                         record.token_estimate,
                         record.created_at,
-                    ),
+                    )
                 )
                 stored.append(record)
+            if rows:
+                conn.executemany(
+                    """
+                    INSERT INTO chunks (
+                        chunk_id, source_hash, chunk_index, chunk_total,
+                        content_type, text, token_estimate, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    rows,
+                )
             conn.commit()
         finally:
             conn.close()
