@@ -5,6 +5,41 @@ All notable changes to WikiLoom are recorded here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.9] — 2026-05-04
+
+### Fixed
+
+- **`wikiloom status` now shows accurate deprecated counts after
+  a merge or deprecate** — `status` had been pulling
+  `total_pages`, `by_type`, `by_status`, `backlinks`, and `aliases`
+  from `cache.get_stats()`. The cache is a query-acceleration
+  layer for FTS / semantic search, not the source of truth for
+  "how many pages are deprecated"; a stale or out-of-sync cache
+  could make `status` lie even when the registry knew the right
+  answer (concretely: after `wikiloom duplicates --review` merged
+  two pairs, `status` reported `0 deprecated` until you ran
+  `wikiloom rebuild-cache`). `status` now reads counts from the
+  registry + `BacklinkRegistry` directly: `Counter` over
+  `registry.pages.values()` for `by_type`/`by_status`, sum of
+  `len(entry.aliases)` for the alias count, `len(bl.edges)` for
+  backlinks. Other sections (`Storage`, `Last event`, `Usage`)
+  already read from their true sources and are unchanged.
+
+- **Incremental cache sync keeps deprecated rows instead of
+  dropping them** — `_incremental_sync` lumped two delete
+  conditions together (missing manifest entry OR missing file),
+  so a deprecate/merge that moved a page to `archive/` dropped
+  the cache row entirely. `full_rebuild` meanwhile walks
+  `registry.pages.items()` and creates a row for the same case
+  with empty body, so the two sync paths produced different
+  cache states for the same project. Split the delete condition:
+  only drop when the manifest entry is gone (truly retired); when
+  the entry exists but the file moved, upsert with empty body
+  to mirror `full_rebuild`. Both sync paths now produce the same
+  cache state. New regression test
+  (`test_incremental_sync_keeps_row_when_file_archived`) locks
+  in the contract.
+
 ## [0.1.8] — 2026-05-03
 
 ### Performance
