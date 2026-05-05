@@ -12,6 +12,27 @@ from dataclasses import dataclass
 from wikiloom.ingest.extractors.base import ExtractedContent
 from wikiloom.utils import estimate_tokens
 
+# Matches a markdown ATX heading line. Captures the heading text only
+# (without the ``#`` prefix). Cheap alternative to a markdown AST —
+# good enough for retrieval citations: when a chunk's first heading
+# line is captured here, ``Citation.parent_heading`` lets the agent
+# tell the user which section of the source the chunk came from.
+_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$")
+
+
+def _first_heading(text: str) -> str | None:
+    """Return the first ATX heading text in ``text``, or None.
+
+    Scans line-by-line; stops at the first match. ``None`` for chunks
+    with no heading line (e.g., a paragraph-fallback chunk that
+    orphaned from its parent section, or non-markdown content).
+    """
+    for line in text.splitlines():
+        m = _HEADING_RE.match(line)
+        if m:
+            return m.group(1).strip()
+    return None
+
 
 @dataclass
 class BudgetPlan:
@@ -62,13 +83,19 @@ class Chunker:
     def _split_on_headings(self, text: str) -> list[str] | None:
         """Split text on markdown level-1 or level-2 headings.
 
+        Each section retains its heading line as the first line so
+        downstream consumers (the embedder, ``_first_heading``) see
+        the full ``# Title`` form. The lookahead split preserves the
+        ``#`` prefix that a plain ``re.split`` would consume.
+
         Returns None if no headings are found.
         """
-        heading_pattern = r"^#{1,2}\s+"
+        heading_pattern = r"(?=^#{1,2}\s+)"
         sections = re.split(heading_pattern, text, flags=re.MULTILINE)
+        sections = [s.strip() for s in sections if s.strip()]
         if len(sections) <= 1:
             return None
-        return [s.strip() for s in sections if s.strip()]
+        return sections
 
     def _group_pages(self, pages: list[str], max_tokens: int) -> list[str]:
         """Group consecutive PDF pages into chunks within the budget.
@@ -147,6 +174,9 @@ class Chunker:
             chunk_meta = dict(content.metadata)
             chunk_meta["chunk_index"] = idx
             chunk_meta["chunk_total"] = total
+            heading = _first_heading(text)
+            if heading is not None:
+                chunk_meta["parent_heading"] = heading
             chunks.append(
                 ExtractedContent(
                     text=text,
