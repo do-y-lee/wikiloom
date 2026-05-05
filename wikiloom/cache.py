@@ -125,10 +125,42 @@ CREATE TABLE IF NOT EXISTS chunks (
     content_type TEXT,
     text TEXT NOT NULL,
     token_estimate INTEGER,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    source_path TEXT,
+    parent_heading TEXT,
+    page_id TEXT,
+    embedding BLOB
 );
 
 CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(source_hash);
+CREATE INDEX IF NOT EXISTS idx_chunks_page ON chunks(page_id);
+
+-- External-content FTS5 over chunks.text. content_rowid='rowid' lets
+-- BM25 results join straight back to chunks by rowid; the triggers
+-- below keep chunks_fts in lockstep with chunks on every write.
+CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
+    text, content='chunks', content_rowid='rowid', tokenize='porter ascii'
+);
+
+CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
+    INSERT INTO chunks_fts(rowid, text) VALUES (new.rowid, new.text);
+END;
+CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
+    INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES('delete', old.rowid, old.text);
+END;
+CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE OF text ON chunks BEGIN
+    INSERT INTO chunks_fts(chunks_fts, rowid, text) VALUES('delete', old.rowid, old.text);
+    INSERT INTO chunks_fts(rowid, text) VALUES (new.rowid, new.text);
+END;
+
+-- Generic key/value store for cache-wide flags. First user is the
+-- embedder fingerprint (provider, model, dim) that the chunk_vec
+-- table is keyed to; retrieval refuses to query if the active
+-- embedder doesn't match what was stamped at index time.
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
 """
 
 
@@ -165,6 +197,35 @@ def _build_fts_match(query: str) -> str:
     return " OR ".join(terms)
 
 
+def _load_sqlite_vec(conn: sqlite3.Connection) -> None:
+    """Register the sqlite-vec extension on a connection.
+
+    Required before any reference to the ``vec0`` virtual table module
+    (chunk_vec). The platform's stock python-sqlite must be built with
+    extension loading enabled — system Python on macOS and some Linux
+    distros ships with it disabled. We surface a clear ImportError so
+    the user knows to switch interpreters rather than chase a cryptic
+    ``no such module: vec0`` later.
+    """
+    try:
+        import sqlite_vec
+    except ImportError as exc:
+        raise ImportError(
+            "sqlite-vec is required for chunk-level retrieval. "
+            "Install with: pip install sqlite-vec"
+        ) from exc
+    try:
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
+    except (AttributeError, sqlite3.OperationalError) as exc:
+        raise RuntimeError(
+            "Your Python sqlite3 was built without extension loading. "
+            "Use a Homebrew/pyenv interpreter (or any build with "
+            "SQLITE_ENABLE_LOAD_EXTENSION) to use chunk retrieval."
+        ) from exc
+
+
 def init_cache(db_path: Path) -> None:
     """Create the SQLite cache file and install the schema.
 
@@ -179,6 +240,55 @@ def init_cache(db_path: Path) -> None:
         conn.commit()
     finally:
         conn.close()
+
+
+def ensure_chunk_vec(conn: sqlite3.Connection, dim: int) -> None:
+    """Create ``chunk_vec`` virtual table if missing, sized to ``dim``.
+
+    sqlite-vec's ``vec0`` requires a literal dimension at CREATE time,
+    so we can't ship the table in ``SQLITE_SCHEMA`` — we don't know
+    the embedder's dimension until the first persist. Stamp ``dim``
+    into ``meta`` alongside provider/model so retrieval can verify.
+    """
+    conn.execute(
+        f"CREATE VIRTUAL TABLE IF NOT EXISTS chunk_vec "
+        f"USING vec0(embedding float[{int(dim)}])"
+    )
+
+
+_FP_KEYS = ("embedder_provider", "embedder_model", "embedder_dim")
+
+
+def set_embedder_fingerprint(
+    conn: sqlite3.Connection, provider: str, model: str, dim: int
+) -> None:
+    """Stamp the embedder identity used to populate ``chunk_vec`` into ``meta``."""
+    conn.executemany(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+        [
+            ("embedder_provider", provider),
+            ("embedder_model", model),
+            ("embedder_dim", str(int(dim))),
+        ],
+    )
+
+
+def get_embedder_fingerprint(
+    conn: sqlite3.Connection,
+) -> tuple[str, str, int] | None:
+    """Return ``(provider, model, dim)`` from ``meta`` or ``None`` if unset."""
+    placeholders = ",".join("?" * len(_FP_KEYS))
+    rows = conn.execute(
+        f"SELECT key, value FROM meta WHERE key IN ({placeholders})",
+        _FP_KEYS,
+    ).fetchall()
+    found = {r[0]: r[1] for r in rows}
+    if set(found) != set(_FP_KEYS):
+        return None
+    try:
+        return found["embedder_provider"], found["embedder_model"], int(found["embedder_dim"])
+    except (TypeError, ValueError):
+        return None
 
 
 class SQLiteCache:
@@ -202,6 +312,11 @@ class SQLiteCache:
             PRAGMA mmap_size=268435456;
             """
         )
+        # sqlite-vec must be registered on every new connection — the
+        # extension can't be persisted in the .db file. Loading at init
+        # means the long-lived ``self._conn`` can reference ``chunk_vec``
+        # in any later read/write without re-registration cost.
+        _load_sqlite_vec(self._conn)
         self._lock = threading.RLock()
         # Lazily-loaded embedding matrix for ``semantic_search``. Marked
         # dirty on every page-write path so the next query reloads.
