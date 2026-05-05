@@ -367,10 +367,24 @@ def ingest(
             # Silent on the happy path; raises if the estimate exceeds.
             _preflight_budget_check(chunks, full_cfg)
 
-            # 5b. Persist chunks so their text is queryable via
-            # `wikiloom source <chunk_id>` after the ingest commits.
-            chunk_store = ChunkStore(registry_dir / "wiki.db")
-            stored_chunks = chunk_store.persist_chunks(content_hash, chunks)
+            # 5b. Persist chunks for retrieval (BM25 + vector lanes).
+            from wikiloom.cache import SQLiteCache
+            from wikiloom.embeddings import load_embedder
+            persist_cache = SQLiteCache(registry_dir / "wiki.db")
+            chunk_store = ChunkStore(persist_cache)
+            chunk_embedder = load_embedder(project_root)
+            embed_provider = full_cfg.embeddings.provider if chunk_embedder else ""
+            embed_model = full_cfg.embeddings.model if chunk_embedder else ""
+            if chunk_embedder and not embed_model:
+                # Resolve config default to the backend's DEFAULT_MODEL.
+                embed_model = getattr(type(chunk_embedder), "DEFAULT_MODEL", "")
+            stored_chunks = chunk_store.persist_chunks(
+                content_hash,
+                chunks,
+                embedder=chunk_embedder,
+                embedder_provider=embed_provider,
+                embedder_model=embed_model,
+            )
             chunk_ids = [s.chunk_id for s in stored_chunks]
 
             # 5c. Synthesis loop. The registry is loaded once here and
@@ -517,6 +531,9 @@ def ingest(
             result.pages_created.extend(write_result.created_page_ids)
             result.pages_updated.extend(write_result.updated_page_ids)
             result.notes.extend(write_result.notes)
+            # Stamp chunks.page_id so retrieval citations can navigate
+            # chunk → synthesized page.
+            chunk_store.set_page_ids(write_result.chunk_to_page)
             synthesis_written = (
                 list(write_result.created_paths) + list(write_result.updated_paths)
             )

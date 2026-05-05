@@ -40,6 +40,9 @@ class PageWriteResult:
     updated_paths: list[Path] = field(default_factory=list)
     skipped_collisions: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    # chunk_id -> page_id; stamped on chunks for retrieval navigation.
+    # Last-write-wins for chunks producing multiple pages.
+    chunk_to_page: dict[str, str] = field(default_factory=dict)
 
     @property
     def created_page_ids(self) -> list[str]:
@@ -156,14 +159,20 @@ class PageWriter:
                     summary=synthesis.source_summary.one_line,
                     source_hash=source_entry.content_hash,
                 )
+                # Seed every chunk → source page; steps 2-3 overwrite
+                # for chunks that produced more specific pages.
+                for cid in source_chunk_ids:
+                    result.chunk_to_page[cid] = page_id
 
         # 2. pages_to_create
         for proposal in synthesis.pages_to_create:
             outcome = self._write_create(proposal, source_entry)
             if outcome.kind == "created":
                 result.created_paths.append(outcome.path)
+                result.chunk_to_page[proposal.chunk_id] = outcome.page_id
             elif outcome.kind == "updated":
                 result.updated_paths.append(outcome.path)
+                result.chunk_to_page[proposal.chunk_id] = outcome.page_id
             elif outcome.kind == "skipped":
                 result.skipped_collisions.append(outcome.page_id)
                 result.notes.append(
@@ -175,11 +184,13 @@ class PageWriter:
             outcome = self._write_update(proposal, source_entry)
             if outcome.kind == "updated":
                 result.updated_paths.append(outcome.path)
+                result.chunk_to_page[proposal.chunk_id] = outcome.page_id
             elif outcome.kind == "created":
                 # Update target didn't exist — the writer promoted
                 # the update into a create using the LLM's proposed
                 # page_id. Count it under created pages.
                 result.created_paths.append(outcome.path)
+                result.chunk_to_page[proposal.chunk_id] = outcome.page_id
                 result.notes.append(
                     f"update target not found: {outcome.page_id} "
                     f"— wrote as new page instead"

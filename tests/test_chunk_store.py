@@ -210,3 +210,152 @@ def test_reingest_same_source_produces_stable_chunk_ids(
     second_ids = [c.chunk_id for c in second]
 
     assert first_ids == second_ids
+
+
+# ----------------------------------------------------------------------
+# Provenance columns, chunk_vec, set_page_ids, embedder fingerprint
+# ----------------------------------------------------------------------
+
+
+def _chunk_with_meta(
+    text: str, index: int, total: int, *, parent_heading: str | None = None
+) -> ExtractedContent:
+    meta: dict = {"chunk_index": index, "chunk_total": total}
+    if parent_heading is not None:
+        meta["parent_heading"] = parent_heading
+    return ExtractedContent(
+        text=text,
+        metadata=meta,
+        source_path=Path("/tmp/test-doc.md"),
+        content_type="markdown",
+        extraction_method="test-fixture",
+        token_estimate=10,
+    )
+
+
+class _FakeEmbedder:
+    DEFAULT_MODEL = "fake-model-1"
+
+    def __init__(self, dim: int = 8) -> None:
+        self.dim = dim
+
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        return [[float((hash(t) >> i) & 1) for i in range(self.dim)] for t in texts]
+
+
+def test_persist_writes_source_path_and_parent_heading(store: ChunkStore) -> None:
+    store.persist_chunks(
+        "src-1",
+        [_chunk_with_meta("# Auth\nbody", 0, 1, parent_heading="Auth")],
+    )
+    import sqlite3
+    conn = sqlite3.connect(str(store.db_path))
+    conn.row_factory = sqlite3.Row
+    row = conn.execute(
+        "SELECT source_path, parent_heading, page_id FROM chunks"
+    ).fetchone()
+    conn.close()
+    assert row["source_path"] == "/tmp/test-doc.md"
+    assert row["parent_heading"] == "Auth"
+    assert row["page_id"] is None
+
+
+def test_persist_with_embedder_populates_chunk_vec_and_fingerprint(
+    store: ChunkStore,
+) -> None:
+    embedder = _FakeEmbedder(dim=8)
+    store.persist_chunks(
+        "src-vec",
+        [_chunk_with_meta("a", 0, 2), _chunk_with_meta("b", 1, 2)],
+        embedder=embedder,
+        embedder_provider="fake",
+        embedder_model="fake-model-1",
+    )
+    import sqlite3
+    from wikiloom.cache import _load_sqlite_vec, get_embedder_fingerprint
+    conn = sqlite3.connect(str(store.db_path))
+    _load_sqlite_vec(conn)
+    (n_vec,) = conn.execute("SELECT count(*) FROM chunk_vec").fetchone()
+    fp = get_embedder_fingerprint(conn)
+    conn.close()
+    assert n_vec == 2
+    assert fp == ("fake", "fake-model-1", 8)
+
+
+def test_set_page_ids_stamps_chunks(store: ChunkStore) -> None:
+    stored = store.persist_chunks(
+        "src-page",
+        [_chunk_with_meta("a", 0, 2), _chunk_with_meta("b", 1, 2)],
+    )
+    cid_a, cid_b = stored[0].chunk_id, stored[1].chunk_id
+    n = store.set_page_ids({cid_a: "concepts/auth", cid_b: "concepts/login"})
+    assert n == 2
+    import sqlite3
+    conn = sqlite3.connect(str(store.db_path))
+    rows = dict(conn.execute("SELECT chunk_id, page_id FROM chunks").fetchall())
+    conn.close()
+    assert rows[cid_a] == "concepts/auth"
+    assert rows[cid_b] == "concepts/login"
+
+
+def test_persist_populates_chunks_fts(store: ChunkStore) -> None:
+    store.persist_chunks(
+        "src-fts",
+        [_chunk_with_meta("hello world", 0, 2),
+         _chunk_with_meta("goodbye now", 1, 2)],
+    )
+    import sqlite3
+    conn = sqlite3.connect(str(store.db_path))
+    (n_fts,) = conn.execute("SELECT count(*) FROM chunks_fts").fetchone()
+    rows = conn.execute(
+        "SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH 'hello'"
+    ).fetchall()
+    conn.close()
+    assert n_fts == 2
+    assert len(rows) == 1
+
+
+def test_persist_raises_on_fingerprint_mismatch(store: ChunkStore) -> None:
+    embedder = _FakeEmbedder(dim=8)
+    store.persist_chunks(
+        "src-fp",
+        [_chunk_with_meta("a", 0, 1)],
+        embedder=embedder,
+        embedder_provider="fake",
+        embedder_model="fake-model-1",
+    )
+    with pytest.raises(RuntimeError, match="fingerprint mismatch"):
+        store.persist_chunks(
+            "src-fp",
+            [_chunk_with_meta("a", 0, 1)],
+            embedder=embedder,
+            embedder_provider="fake",
+            embedder_model="fake-model-2",  # changed
+        )
+
+
+def test_reingest_replaces_chunk_vec_rows(store: ChunkStore) -> None:
+    embedder = _FakeEmbedder(dim=8)
+    store.persist_chunks(
+        "src-rerun",
+        [_chunk_with_meta("a", 0, 2), _chunk_with_meta("b", 1, 2)],
+        embedder=embedder,
+        embedder_provider="fake",
+        embedder_model="fake-model-1",
+    )
+    store.persist_chunks(
+        "src-rerun",
+        [_chunk_with_meta("a", 0, 1)],
+        embedder=embedder,
+        embedder_provider="fake",
+        embedder_model="fake-model-1",
+    )
+    import sqlite3
+    from wikiloom.cache import _load_sqlite_vec
+    conn = sqlite3.connect(str(store.db_path))
+    _load_sqlite_vec(conn)
+    (n_vec,) = conn.execute("SELECT count(*) FROM chunk_vec").fetchone()
+    (n_chunks,) = conn.execute("SELECT count(*) FROM chunks").fetchone()
+    conn.close()
+    assert n_chunks == 1
+    assert n_vec == 1
