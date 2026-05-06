@@ -5,6 +5,73 @@ All notable changes to WikiLoom are recorded here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Chunk-direct retrieval lane (`wikiloom.retrieval.search_chunks`)** —
+  hybrid BM25 + vector retrieval over verbatim chunks, fused with
+  Reciprocal Rank Fusion. Returns immutable `Citation` records
+  (`chunk_id`, `page_id`, `source_path`, `parent_heading`, `snippet`,
+  `score`) with no LLM call and no rerank. Designed as the cheap-router
+  half of the 3-layer agent surface: agents pay for `search_chunks`
+  first, then decide whether to fetch verbatim text via
+  `ChunkStore.get_chunk` or follow `page_id` into the synthesized wiki
+  page. Phase 1.3's MCP `search_chunks` tool will wrap this directly.
+
+- **FTS5 + sqlite-vec virtual tables on `chunks`** — `chunks_fts`
+  (external-content FTS5 with porter-ascii tokenizer) plus three
+  AFTER INSERT/DELETE/UPDATE triggers keep BM25 in lockstep with
+  `chunks` writes. `chunk_vec` (sqlite-vec `vec0`) holds disk-backed
+  ANN vectors keyed by `chunks.rowid`, created lazily on first persist
+  with an embedder. New `meta` table stamps the embedder fingerprint
+  `(provider, model, dim)`; both write and read paths refuse on
+  mismatch rather than silently mix vector spaces.
+
+- **Provenance columns on `chunks`** — `source_path`, `parent_heading`,
+  `page_id`, and `embedding`. `parent_heading` is captured by the
+  chunker via a cheap regex against ATX markdown headings (stamps
+  the first heading line found in each chunk's text). `page_id` is
+  written back from the page writer after a page commits, so
+  retrieval citations carry the chunk → synthesized-page edge
+  durably in SQLite. Markdown-only for parent_heading today;
+  per-extractor structure capture is a Phase 1.x follow-up. Cross-
+  content-type previews are covered by the always-populated
+  `Citation.snippet` field (≤200 chars, whitespace-collapsed).
+
+### Changed
+
+- **`ChunkStore` uses the shared `SQLiteCache` connection** instead of
+  opening a fresh `sqlite3.connect()` per call. Constructor accepts
+  either a `SQLiteCache` (hot path: ingest + retrieval share one
+  connection, one extension load) or a `Path` (thin callers: CLI
+  status, source lookup, tests). Closes the per-call SQLite open
+  flagged by the codebase performance invariants.
+
+- **Chunk persistence embeds at write time** when an embedder is
+  available. `persist_chunks` now batches embeddings via the existing
+  `_embed_in_batches` helper, writes vectors into `chunk_vec` in the
+  same transaction as the `chunks` insert, and stamps the embedder
+  fingerprint on first persist. Re-ingest cleans up old `chunk_vec`
+  rows by rowid before reinserting; subsequent persists with a
+  changed embedder identity raise immediately.
+
+- **`PageWriteResult.chunk_to_page`** — the page writer now records
+  the chunk_id → page_id mapping as pages are committed. Source-page
+  writes seed every chunk; concept/entity create + update outcomes
+  overwrite for chunks that produced specific pages. The processor
+  applies the map via `ChunkStore.set_page_ids` so the edge lands
+  durably in SQLite.
+
+### Dependencies
+
+- **`sqlite-vec>=0.1.6`** added to core dependencies. The extension is
+  registered on every `SQLiteCache` connection at init; a clear error
+  is raised if the platform's Python sqlite3 was built without
+  `enable_load_extension` (system Python on macOS and some Linux
+  distros). Use a Homebrew/pyenv interpreter or any build with
+  `SQLITE_ENABLE_LOAD_EXTENSION` to use chunk retrieval.
+
 ## [0.1.9] — 2026-05-04
 
 ### Fixed
