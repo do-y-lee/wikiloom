@@ -273,6 +273,14 @@ def set_embedder_fingerprint(
     )
 
 
+def chunk_vec_exists(conn: sqlite3.Connection) -> bool:
+    """True if ``chunk_vec`` has been created (lazy on first persist)."""
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='chunk_vec'"
+    ).fetchone()
+    return row is not None
+
+
 def get_embedder_fingerprint(
     conn: sqlite3.Connection,
 ) -> tuple[str, str, int] | None:

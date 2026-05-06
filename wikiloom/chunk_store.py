@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Iterable
 from wikiloom.cache import (
     SQLiteCache,
     _embed_in_batches,
+    chunk_vec_exists,
     ensure_chunk_vec,
     get_embedder_fingerprint,
     set_embedder_fingerprint,
@@ -158,7 +159,7 @@ class ChunkStore:
                     (source_hash,),
                 ).fetchall()
             ]
-            if old_rowids and _chunk_vec_exists(conn):
+            if old_rowids and chunk_vec_exists(conn):
                 conn.executemany(
                     "DELETE FROM chunk_vec WHERE rowid = ?",
                     [(rid,) for rid in old_rowids],
@@ -230,7 +231,7 @@ class ChunkStore:
                     (source_hash,),
                 ).fetchall()
             ]
-            if old_rowids and _chunk_vec_exists(conn):
+            if old_rowids and chunk_vec_exists(conn):
                 conn.executemany(
                     "DELETE FROM chunk_vec WHERE rowid = ?",
                     [(rid,) for rid in old_rowids],
@@ -270,14 +271,6 @@ class ChunkStore:
         with self._cache._connect() as conn:
             (total,) = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()
         return int(total)
-
-
-def _chunk_vec_exists(conn: Any) -> bool:
-    # Created lazily by ensure_chunk_vec on first persist with an embedder.
-    row = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='chunk_vec'"
-    ).fetchone()
-    return row is not None
 
 
 def _row_to_stored_chunk(row: Any) -> StoredChunk:
