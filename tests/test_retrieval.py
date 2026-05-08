@@ -330,3 +330,159 @@ def test_search_raises_on_provider_model_mismatch(
             embedder_provider="other",
             embedder_model="other-model",
         )
+
+
+# ----------------------------------------------------------------------
+# search_chunks — page_ids scoping (Phase 1.2 hybrid lane)
+# ----------------------------------------------------------------------
+
+
+@pytest.fixture
+def populated_with_pages(
+    tmp_path: Path,
+) -> tuple[SQLiteCache, _FakeEmbedder, ChunkStore]:
+    """Six chunks across three pages: ``auth``, ``billing``, ``other``."""
+    cache = SQLiteCache(tmp_path / "_registry" / "wiki.db")
+    store = ChunkStore(cache)
+    embedder = _FakeEmbedder(dim=8)
+    chunks = [
+        _chunk("authentication and login flow", 0, 6, parent_heading="Auth"),
+        _chunk("logout endpoint reference", 1, 6, parent_heading="Auth"),
+        _chunk("payment provider configuration", 2, 6, parent_heading="Billing"),
+        _chunk("invoice subtotal handling", 3, 6, parent_heading="Billing"),
+        _chunk("alpha keyword content", 4, 6, parent_heading="Other"),
+        _chunk("bravo charlie delta", 5, 6, parent_heading="Other"),
+    ]
+    stored = store.persist_chunks(
+        "src-multi", chunks,
+        embedder=embedder,
+        embedder_provider="fake",
+        embedder_model="fake-model-1",
+    )
+    store.set_page_ids({
+        stored[0].chunk_id: "concepts/auth",
+        stored[1].chunk_id: "concepts/auth",
+        stored[2].chunk_id: "concepts/billing",
+        stored[3].chunk_id: "concepts/billing",
+        stored[4].chunk_id: "concepts/other",
+        stored[5].chunk_id: "concepts/other",
+    })
+    return cache, embedder, store
+
+
+def test_search_scoped_to_pages_only_returns_chunks_in_those_pages(
+    populated_with_pages: tuple[SQLiteCache, _FakeEmbedder, ChunkStore],
+) -> None:
+    cache, embedder, _ = populated_with_pages
+    cites = search_chunks(
+        cache, embedder, "alpha", k=10,
+        page_ids=["concepts/auth", "concepts/billing"],
+    )
+    # 'alpha' appears textually only in concepts/other — scoping must
+    # exclude it. Vector lane may surface auth/billing chunks.
+    assert all(c.page_id in ("concepts/auth", "concepts/billing") for c in cites)
+
+
+def test_search_scoped_bm25_lane_filters_to_pages(
+    populated_with_pages: tuple[SQLiteCache, _FakeEmbedder, ChunkStore],
+) -> None:
+    cache, _, _ = populated_with_pages
+    # No embedder → BM25 only. 'alpha' BM25-matches only concepts/other.
+    # Scoping to auth+billing must return no rows even though BM25
+    # would find a match unscoped.
+    unscoped = search_chunks(cache, None, "alpha", k=10)
+    scoped = search_chunks(
+        cache, None, "alpha", k=10,
+        page_ids=["concepts/auth", "concepts/billing"],
+    )
+    assert {c.page_id for c in unscoped} == {"concepts/other"}
+    assert scoped == []
+
+
+def test_search_scoped_vector_lane_filters_to_pages(
+    populated_with_pages: tuple[SQLiteCache, _FakeEmbedder, ChunkStore],
+) -> None:
+    cache, embedder, _ = populated_with_pages
+    cites = search_chunks(
+        cache, embedder, "authentication", k=10,
+        page_ids=["concepts/auth"],
+    )
+    assert cites
+    assert {c.page_id for c in cites} == {"concepts/auth"}
+
+
+def test_search_scoped_empty_page_ids_returns_empty(
+    populated_with_pages: tuple[SQLiteCache, _FakeEmbedder, ChunkStore],
+) -> None:
+    cache, embedder, _ = populated_with_pages
+    assert search_chunks(cache, embedder, "auth", k=5, page_ids=[]) == []
+
+
+def test_search_scoped_unknown_page_id_returns_empty(
+    populated_with_pages: tuple[SQLiteCache, _FakeEmbedder, ChunkStore],
+) -> None:
+    cache, embedder, _ = populated_with_pages
+    assert search_chunks(
+        cache, embedder, "auth", k=5, page_ids=["concepts/does-not-exist"],
+    ) == []
+
+
+def test_search_scoped_skips_chunks_without_embeddings(
+    tmp_path: Path,
+) -> None:
+    # Persist with an embedder so chunk_vec exists & fingerprint is set;
+    # then null one chunk's embedding to simulate a partially-embedded
+    # page. Vector lane should skip the null row, not crash.
+    cache = SQLiteCache(tmp_path / "_registry" / "wiki.db")
+    store = ChunkStore(cache)
+    embedder = _FakeEmbedder(dim=8)
+    stored = store.persist_chunks(
+        "src-partial",
+        [
+            _chunk("authentication flow", 0, 2, parent_heading="Auth"),
+            _chunk("login endpoint", 1, 2, parent_heading="Auth"),
+        ],
+        embedder=embedder,
+        embedder_provider="fake",
+        embedder_model="fake-model-1",
+    )
+    store.set_page_ids({s.chunk_id: "concepts/auth" for s in stored})
+    with cache._connect() as conn:
+        conn.execute(
+            "UPDATE chunks SET embedding = NULL WHERE chunk_id = ?",
+            (stored[0].chunk_id,),
+        )
+        conn.commit()
+
+    cites = search_chunks(
+        cache, embedder, "authentication", k=5,
+        page_ids=["concepts/auth"],
+    )
+    # The non-null-embedding chunk must still come back via vector lane
+    # (and BM25 finds both, but only the embedded one survives in vector).
+    assert cites
+    assert all(c.page_id == "concepts/auth" for c in cites)
+
+
+def test_search_scoped_rrf_fuses_both_lanes(
+    populated_with_pages: tuple[SQLiteCache, _FakeEmbedder, ChunkStore],
+) -> None:
+    # Within scoped pages, hybrid must recall a chunk that BM25 alone
+    # would miss — same fusion contract as the unscoped path.
+    cache, embedder, _ = populated_with_pages
+    bm25_only = search_chunks(
+        cache, None, "authentication", k=5,
+        page_ids=["concepts/auth"],
+    )
+    hybrid = search_chunks(
+        cache, embedder, "authentication", k=5,
+        page_ids=["concepts/auth"],
+    )
+    bm25_ids = {c.chunk_id for c in bm25_only}
+    hybrid_ids = {c.chunk_id for c in hybrid}
+    # The 'logout endpoint reference' chunk has no 'authentication' token,
+    # so BM25 misses it; vector lane should pull it in.
+    assert hybrid_ids - bm25_ids, (
+        f"scoped hybrid should recall vector-only chunks; "
+        f"bm25={bm25_ids}, hybrid={hybrid_ids}"
+    )
