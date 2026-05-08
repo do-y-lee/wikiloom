@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Hybrid context lane (`wikiloom.context.get_context`)** — the
+  default agent path for goal-shaped queries. Embeds the goal
+  once, routes to the top-N most similar synthesized pages via
+  `cache.semantic_search` (cosine over the cached page-embedding
+  matrix, deprecated pages excluded), then reranks chunks within
+  those pages via `search_chunks` scoped to the routed page_ids.
+  Returns a `ContextResult(pages, citations)`: `pages` is a list
+  of `PageHit` records (`page_id`, `type`, `title`, `summary`,
+  `similarity`) for explainability; `citations` is a list of
+  `Citation` records identical to `search_chunks`'s output. No
+  LLM call, no second rerank — pure deterministic retrieval. The
+  MCP `get_context` tool will wrap this directly.
+
 - **Chunk-direct retrieval lane (`wikiloom.retrieval.search_chunks`)** —
   hybrid BM25 + vector retrieval over verbatim chunks, fused with
   Reciprocal Rank Fusion. Returns immutable `Citation` records
@@ -40,6 +53,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Citation.snippet` field (≤200 chars, whitespace-collapsed).
 
 ### Changed
+
+- **`search_chunks` gains optional `page_ids` and `query_vec`
+  parameters** — `page_ids` scopes both lanes to chunks belonging
+  to the given pages (BM25 lane via FTS5 JOIN+IN; vector lane
+  falls back to in-memory numpy cosine over `chunks.embedding`
+  since sqlite-vec's `MATCH` can't compose with `WHERE`). The
+  scoped path is what `get_context` uses to rerank chunks within
+  routed pages. `query_vec` lets callers thread a pre-computed
+  query embedding so they don't pay for a second embed inside
+  `_vector_lane` — used by `get_context` to amortize one embed
+  call across page routing and chunk reranking. Default values
+  (`page_ids=None`, `query_vec=None`) preserve the previously
+  shipped behavior byte-identical.
 
 - **`ChunkStore` uses the shared `SQLiteCache` connection** instead of
   opening a fresh `sqlite3.connect()` per call. Constructor accepts
