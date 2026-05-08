@@ -58,6 +58,7 @@ def search_chunks(
     embedder_provider: str = "",
     embedder_model: str = "",
     page_ids: list[str] | None = None,
+    query_vec: list[float] | None = None,
 ) -> list[Citation]:
     """Return top-k chunks for ``query`` via BM25 + vector + RRF fusion.
 
@@ -65,8 +66,13 @@ def search_chunks(
     is checked against the stored fingerprint and a mismatch raises.
 
     ``page_ids`` scopes both lanes to chunks belonging to the given
-    pages (used by the 1.2 hybrid lane). ``None`` = unscoped (1.1's
-    default); ``[]`` = scoped to nothing → empty result.
+    pages. ``None`` = unscoped (every chunk is a candidate); ``[]`` =
+    scoped to nothing → empty result.
+
+    ``query_vec`` accepts a pre-computed query embedding so callers
+    that already embedded the goal (e.g., to route over pages first)
+    don't pay for a second embed call here. BM25 still tokenizes
+    ``query`` directly.
     """
     if not query.strip() or k <= 0:
         return []
@@ -81,6 +87,7 @@ def search_chunks(
             conn, embedder, query, candidates,
             embedder_provider, embedder_model,
             page_ids=page_ids,
+            query_vec=query_vec,
         )
 
         fused = _rrf_fuse(bm25_ranks, vector_ranks)
@@ -151,11 +158,13 @@ def _vector_lane(
     expected_model: str,
     *,
     page_ids: list[str] | None = None,
+    query_vec: list[float] | None = None,
 ) -> dict[int, int]:
     """Return rowid -> 1-based rank for the vector lane.
 
-    Empty when the embedder is missing, the index has no fingerprint,
-    or (unscoped only) chunk_vec hasn't been created yet. Raises on a
+    Empty when no query vector can be produced (no embedder *and* no
+    pre-computed ``query_vec``), the index has no fingerprint, or
+    (unscoped only) chunk_vec hasn't been created yet. Raises on a
     real fingerprint mismatch — better to fail than to return
     cross-space garbage.
 
@@ -163,8 +172,11 @@ def _vector_lane(
     ``chunks.embedding`` for that subset — sqlite-vec's ``MATCH`` is
     terminal and can't compose with ``WHERE``. The subset is small
     (top-N pages × chunks-per-page), so a numpy matmul is microseconds.
+
+    ``query_vec`` lets callers thread a vector they already computed
+    (e.g., for the page router) so we don't re-embed the same string.
     """
-    if embedder is None:
+    if embedder is None and query_vec is None:
         return {}
     if page_ids is not None and not page_ids:
         return {}
@@ -176,10 +188,11 @@ def _vector_lane(
     if page_ids is None and not chunk_vec_exists(conn):
         return {}
 
-    query_vecs = embedder.embed_texts([query])
-    if not query_vecs:
-        return {}
-    query_vec = query_vecs[0]
+    if query_vec is None:
+        query_vecs = embedder.embed_texts([query])
+        if not query_vecs:
+            return {}
+        query_vec = query_vecs[0]
     current_dim = len(query_vec)
 
     stored_provider, stored_model, stored_dim = fp

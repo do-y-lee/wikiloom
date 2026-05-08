@@ -333,7 +333,7 @@ def test_search_raises_on_provider_model_mismatch(
 
 
 # ----------------------------------------------------------------------
-# search_chunks — page_ids scoping (Phase 1.2 hybrid lane)
+# search_chunks — page_ids scoping
 # ----------------------------------------------------------------------
 
 
@@ -462,6 +462,23 @@ def test_search_scoped_skips_chunks_without_embeddings(
     # (and BM25 finds both, but only the embedded one survives in vector).
     assert cites
     assert all(c.page_id == "concepts/auth" for c in cites)
+
+
+def test_search_chunks_accepts_pre_embedded_query_vec(
+    populated: tuple[SQLiteCache, _FakeEmbedder],
+) -> None:
+    # Threading a pre-embedded vector should produce the same ranking
+    # as letting search_chunks embed the string itself — the two
+    # paths are semantically equivalent, and locking that equivalence
+    # protects callers like get_context that compute the embedding
+    # once at the entry point and pass it down.
+    cache, embedder = populated
+    query_vec = list(embedder.embed_texts(["authentication"])[0])
+    by_string = search_chunks(cache, embedder, "authentication", k=5)
+    by_vec = search_chunks(
+        cache, embedder, "authentication", k=5, query_vec=query_vec,
+    )
+    assert [c.chunk_id for c in by_string] == [c.chunk_id for c in by_vec]
 
 
 def test_search_scoped_rrf_fuses_both_lanes(
