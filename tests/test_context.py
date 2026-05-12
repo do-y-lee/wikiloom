@@ -21,7 +21,9 @@ from wikiloom.ingest.extractors.base import ExtractedContent
 
 
 def _chunk(
-    text: str, index: int, total: int, *, parent_heading: str | None = None
+    text: str, index: int, total: int, *,
+    parent_heading: str | None = None,
+    token_estimate: int = 10,
 ) -> ExtractedContent:
     meta: dict = {"chunk_index": index, "chunk_total": total}
     if parent_heading is not None:
@@ -32,7 +34,7 @@ def _chunk(
         source_path=Path("/tmp/test-doc.md"),
         content_type="markdown",
         extraction_method="test-fixture",
-        token_estimate=10,
+        token_estimate=token_estimate,
     )
 
 
@@ -294,3 +296,95 @@ def test_get_context_raises_on_fingerprint_mismatch(
             embedder_provider="other",
             embedder_model="other-model",
         )
+
+
+# ----------------------------------------------------------------------
+# Token-budget packing
+# ----------------------------------------------------------------------
+
+
+def test_get_context_default_budget_none_is_byte_identical(
+    project: tuple[SQLiteCache, _FakeEmbedder, ChunkStore],
+) -> None:
+    # budget=None must leave the citation list exactly as search_chunks
+    # produced it — same shape, same order, same count.
+    cache, embedder, _ = project
+    baseline = get_context(cache, embedder, "authentication", k=5)
+    with_none = get_context(cache, embedder, "authentication", k=5, budget=None)
+    assert [c.chunk_id for c in baseline.citations] == [
+        c.chunk_id for c in with_none.citations
+    ]
+
+
+def test_get_context_budget_caps_token_sum(
+    project: tuple[SQLiteCache, _FakeEmbedder, ChunkStore],
+) -> None:
+    # Each fixture chunk costs 10 tokens. budget=25 fits two chunks
+    # (10 + 10 = 20, next would push to 30 > 25 and stop).
+    cache, embedder, _ = project
+    result = get_context(cache, embedder, "authentication", k=5, budget=25)
+    assert len(result.citations) == 2
+    spent = sum((c.token_estimate or 1) for c in result.citations)
+    assert spent <= 25
+
+
+def test_get_context_budget_includes_oversized_first_chunk(
+    project: tuple[SQLiteCache, _FakeEmbedder, ChunkStore],
+) -> None:
+    # budget=5 < the first chunk's cost (10). Must still include it —
+    # returning empty would be worse for the agent than a slight over-cap.
+    cache, embedder, _ = project
+    result = get_context(cache, embedder, "authentication", k=5, budget=5)
+    assert len(result.citations) == 1
+
+
+def test_get_context_budget_counts_null_token_estimate_as_one(
+    tmp_path: Path,
+) -> None:
+    # Legacy rows can have NULL token_estimate. The packer must count
+    # them as 1 (not 0) so the loop still advances and we don't pull in
+    # an unbounded number of "free" chunks.
+    cache = SQLiteCache(tmp_path / "_registry" / "wiki.db")
+    embedder = _FakeEmbedder(dim=8)
+    store = ChunkStore(cache)
+
+    _seed_pages(cache, embedder, [
+        ("concepts/auth", "Authentication", "concept", "active",
+         "authentication login flow logout"),
+    ])
+    chunks = [
+        _chunk(f"authentication chunk {i}", i, 5, parent_heading="Auth")
+        for i in range(5)
+    ]
+    stored = store.persist_chunks(
+        "src-null-tok", chunks,
+        embedder=embedder,
+        embedder_provider="fake",
+        embedder_model="fake-model-1",
+    )
+    store.set_page_ids({s.chunk_id: "concepts/auth" for s in stored})
+    with cache._connect() as conn:
+        conn.execute(
+            "UPDATE chunks SET token_estimate = NULL WHERE source_hash = ?",
+            ("src-null-tok",),
+        )
+        conn.commit()
+
+    # budget=2 → two NULL chunks (counted as 1 each) fit; third would
+    # push spent (2) + cost (1) = 3 > 2 and break.
+    result = get_context(cache, embedder, "authentication", k=5, budget=2)
+    assert all(c.token_estimate is None for c in result.citations)
+    assert len(result.citations) == 2
+
+
+def test_get_context_budget_preserves_pages_when_citations_packed(
+    project: tuple[SQLiteCache, _FakeEmbedder, ChunkStore],
+) -> None:
+    # Packing trims citations, not pages — the router result must
+    # still be observable for explainability.
+    cache, embedder, _ = project
+    result = get_context(
+        cache, embedder, "authentication", top_pages=3, k=5, budget=15,
+    )
+    assert result.pages
+    assert len(result.citations) <= 2

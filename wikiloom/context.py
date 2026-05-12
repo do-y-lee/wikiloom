@@ -42,6 +42,7 @@ def get_context(
     *,
     top_pages: int = 5,
     k: int = 20,
+    budget: int | None = None,
     embedder_provider: str = "",
     embedder_model: str = "",
 ) -> ContextResult:
@@ -57,6 +58,13 @@ def get_context(
     ``pages`` is included so callers can see which pages the router
     picked and with what confidence — useful for explainability and
     for any agent-facing tool that wraps this function.
+
+    ``budget`` (optional, in tokens) further clamps the citation list
+    after RRF ranking: chunks are taken in rank order until the
+    running sum of ``token_estimate`` would exceed the budget. The
+    top-ranked chunk is always included even if its cost alone
+    exceeds budget — returning empty would be worse for the agent.
+    ``budget=None`` disables packing.
 
     Returns an empty ``ContextResult`` for empty goals, missing
     embedder, no embedded pages, or zero ``k``/``top_pages``. Raises
@@ -103,4 +111,24 @@ def get_context(
         query_vec=query_vec,
     )
 
+    if budget is not None:
+        citations = _pack_to_budget(citations, budget)
+
     return ContextResult(pages=pages, citations=citations)
+
+
+def _pack_to_budget(citations: list[Citation], budget: int) -> list[Citation]:
+    """Take citations in rank order until token sum would exceed ``budget``.
+
+    First chunk always lands (oversized > empty). NULL ``token_estimate``
+    counted as 1 so legacy rows still advance the loop.
+    """
+    packed: list[Citation] = []
+    spent = 0
+    for c in citations:
+        cost = c.token_estimate if c.token_estimate is not None else 1
+        if packed and spent + cost > budget:
+            break
+        packed.append(c)
+        spent += cost
+    return packed
