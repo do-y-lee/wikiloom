@@ -90,6 +90,7 @@ def test_citation_is_frozen_and_has_expected_fields() -> None:
         parent_heading="Auth",
         snippet="auth body preview",
         score=0.123,
+        token_estimate=42,
     )
     assert c.chunk_id == "abc"
     assert c.page_id == "concepts/auth"
@@ -97,8 +98,21 @@ def test_citation_is_frozen_and_has_expected_fields() -> None:
     assert c.parent_heading == "Auth"
     assert c.snippet == "auth body preview"
     assert c.score == 0.123
+    assert c.token_estimate == 42
     with pytest.raises(Exception):
         c.score = 9.0  # type: ignore[misc]
+
+
+def test_citation_token_estimate_defaults_to_none() -> None:
+    c = Citation(
+        chunk_id="abc",
+        page_id=None,
+        source_path=None,
+        parent_heading=None,
+        snippet="",
+        score=0.0,
+    )
+    assert c.token_estimate is None
 
 
 # ----------------------------------------------------------------------
@@ -176,6 +190,30 @@ def test_search_populates_provenance(populated: tuple[SQLiteCache, _FakeEmbedder
     assert top.parent_heading in ("Auth", "Billing")
     assert top.snippet  # always populated, even if parent_heading is set
     assert top.score > 0.0
+
+
+def test_search_carries_token_estimate(
+    populated: tuple[SQLiteCache, _FakeEmbedder],
+) -> None:
+    # The fixture seeds every chunk with token_estimate=10. Hydration
+    # must thread that through so budget-aware callers (get_context)
+    # can pack by token cost.
+    cache, embedder = populated
+    cites = search_chunks(cache, embedder, "authentication", k=5)
+    assert cites
+    assert all(c.token_estimate == 10 for c in cites)
+
+
+def test_search_token_estimate_none_when_column_null(tmp_path: Path) -> None:
+    cache = SQLiteCache(tmp_path / "_registry" / "wiki.db")
+    store = ChunkStore(cache)
+    store.persist_chunks("src-null", [_chunk("hello world", 0, 1)])
+    with cache._connect() as conn:
+        conn.execute("UPDATE chunks SET token_estimate = NULL")
+        conn.commit()
+    cites = search_chunks(cache, None, "hello", k=3)
+    assert cites
+    assert cites[0].token_estimate is None
 
 
 def test_search_populates_snippet_for_non_markdown_chunks(

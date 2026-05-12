@@ -148,6 +148,35 @@ def test_get_chunk_returns_none_for_unknown_id(store: ChunkStore) -> None:
     assert store.get_chunk("does-not-exist") is None
 
 
+def test_get_chunks_batch_returns_dict_keyed_by_id(store: ChunkStore) -> None:
+    stored = store.persist_chunks(
+        "batch-src",
+        [
+            _chunk("alpha", 0, 3, token_estimate=11),
+            _chunk("bravo", 1, 3, token_estimate=22),
+            _chunk("charlie", 2, 3, token_estimate=33),
+        ],
+    )
+    ids = [s.chunk_id for s in stored]
+    out = store.get_chunks(ids)
+    assert set(out.keys()) == set(ids)
+    assert out[ids[0]].text == "alpha"
+    assert out[ids[1]].token_estimate == 22
+
+
+def test_get_chunks_omits_missing_ids(store: ChunkStore) -> None:
+    stored = store.persist_chunks(
+        "batch-missing", [_chunk("only", 0, 1)],
+    )
+    real = stored[0].chunk_id
+    out = store.get_chunks([real, "nope-1", "nope-2"])
+    assert list(out.keys()) == [real]
+
+
+def test_get_chunks_empty_input_returns_empty_dict(store: ChunkStore) -> None:
+    assert store.get_chunks([]) == {}
+
+
 def test_get_chunks_for_source_returns_ordered_rows(store: ChunkStore) -> None:
     # Insert out of order to prove the query orders by chunk_index.
     store.persist_chunks(

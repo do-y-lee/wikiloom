@@ -253,6 +253,18 @@ class ChunkStore:
             ).fetchone()
         return _row_to_stored_chunk(row) if row is not None else None
 
+    def get_chunks(self, chunk_ids: list[str]) -> dict[str, StoredChunk]:
+        """Batch fetch by chunk_id. Missing ids are omitted from the result."""
+        if not chunk_ids:
+            return {}
+        placeholders = ",".join("?" * len(chunk_ids))
+        with self._cache._connect() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM chunks WHERE chunk_id IN ({placeholders})",
+                chunk_ids,
+            ).fetchall()
+        return {row["chunk_id"]: _row_to_stored_chunk(row) for row in rows}
+
     def get_chunks_for_source(self, source_hash: str) -> list[StoredChunk]:
         """All chunks for a source, ordered by chunk_index."""
         with self._cache._connect() as conn:

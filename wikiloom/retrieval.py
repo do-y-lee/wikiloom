@@ -36,6 +36,9 @@ class Citation:
     parent_heading: str | None
     snippet: str
     score: float
+    # Approximate token count from ingest. Lets callers budget by tokens
+    # without re-tokenizing chunk text.
+    token_estimate: int | None = None
 
 
 def _make_snippet(text: str) -> str:
@@ -287,7 +290,8 @@ def _hydrate(
     placeholders = ",".join("?" * len(rowids))
     rows = conn.execute(
         f"SELECT rowid AS rid, chunk_id, page_id, source_path, "
-        f"parent_heading, text FROM chunks WHERE rowid IN ({placeholders})",
+        f"parent_heading, text, token_estimate "
+        f"FROM chunks WHERE rowid IN ({placeholders})",
         rowids,
     ).fetchall()
     by_rowid = {row["rid"]: row for row in rows}
@@ -297,6 +301,7 @@ def _hydrate(
         row = by_rowid.get(rid)
         if row is None:
             continue
+        tok = row["token_estimate"]
         out.append(
             Citation(
                 chunk_id=row["chunk_id"],
@@ -305,6 +310,7 @@ def _hydrate(
                 parent_heading=row["parent_heading"],
                 snippet=_make_snippet(row["text"] or ""),
                 score=scores[rid],
+                token_estimate=int(tok) if tok is not None else None,
             )
         )
     return out
