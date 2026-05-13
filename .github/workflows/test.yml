@@ -24,7 +24,7 @@ jobs:
           cache: pip
 
       - name: Install package
-        run: pip install -e ".[dev]"
+        run: pip install -e ".[dev,mcp]"
 
       - name: Download spaCy model
         run: python -m spacy download en_core_web_sm

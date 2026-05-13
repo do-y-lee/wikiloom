@@ -9,13 +9,18 @@ from typing import Any
 
 import pytest
 
-from wikiloom.cache import SQLiteCache
-from wikiloom.chunk_store import ChunkStore
-from wikiloom.embeddings import serialize_embedding
-from wikiloom.frontmatter import Frontmatter, write_page
-from wikiloom.ingest.extractors.base import ExtractedContent
-from wikiloom.mcp.models import short_summary
-from wikiloom.mcp.server import build_server, serve
+# Skip the whole module when the optional [mcp] extra isn't installed —
+# importing wikiloom.mcp triggers `from mcp.server.fastmcp import FastMCP`
+# which would fail collection in dev envs that didn't opt into the extra.
+pytest.importorskip("mcp")
+
+from wikiloom.cache import SQLiteCache  # noqa: E402
+from wikiloom.chunk_store import ChunkStore  # noqa: E402
+from wikiloom.embeddings import serialize_embedding  # noqa: E402
+from wikiloom.frontmatter import Frontmatter, write_page  # noqa: E402
+from wikiloom.ingest.extractors.base import ExtractedContent  # noqa: E402
+from wikiloom.mcp.models import short_summary  # noqa: E402
+from wikiloom.mcp.server import build_server, serve  # noqa: E402
 
 
 # ----------------------------------------------------------------------
