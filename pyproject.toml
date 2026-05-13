@@ -68,6 +68,7 @@ Issues = "https://github.com/do-y-lee/wikiloom/issues"
 audio = ["openai-whisper>=20231117"]
 openai-embeddings = ["openai>=1.0"]
 local-embeddings = ["sentence-transformers>=2.0"]
+mcp = ["mcp>=1.0"]
 dev = ["pytest>=7.0", "pytest-cov>=4.0", "ruff>=0.1"]
 
 [project.scripts]
