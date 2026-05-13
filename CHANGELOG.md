@@ -9,6 +9,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **MCP server (`wikiloom.mcp`)** — agent-callable surface exposing
+  WikiLoom's retrieval primitives to MCP clients (Claude Desktop,
+  Claude Code, the MCP Inspector, etc.). Six tools in a 3-layer
+  pattern: cheap routers (`search_pages`, `search_chunks` — small
+  previews + ids), expensive payloads (`get_pages`, `get_chunks` —
+  full bodies), the one-shot orchestrator `get_context` (page
+  router → token-budgeted chunks), and the graph hop
+  `get_outbound_links`. Tool docstrings teach the router-vs-payload
+  pattern and suggest loop strategies for refining results. Built
+  on FastMCP from the official `mcp` Python SDK; stdio transport;
+  cache + embedder loaded once at startup. Pydantic output models
+  live at the boundary (`wikiloom.mcp.models`) so the JSON schema
+  the agent sees carries per-field `description=` strings —
+  internal types (`Citation`, `ContextResult`, `PageHit`,
+  `StoredChunk`) stay frozen dataclasses. Server fails loud at
+  startup if no embedder is configured rather than booting with a
+  degraded surface that would silently return empty results.
+
+- **`wikiloom mcp` CLI subcommand** — launches the stdio MCP server
+  for a project. `--project PATH` defaults to the current directory;
+  `--print-config` emits a copy-pasteable Claude Desktop / Claude
+  Code config block with absolute paths pre-filled and
+  `sys.executable` baked in, removing the two most common wiring
+  failure modes (wrong Python interpreter, relative project path).
+  Ships `wikiloom/__main__.py` so the printed config can use
+  `python -m wikiloom mcp …` instead of relying on the `wikiloom`
+  script being on PATH when the MCP client spawns the server.
+
+- **`Citation.token_estimate`** — citations now carry an optional
+  approximate token count, threaded through `_hydrate` from
+  `chunks.token_estimate`. Lets retrieval callers (notably
+  `get_context`) pack chunk lists by budget without re-tokenizing.
+  Default `None` for legacy rows; preserves byte-identical behavior
+  for existing callers.
+
+- **`ChunkStore.get_chunks(ids)`** — batch fetcher that returns a
+  `dict[str, StoredChunk]` keyed by `chunk_id` (missing ids are
+  omitted). One SELECT with `WHERE chunk_id IN (...)`, mirroring
+  `get_chunks_for_source`'s shape. Backs the MCP `get_chunks` tool
+  wrapper.
+
 - **Hybrid context lane (`wikiloom.context.get_context`)** — the
   default agent path for goal-shaped queries. Embeds the goal
   once, routes to the top-N most similar synthesized pages via
@@ -54,6 +95,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`get_context` gains an optional token `budget`** — when set,
+  after RRF ranking, citations are taken in rank order until the
+  running sum of `token_estimate` would exceed the budget. The
+  top-ranked chunk always lands even if its cost alone exceeds
+  budget (returning empty would be worse for the agent), and NULL
+  `token_estimate` rows count as 1 so legacy data still advances
+  the loop. Default `budget=None` preserves byte-identical behavior
+  for existing `top_pages`/`k` callers. The MCP `get_context` tool
+  exposes `budget` as its primary knob (defaults to 2000 tokens)
+  and intentionally hides `top_pages`/`k` from agents — drop to
+  `search_pages` + `search_chunks` for finer control.
+
 - **`search_chunks` gains optional `page_ids` and `query_vec`
   parameters** — `page_ids` scopes both lanes to chunks belonging
   to the given pages (BM25 lane via FTS5 JOIN+IN; vector lane
@@ -90,6 +143,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   durably in SQLite.
 
 ### Dependencies
+
+- **New `[mcp]` optional extra** — `pip install "wikiloom[mcp]"`
+  pulls the official `mcp` Python SDK (which ships FastMCP) and
+  its transitive deps (anyio, httpx-sse, sse-starlette, uvicorn,
+  pydantic-settings, etc.). Not in core — users who never run the
+  agent server don't pay for it. Pydantic v2 arrives transitively
+  via the SDK; WikiLoom uses it only at the MCP boundary.
 
 - **`sqlite-vec>=0.1.6`** added to core dependencies. The extension is
   registered on every `SQLiteCache` connection at init; a clear error

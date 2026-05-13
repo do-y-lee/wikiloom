@@ -32,6 +32,7 @@ Inspired by Andrej Karpathy's [LLM wiki gist](https://gist.github.com/karpathy/4
 - [Configuration](#configuration)
 - [Provider options](#provider-options)
 - [Workflows](#workflows)
+- [Use as an MCP server](#use-as-an-mcp-server)
 - [Tips](#tips)
 - [Development](#development)
 - [Contributing](#contributing)
@@ -568,6 +569,41 @@ wikiloom dormant --review             # decide which to mark
 wikiloom orphans                      # pages with no links
 wikiloom relink                       # re-run linker across all pages
 ```
+
+## Use as an MCP server
+
+WikiLoom ships an MCP server that exposes the retrieval surface (search, full text, page bodies, link graph, hybrid context) to any MCP-aware client — Claude Desktop, Claude Code, the MCP Inspector, or your own agent harness.
+
+```bash
+# 1. Install the optional extra (skip if you already did)
+pip install "wikiloom[mcp]"
+
+# 2. Print a config block pre-filled with absolute paths and the
+#    Python interpreter that has wikiloom installed
+wikiloom mcp --print-config --project ./my-wiki
+```
+
+The output is a complete `mcpServers` block ready to paste into your client config — for example `~/Library/Application Support/Claude/claude_desktop_config.json` on macOS (Claude Desktop) or your `mcp.json` for Claude Code. After pasting, restart the client and the six WikiLoom tools become available in the agent's tool drawer.
+
+The six tools follow a cheap-router-vs-expensive-payload pattern:
+
+| Tool | Layer | What it returns |
+|---|---|---|
+| `search_pages(query, k)` | router | page ids + short summaries + similarity |
+| `search_chunks(query, k)` | router | chunk ids + ~200-char snippets + scores |
+| `get_pages(ids)` | payload | full page markdown |
+| `get_chunks(ids)` | payload | full chunk text |
+| `get_context(goal, budget)` | orchestrator | routed pages + token-budgeted chunks |
+| `get_outbound_links(page_id)` | graph hop | outbound wikilink targets |
+
+The agent decides which to call when — the tool descriptions teach the call sequence ("call `search_pages` first; if results don't fit, refine the query or pivot to `search_chunks`"). For a one-shot retrieval against a token budget, `get_context(goal, budget=2000)` does router + chunk rerank + budget packing in a single call.
+
+**Wiring gotchas:**
+
+- The printed `command` is `sys.executable` — the running interpreter. If you call `--print-config` from a venv, the config points at that venv's Python so the MCP client spawns the server in the same environment where `wikiloom[mcp]` is installed.
+- The printed `--project` path is always absolute. The MCP client's working directory at launch is unpredictable; relative paths would resolve to the wrong place.
+- The server requires a configured embedder (`[embeddings]` section of `wikiloom.toml`, enabled by default). It fails loud at startup rather than booting with a degraded retrieval surface.
+- The server runs alongside your normal CLI — SQLite is in WAL mode, so `wikiloom ingest`, `lint`, `query`, etc. in another terminal won't conflict with the running server.
 
 ## Tips
 
