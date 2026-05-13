@@ -43,6 +43,7 @@ _COMMAND_CATEGORIES: list[tuple[str, list[str]]] = [
             "query",
             "queries",
             "source",
+            "mcp",
         ],
     ),
     (
@@ -6067,6 +6068,60 @@ def _print_report(report) -> None:
                 _item(click.style(pid, fg="cyan"))
             _more(len(report.promoted_from_update))
             click.echo("")
+
+
+@main.command(name="mcp")
+@click.option(
+    "--project", "-p",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=Path("."),
+    show_default=True,
+    help="Path to the WikiLoom project directory.",
+)
+@click.option(
+    "--print-config",
+    is_flag=True,
+    default=False,
+    help="Print a Claude Desktop / Claude Code MCP config snippet for this "
+         "project and exit. Paste the output into your client config, "
+         "restart, and the wikiloom tools become available.",
+)
+def mcp_command(project: Path, print_config: bool) -> None:
+    """Run the WikiLoom MCP server (stdio transport).
+
+    Exposes 6 retrieval tools to MCP clients: search_pages, search_chunks,
+    get_pages, get_chunks, get_context, get_outbound_links. Requires the
+    ``[mcp]`` extra (``pip install 'wikiloom[mcp]'``).
+    """
+    project = project.resolve()
+    if print_config:
+        _emit_mcp_config(project)
+        return
+    from wikiloom.mcp import serve
+    serve(project)
+
+
+def _emit_mcp_config(project: Path) -> None:
+    """Print the JSON snippet a user pastes into their MCP client config.
+
+    Uses ``sys.executable`` + ``python -m wikiloom`` so the spawned
+    server inherits the install env regardless of PATH at client-launch
+    time — the single most common reason MCP servers fail silently.
+    """
+    import json
+    import sys
+    config = {
+        "mcpServers": {
+            "wikiloom": {
+                "command": sys.executable,
+                "args": [
+                    "-m", "wikiloom", "mcp",
+                    "--project", str(project),
+                ],
+            }
+        }
+    }
+    click.echo(json.dumps(config, indent=2))
 
 
 if __name__ == "__main__":

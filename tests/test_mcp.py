@@ -15,7 +15,7 @@ from wikiloom.embeddings import serialize_embedding
 from wikiloom.frontmatter import Frontmatter, write_page
 from wikiloom.ingest.extractors.base import ExtractedContent
 from wikiloom.mcp.models import short_summary
-from wikiloom.mcp.server import build_server
+from wikiloom.mcp.server import build_server, serve
 
 
 # ----------------------------------------------------------------------
@@ -408,3 +408,16 @@ def test_short_summary_truncates_at_word_boundary_with_ellipsis() -> None:
     # Word-boundary: no half-word before the ellipsis.
     assert " " in out
     assert not out[:-1].rstrip().endswith(("alph", "bet", "gam"))
+
+
+# ----------------------------------------------------------------------
+# serve() startup contract
+# ----------------------------------------------------------------------
+
+
+def test_serve_raises_when_project_has_no_embedder(tmp_path: Path) -> None:
+    # An empty project dir has no wikiloom.toml → load_embedder returns
+    # None. The server must fail loud rather than booting with a
+    # degraded surface that would silently return empty results.
+    with pytest.raises(RuntimeError, match="No embedder configured"):
+        serve(tmp_path)
