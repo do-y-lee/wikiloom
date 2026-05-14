@@ -359,9 +359,6 @@ entity_window_days = 180
 concept_window_days = 120
 synthesis_window_days = 60
 
-[search]
-engine = "grep"
-
 [query]
 history_enabled = true          # Cache successful query results in _registry/query_history.json
 history_size    = 100           # How many past queries to retain (newest first; older are trimmed)

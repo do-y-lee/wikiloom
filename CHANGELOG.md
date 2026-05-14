@@ -142,6 +142,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   applies the map via `ChunkStore.set_page_ids` so the edge lands
   durably in SQLite.
 
+### Removed
+
+- **`[search] engine` config option** — never wired to anything. The
+  scaffolded `wikiloom.toml` shipped a `[search] engine = "grep"`
+  block and `Config.load` parsed it into `cfg.search`, but no
+  consumer ever read it. Literal-match retrieval is already handled
+  by the BM25 (FTS5) lane in `retrieval.py`, fused with the vector
+  lane via RRF. `SearchConfig` removed from `wikiloom/config.py`,
+  block removed from `wikiloom/scaffold.py` and the README. Existing
+  `wikiloom.toml` files with a stray `[search]` section still load —
+  unknown sections are ignored.
+
 ### Dependencies
 
 - **New `[mcp]` optional extra** — `pip install "wikiloom[mcp]"`

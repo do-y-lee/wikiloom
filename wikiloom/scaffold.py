@@ -206,9 +206,6 @@ entity_window_days = 180
 concept_window_days = 120
 synthesis_window_days = 60
 
-[search]
-engine = "grep"
-
 [embeddings]
 provider = "fastembed"
 # provider = "openai"                  # needs OPENAI_API_KEY

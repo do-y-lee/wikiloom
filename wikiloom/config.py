@@ -109,11 +109,6 @@ class DormantConfig:
 
 
 @dataclass
-class SearchConfig:
-    engine: str = "grep"
-
-
-@dataclass
 class IngestConfig:
     """Safeguards applied at the ingest boundary.
 
@@ -223,7 +218,6 @@ class Config:
     llm: LLMConfig = field(default_factory=LLMConfig)
     linking: LinkingConfig = field(default_factory=LinkingConfig)
     dormant: DormantConfig = field(default_factory=DormantConfig)
-    search: SearchConfig = field(default_factory=SearchConfig)
     ingest: IngestConfig = field(default_factory=IngestConfig)
     embeddings: EmbeddingsConfig = field(default_factory=EmbeddingsConfig)
     query: QueryConfig = field(default_factory=QueryConfig)
@@ -262,8 +256,6 @@ class Config:
         if "dormant" in data:
             cfg.dormant = DormantConfig(
                 **_filter(DormantConfig, data["dormant"]))
-        if "search" in data:
-            cfg.search = SearchConfig(**_filter(SearchConfig, data["search"]))
         if "ingest" in data:
             cfg.ingest = IngestConfig(**_filter(IngestConfig, data["ingest"]))
         if "embeddings" in data:
