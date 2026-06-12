@@ -109,3 +109,14 @@ class OutboundLinkOut(BaseModel):
     target_page: str = Field(
         description="Page being linked to; pass to get_pages to follow the hop."
     )
+
+
+class BacklinkOut(BaseModel):
+    source_page: str = Field(
+        description="Page that links to your query page; pass to get_pages "
+        "to read the citing context."
+    )
+    target_page: str = Field(
+        description="Your query page - the page being cited. "
+        "Same value across all results for one get_backlinks call."
+    )

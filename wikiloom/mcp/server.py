@@ -25,6 +25,7 @@ from wikiloom.context import get_context as wikiloom_get_context
 from wikiloom.embeddings import load_embedder
 from wikiloom.frontmatter import read_page
 from wikiloom.mcp.models import (
+    BacklinkOut,
     CitationOut,
     ContextResultOut,
     OutboundLinkOut,
@@ -198,6 +199,28 @@ def build_server(
             OutboundLinkOut(
                 source_page=e["source_page"],
                 target_page=e["target_page"],
+            )
+            for e in edges
+        ]
+
+    @mcp.tool()
+    def get_backlinks(page_id: str, limit: int = 10) -> list[BacklinkOut]:
+        """Graph hop. Returns pages that link TO ``page_id`` (inbound edges).
+
+        Call after search_pages finds a relevant page to discover what
+        else cites it; pass each result's ``source_page`` to get_pages to
+        read the citing context. Empty list if no page cites it or it
+        doesn't exist.
+
+        Set ``limit`` to cap the number of edges returned (default 10).
+        Popular pages can have hundreds of backlinks — raise the limit
+        deliberately when you need breadth, lower it to stay cheap.
+        """
+        edges = cache.get_inbound_edges([page_id], limit=limit)
+        return [
+            BacklinkOut(
+                target_page=e["target_page"],
+                source_page=e["source_page"],
             )
             for e in edges
         ]

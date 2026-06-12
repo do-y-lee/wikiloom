@@ -186,7 +186,7 @@ def _call(mcp: Any, name: str, args: dict[str, Any]) -> Any:
 # ----------------------------------------------------------------------
 
 
-def test_six_tools_are_registered(
+def test_seven_tools_are_registered(
     project_setup: tuple[Any, Path, _FakeEmbedder],
 ) -> None:
     mcp, _, _ = project_setup
@@ -195,7 +195,7 @@ def test_six_tools_are_registered(
     assert names == {
         "search_pages", "search_chunks",
         "get_pages", "get_chunks",
-        "get_context", "get_outbound_links",
+        "get_context", "get_outbound_links", "get_backlinks",
     }
 
 
@@ -212,6 +212,7 @@ def test_tool_descriptions_teach_router_vs_payload(
     assert "Expensive payload" in tools["get_chunks"].description
     assert "orchestrator" in tools["get_context"].description.lower()
     assert "hop" in tools["get_outbound_links"].description.lower()
+    assert "inbound" in tools["get_backlinks"].description.lower()
 
 
 def test_search_pages_schema_describes_summary_truncation(
@@ -393,6 +394,58 @@ def test_get_outbound_links_empty_for_isolated_page(
 ) -> None:
     mcp, _, _ = project_setup
     assert _call(mcp, "get_outbound_links", {"page_id": "concepts/billing"}) == []
+
+
+# ----------------------------------------------------------------------
+# get_backlinks
+# ----------------------------------------------------------------------
+
+
+def test_get_backlinks_returns_citing_sources(
+    project_setup: tuple[Any, Path, _FakeEmbedder],
+) -> None:
+    mcp, _, _ = project_setup
+    edges = _call(mcp, "get_backlinks", {"page_id": "concepts/billing"})
+    assert len(edges) == 1
+    assert edges[0]["source_page"] == "concepts/auth"
+    assert edges[0]["target_page"] == "concepts/billing"
+
+
+def test_get_backlinks_empty_for_uncited_page(
+    project_setup: tuple[Any, Path, _FakeEmbedder],
+) -> None:
+    mcp, _, _ = project_setup
+    assert _call(mcp, "get_backlinks", {"page_id": "concepts/auth"}) == []
+
+
+def test_get_backlinks_empty_for_unknown_page(
+    project_setup: tuple[Any, Path, _FakeEmbedder],
+) -> None:
+    mcp, _, _ = project_setup
+    assert _call(mcp, "get_backlinks", {"page_id": "concepts/nonexistent"}) == []
+
+
+def test_get_backlinks_schema_describes_inbound_semantics(
+    project_setup: tuple[Any, Path, _FakeEmbedder],
+) -> None:
+    # BacklinkOut field descriptions tell the agent which field is the
+    # "answer" (source_page) vs. the echo of its input (target_page).
+    mcp, _, _ = project_setup
+    tools = {t.name: t for t in asyncio.run(mcp.list_tools())}
+    blob = str(tools["get_backlinks"].outputSchema)
+    assert "links to your query page" in blob
+    assert "query page" in blob and "being cited" in blob
+
+
+def test_get_backlinks_respects_limit_parameter(tmp_path: Path) -> None:
+    """The ``limit`` arg must thread from the MCP tool down to the cache."""
+    cache = SQLiteCache(tmp_path / "wiki.db")
+    _seed_backlinks(cache, [
+        (f"concepts/citer-{i}", "concepts/popular") for i in range(8)
+    ])
+    mcp = build_server(cache, _FakeEmbedder(), tmp_path)
+    edges = _call(mcp, "get_backlinks", {"page_id": "concepts/popular", "limit": 3})
+    assert len(edges) == 3
 
 
 # ----------------------------------------------------------------------

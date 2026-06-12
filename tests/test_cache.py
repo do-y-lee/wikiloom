@@ -596,3 +596,80 @@ def test_incremental_sync_surfaces_embedder_failure(
     assert "NULL embeddings" in captured.err
     # Page row still upserted; just with NULL embedding.
     assert cache.get_page("concepts/foo") is not None
+
+
+# ----------------------------------------------------------------------
+# Edge queries (get_inbound_edges / get_outbound_edges)
+# ----------------------------------------------------------------------
+
+
+def _seed_edges(cache: SQLiteCache, edges: list[tuple[str, str]]) -> None:
+    """Insert (source, target) edges directly into the backlinks table."""
+    with cache._connect() as conn:
+        for src, tgt in edges:
+            conn.execute(
+                "INSERT INTO backlinks (source_page, target_page, linked_at) "
+                "VALUES (?, ?, '2026-01-01')",
+                (src, tgt),
+            )
+
+
+def test_get_inbound_edges_returns_sources_for_target(tmp_path: Path) -> None:
+    cache = SQLiteCache(tmp_path / "wiki.db")
+    _seed_edges(cache, [
+        ("concepts/a", "concepts/b"),
+        ("concepts/c", "concepts/b"),
+        ("concepts/a", "concepts/d"),
+    ])
+    edges = cache.get_inbound_edges(["concepts/b"])
+    sources = {e["source_page"] for e in edges}
+    assert sources == {"concepts/a", "concepts/c"}
+    assert all(e["target_page"] == "concepts/b" for e in edges)
+
+
+def test_get_inbound_edges_empty_input(tmp_path: Path) -> None:
+    cache = SQLiteCache(tmp_path / "wiki.db")
+    assert cache.get_inbound_edges([]) == []
+
+
+def test_get_inbound_edges_no_inbound_links(tmp_path: Path) -> None:
+    cache = SQLiteCache(tmp_path / "wiki.db")
+    _seed_edges(cache, [("concepts/a", "concepts/b")])
+    assert cache.get_inbound_edges(["concepts/c"]) == []
+
+
+def test_get_inbound_edges_batches_multiple_targets(tmp_path: Path) -> None:
+    cache = SQLiteCache(tmp_path / "wiki.db")
+    _seed_edges(cache, [
+        ("concepts/a", "concepts/b"),
+        ("concepts/a", "concepts/d"),
+        ("concepts/c", "concepts/d"),
+    ])
+    edges = cache.get_inbound_edges(["concepts/b", "concepts/d"])
+    assert len(edges) == 3
+    assert {e["target_page"] for e in edges} == {"concepts/b", "concepts/d"}
+
+
+def test_get_inbound_edges_does_not_return_outbound_direction(tmp_path: Path) -> None:
+    """Asking for X's inbound must not return rows where X is the source."""
+    cache = SQLiteCache(tmp_path / "wiki.db")
+    _seed_edges(cache, [("concepts/a", "concepts/b")])
+    # ``a`` is the source of an edge but has zero inbound — should be empty.
+    assert cache.get_inbound_edges(["concepts/a"]) == []
+
+
+def test_get_inbound_edges_respects_custom_limit(tmp_path: Path) -> None:
+    cache = SQLiteCache(tmp_path / "wiki.db")
+    edges = [(f"concepts/citer-{i}", "concepts/popular") for i in range(12)]
+    _seed_edges(cache, edges)
+    result = cache.get_inbound_edges(["concepts/popular"], limit=5)
+    assert len(result) == 5
+
+
+def test_get_inbound_edges_limit_larger_than_results(tmp_path: Path) -> None:
+    """``limit`` is an upper bound, not a requirement — fewer rows is fine."""
+    cache = SQLiteCache(tmp_path / "wiki.db")
+    edges = [(f"concepts/citer-{i}", "concepts/popular") for i in range(3)]
+    _seed_edges(cache, edges)
+    result = cache.get_inbound_edges(["concepts/popular"], limit=100)
+    assert len(result) == 3

@@ -11,13 +11,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **MCP server (`wikiloom.mcp`)** — agent-callable surface exposing
   WikiLoom's retrieval primitives to MCP clients (Claude Desktop,
-  Claude Code, the MCP Inspector, etc.). Six tools in a 3-layer
+  Claude Code, the MCP Inspector, etc.). Seven tools in a 3-layer
   pattern: cheap routers (`search_pages`, `search_chunks` — small
   previews + ids), expensive payloads (`get_pages`, `get_chunks` —
   full bodies), the one-shot orchestrator `get_context` (page
-  router → token-budgeted chunks), and the graph hop
-  `get_outbound_links`. Tool docstrings teach the router-vs-payload
-  pattern and suggest loop strategies for refining results. Built
+  router → token-budgeted chunks), and two graph hops
+  (`get_outbound_links` for outbound edges, `get_backlinks` for
+  the inbound pages that cite a given page). Tool docstrings
+  teach the router-vs-payload pattern and suggest loop
+  strategies for refining results. Built
   on FastMCP from the official `mcp` Python SDK; stdio transport;
   cache + embedder loaded once at startup. Pydantic output models
   live at the boundary (`wikiloom.mcp.models`) so the JSON schema

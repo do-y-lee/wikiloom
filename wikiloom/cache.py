@@ -965,6 +965,29 @@ class SQLiteCache:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    def get_inbound_edges(
+        self, target_page_ids: list[str], limit: int = 10
+    ) -> list[dict[str, Any]]:
+        """Return backlink edges pointing to any of ``target_page_ids``.
+
+        Mirrors the data ``BacklinkRegistry.edges`` would expose for the
+        same targets, but reads it from the cache's ``backlinks`` table
+        so the JSON file doesn't have to be parsed on every query. The
+        sync path keeps both stores aligned. ``limit`` caps the total
+        number of rows returned across all targets.
+        """
+        if not target_page_ids:
+            return []
+        placeholders = ",".join("?" * len(target_page_ids))
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT source_page, target_page "
+                f"FROM backlinks WHERE target_page IN ({placeholders}) "
+                f"LIMIT ?",
+                (*target_page_ids, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def load_page_embeddings(self) -> dict[str, list[float]]:
         """Return ``{page_id: vector}`` for every page with an embedding.
 
