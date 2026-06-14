@@ -375,6 +375,16 @@ def test_search_raises_on_provider_model_mismatch(
 # ----------------------------------------------------------------------
 
 
+def _seed_chunk_pages(cache: SQLiteCache, mapping: dict[str, str]) -> None:
+    """Mirror a chunk->page mapping into chunk_pages, as the frontmatter
+    projection in cache sync does. Scoped retrieval reads this table."""
+    with cache._connect() as conn:
+        conn.executemany(
+            "INSERT OR IGNORE INTO chunk_pages (chunk_id, page_id) VALUES (?, ?)",
+            list(mapping.items()),
+        )
+
+
 @pytest.fixture
 def populated_with_pages(
     tmp_path: Path,
@@ -397,14 +407,16 @@ def populated_with_pages(
         embedder_provider="fake",
         embedder_model="fake-model-1",
     )
-    store.set_page_ids({
+    mapping = {
         stored[0].chunk_id: "concepts/auth",
         stored[1].chunk_id: "concepts/auth",
         stored[2].chunk_id: "concepts/billing",
         stored[3].chunk_id: "concepts/billing",
         stored[4].chunk_id: "concepts/other",
         stored[5].chunk_id: "concepts/other",
-    })
+    }
+    store.set_page_ids(mapping)
+    _seed_chunk_pages(cache, mapping)
     return cache, embedder, store
 
 
@@ -484,7 +496,9 @@ def test_search_scoped_skips_chunks_without_embeddings(
         embedder_provider="fake",
         embedder_model="fake-model-1",
     )
-    store.set_page_ids({s.chunk_id: "concepts/auth" for s in stored})
+    mapping = {s.chunk_id: "concepts/auth" for s in stored}
+    store.set_page_ids(mapping)
+    _seed_chunk_pages(cache, mapping)
     with cache._connect() as conn:
         conn.execute(
             "UPDATE chunks SET embedding = NULL WHERE chunk_id = ?",
@@ -500,6 +514,59 @@ def test_search_scoped_skips_chunks_without_embeddings(
     # (and BM25 finds both, but only the embedded one survives in vector).
     assert cites
     assert all(c.page_id == "concepts/auth" for c in cites)
+
+
+def test_search_scoped_reads_chunk_pages_not_scalar(tmp_path: Path) -> None:
+    """Regression: scoping reads chunk_pages, not the chunks.page_id
+    scalar. A chunk whose scalar points one way but whose chunk_pages
+    edge points another must be found by the chunk_pages page."""
+    cache = SQLiteCache(tmp_path / "_registry" / "wiki.db")
+    store = ChunkStore(cache)
+    embedder = _FakeEmbedder(dim=8)
+    stored = store.persist_chunks(
+        "src-x",
+        [_chunk("authentication and login flow", 0, 1, parent_heading="Auth")],
+        embedder=embedder,
+        embedder_provider="fake",
+        embedder_model="fake-model-1",
+    )
+    cid = stored[0].chunk_id
+    # Lossy scalar records the chunk under 'other'...
+    store.set_page_ids({cid: "concepts/other"})
+    # ...but the authoritative projection maps it to 'auth'.
+    _seed_chunk_pages(cache, {cid: "concepts/auth"})
+
+    found = search_chunks(
+        cache, embedder, "authentication", k=5, page_ids=["concepts/auth"]
+    )
+    assert [c.chunk_id for c in found] == [cid]
+    # The scalar's page is NOT used for scoping.
+    assert search_chunks(
+        cache, embedder, "authentication", k=5, page_ids=["concepts/other"]
+    ) == []
+
+
+def test_search_scoped_dedupes_chunk_in_multiple_pages(tmp_path: Path) -> None:
+    """A chunk mapped to several requested pages is returned once."""
+    cache = SQLiteCache(tmp_path / "_registry" / "wiki.db")
+    store = ChunkStore(cache)
+    embedder = _FakeEmbedder(dim=8)
+    stored = store.persist_chunks(
+        "src-y",
+        [_chunk("authentication and login flow", 0, 1, parent_heading="Auth")],
+        embedder=embedder,
+        embedder_provider="fake",
+        embedder_model="fake-model-1",
+    )
+    cid = stored[0].chunk_id
+    _seed_chunk_pages(cache, {cid: "concepts/auth"})
+    _seed_chunk_pages(cache, {cid: "concepts/billing"})
+
+    found = search_chunks(
+        cache, embedder, "authentication", k=5,
+        page_ids=["concepts/auth", "concepts/billing"],
+    )
+    assert [c.chunk_id for c in found] == [cid]
 
 
 def test_search_chunks_accepts_pre_embedded_query_vec(

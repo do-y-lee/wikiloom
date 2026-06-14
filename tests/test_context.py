@@ -82,6 +82,16 @@ def _seed_pages(
     cache._invalidate_embeddings()
 
 
+def _seed_chunk_pages(cache: SQLiteCache, mapping: dict[str, str]) -> None:
+    """Mirror a chunk->page mapping into chunk_pages, as the frontmatter
+    projection in cache sync does. Scoped retrieval reads this table."""
+    with cache._connect() as conn:
+        conn.executemany(
+            "INSERT OR IGNORE INTO chunk_pages (chunk_id, page_id) VALUES (?, ?)",
+            list(mapping.items()),
+        )
+
+
 @pytest.fixture
 def project(
     tmp_path: Path,
@@ -116,14 +126,16 @@ def project(
         embedder_provider="fake",
         embedder_model="fake-model-1",
     )
-    store.set_page_ids({
+    mapping = {
         stored[0].chunk_id: "concepts/auth",
         stored[1].chunk_id: "concepts/auth",
         stored[2].chunk_id: "concepts/billing",
         stored[3].chunk_id: "concepts/billing",
         stored[4].chunk_id: "concepts/other",
         stored[5].chunk_id: "concepts/other",
-    })
+    }
+    store.set_page_ids(mapping)
+    _seed_chunk_pages(cache, mapping)
     return cache, embedder, store
 
 
@@ -362,7 +374,9 @@ def test_get_context_budget_counts_null_token_estimate_as_one(
         embedder_provider="fake",
         embedder_model="fake-model-1",
     )
-    store.set_page_ids({s.chunk_id: "concepts/auth" for s in stored})
+    mapping = {s.chunk_id: "concepts/auth" for s in stored}
+    store.set_page_ids(mapping)
+    _seed_chunk_pages(cache, mapping)
     with cache._connect() as conn:
         conn.execute(
             "UPDATE chunks SET token_estimate = NULL WHERE source_hash = ?",

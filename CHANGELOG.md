@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-06-12
+
 ### Added
 
 - **MCP server (`wikiloom.mcp`)** — agent-callable surface exposing
@@ -27,7 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   internal types (`Citation`, `ContextResult`, `PageHit`,
   `StoredChunk`) stay frozen dataclasses. Server fails loud at
   startup if no embedder is configured rather than booting with a
-  degraded surface that would silently return empty results.
+  degraded surface that would silently return empty results. Every
+  tool carries read-only / idempotent / closed-world
+  `ToolAnnotations` so hosts don't treat these pure retrieval calls
+  as destructive or non-cacheable (without them, MCP clients assume
+  the conservative defaults).
 
 - **`wikiloom mcp` CLI subcommand** — launches the stdio MCP server
   for a project. `--project PATH` defaults to the current directory;
@@ -155,6 +161,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   block removed from `wikiloom/scaffold.py` and the README. Existing
   `wikiloom.toml` files with a stray `[search]` section still load —
   unknown sections are ignored.
+
+### Fixed
+
+- **`get_context` returned no citations for summary-similar
+  pages** — the chunk→page link was stored only as a single
+  `chunks.page_id` scalar, so a chunk that fed several pages was
+  recorded under just one of them. The page router (which ranks
+  on page-summary similarity) could pick pages that owned no
+  chunks, the scoped chunk search matched nothing, and the
+  headline orchestrator returned empty citations for queries the
+  data clearly supported. A new `chunk_pages(chunk_id, page_id)`
+  junction table now carries the full many-to-many as a
+  materialized projection of each page's authoritative
+  `sources.chunk_ids` frontmatter, populated and pruned through
+  `full_rebuild` and `_incremental_sync` (cheap metadata — no
+  embedding work, rides the existing page lifecycle so
+  deprecate/merge stay correct). Both retrieval lanes now scope
+  via a JOIN on `chunk_pages` instead of the scalar. Existing
+  projects backfill with `wikiloom rebuild-cache` — no re-ingest,
+  since the truth lives in the page frontmatter. The scalar
+  `chunks.page_id` is kept as the representative-page hint shown
+  in `Citation.page_id`.
 
 ### Dependencies
 

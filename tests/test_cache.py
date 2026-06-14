@@ -53,17 +53,21 @@ def _add_page(
     human_edited: bool = False,
     modified: str = "2026-04-14T12:00:00Z",
     type_: str | None = None,
+    chunk_ids: list[str] | None = None,
 ) -> Path:
     """Write a page file + manifest entry the way the ingest pipeline would.
 
     Derives ``type`` from the page_id's top-level category if not given
-    (e.g. ``concepts/foo`` → ``concept``). Returns the page file path.
+    (e.g. ``concepts/foo`` → ``concept``). ``chunk_ids`` populates the
+    ``sources`` frontmatter so cache sync can project chunk_pages edges.
+    Returns the page file path.
     """
     category = page_id.split("/", 1)[0]
     inferred_type = type_ or category.rstrip("s")
     aliases = aliases or []
     summary_text = summary if summary is not None else f"Summary of {title}."
     body_text = body if body is not None else f"# {title}\n\nBody text.\n"
+    sources = [{"chunk_ids": list(chunk_ids)}] if chunk_ids else []
 
     fm = Frontmatter(
         title=title,
@@ -74,6 +78,7 @@ def _add_page(
         summary=summary_text,
         aliases=aliases,
         human_edited=human_edited,
+        sources=sources,
     )
     page_path = project_root / "wiki" / f"{page_id}.md"
     write_page(page_path, fm, body_text)
@@ -673,3 +678,71 @@ def test_get_inbound_edges_limit_larger_than_results(tmp_path: Path) -> None:
     _seed_edges(cache, edges)
     result = cache.get_inbound_edges(["concepts/popular"], limit=100)
     assert len(result) == 3
+
+
+# ----------------------------------------------------------------------
+# chunk_pages projection (frontmatter sources.chunk_ids -> junction table)
+# ----------------------------------------------------------------------
+
+
+def _chunk_page_edges(cache: SQLiteCache) -> set[tuple[str, str]]:
+    with cache._connect() as conn:
+        return {
+            (r[0], r[1])
+            for r in conn.execute(
+                "SELECT chunk_id, page_id FROM chunk_pages"
+            ).fetchall()
+        }
+
+
+def test_full_rebuild_projects_chunk_pages_from_frontmatter(project: Path) -> None:
+    """full_rebuild mirrors each page's sources.chunk_ids, including the
+    one-chunk-to-many-pages edge the scalar chunks.page_id can't hold."""
+    # c1 feeds BOTH pages (many-to-many); c2 feeds only auth.
+    _add_page(project, "concepts/auth", "Auth", chunk_ids=["c1", "c2"])
+    _add_page(project, "concepts/billing", "Billing", chunk_ids=["c1"])
+    cache = SQLiteCache(project / "_registry" / "wiki.db")
+    cache.full_rebuild(project)
+    assert _chunk_page_edges(cache) == {
+        ("c1", "concepts/auth"),
+        ("c1", "concepts/billing"),
+        ("c2", "concepts/auth"),
+    }
+
+
+def test_incremental_sync_reprojects_chunk_pages_for_changed_page(
+    project: Path,
+) -> None:
+    """Editing a page's sources re-derives its edges: dropped chunks are
+    pruned, new ones added."""
+    _add_page(project, "concepts/auth", "Auth", chunk_ids=["c1", "c2"])
+    cache = SQLiteCache(project / "_registry" / "wiki.db")
+    cache.full_rebuild(project)
+    # Re-synthesize: c2 dropped, c3 added.
+    _add_page(project, "concepts/auth", "Auth", chunk_ids=["c1", "c3"])
+    cache.sync_from_files(
+        project, [project / "wiki" / "concepts" / "auth.md"]
+    )
+    assert _chunk_page_edges(cache) == {
+        ("c1", "concepts/auth"),
+        ("c3", "concepts/auth"),
+    }
+
+
+def test_incremental_sync_prunes_chunk_pages_on_page_removal(
+    project: Path,
+) -> None:
+    """Removing a page drops its edges; a chunk shared with another page
+    keeps that page's edge."""
+    _add_page(project, "concepts/auth", "Auth", chunk_ids=["c1"])
+    _add_page(project, "concepts/billing", "Billing", chunk_ids=["c1"])
+    cache = SQLiteCache(project / "_registry" / "wiki.db")
+    cache.full_rebuild(project)
+    # Retire billing from the manifest.
+    registry = Registry(project / "_registry")
+    del registry.pages["concepts/billing"]
+    registry.save()
+    cache.sync_from_files(
+        project, [project / "wiki" / "concepts" / "billing.md"]
+    )
+    assert _chunk_page_edges(cache) == {("c1", "concepts/auth")}

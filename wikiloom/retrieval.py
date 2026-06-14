@@ -121,9 +121,11 @@ def _bm25_lane(
 ) -> dict[int, int]:
     """Return rowid -> 1-based rank for the BM25 lane.
 
-    When ``page_ids`` is given, restrict matches to chunks whose
-    ``page_id`` is in the set via an FTS5 JOIN — FTS5 ``MATCH``
-    composes with ``WHERE``, so this stays a single SQL query.
+    When ``page_ids`` is given, restrict matches to chunks mapped to
+    those pages via a JOIN on ``chunk_pages`` (the many-to-many
+    chunk<->page projection) — FTS5 ``MATCH`` composes with ``WHERE``,
+    so this stays a single SQL query. ``GROUP BY`` dedupes chunks that
+    map to more than one of the requested pages.
     """
     match_expr = _build_fts_match(query)
     if not match_expr:
@@ -142,8 +144,10 @@ def _bm25_lane(
             rows = conn.execute(
                 f"SELECT chunks_fts.rowid FROM chunks_fts "
                 f"JOIN chunks ON chunks.rowid = chunks_fts.rowid "
+                f"JOIN chunk_pages ON chunk_pages.chunk_id = chunks.chunk_id "
                 f"WHERE chunks_fts MATCH ? "
-                f"AND chunks.page_id IN ({placeholders}) "
+                f"AND chunk_pages.page_id IN ({placeholders}) "
+                f"GROUP BY chunks_fts.rowid "
                 f"ORDER BY rank LIMIT ?",
                 (match_expr, *page_ids, limit),
             ).fetchall()
@@ -237,11 +241,17 @@ def _vector_lane_scoped(
     limit: int,
     page_ids: list[str],
 ) -> dict[int, int]:
-    """In-memory cosine over chunks.embedding for the page-scoped subset."""
+    """In-memory cosine over chunks.embedding for the page-scoped subset.
+
+    Scopes via ``chunk_pages`` (many-to-many) so a chunk feeding
+    several of the requested pages is still found. ``GROUP BY`` dedupes.
+    """
     placeholders = ",".join("?" * len(page_ids))
     rows = conn.execute(
-        f"SELECT rowid, embedding FROM chunks "
-        f"WHERE page_id IN ({placeholders}) AND embedding IS NOT NULL",
+        f"SELECT c.rowid, c.embedding FROM chunks c "
+        f"JOIN chunk_pages m ON m.chunk_id = c.chunk_id "
+        f"WHERE m.page_id IN ({placeholders}) AND c.embedding IS NOT NULL "
+        f"GROUP BY c.rowid",
         page_ids,
     ).fetchall()
     if not rows:

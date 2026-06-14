@@ -135,6 +135,18 @@ CREATE TABLE IF NOT EXISTS chunks (
 CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(source_hash);
 CREATE INDEX IF NOT EXISTS idx_chunks_page ON chunks(page_id);
 
+-- Many-to-many chunk<->page edges. One chunk can feed several pages,
+-- which chunks.page_id (a single scalar) can't represent. Materialized
+-- projection of each page's frontmatter sources.chunk_ids; rebuilt by
+-- full_rebuild / _incremental_sync. Retrieval scopes via this, not the
+-- scalar.
+CREATE TABLE IF NOT EXISTS chunk_pages (
+    chunk_id TEXT NOT NULL,
+    page_id  TEXT NOT NULL,
+    PRIMARY KEY (chunk_id, page_id)
+);
+CREATE INDEX IF NOT EXISTS idx_chunk_pages_page ON chunk_pages(page_id);
+
 -- External-content FTS5 over chunks.text. content_rowid='rowid' lets
 -- BM25 results join straight back to chunks by rowid; the triggers
 -- below keep chunks_fts in lockstep with chunks on every write.
@@ -406,6 +418,7 @@ class SQLiteCache:
             conn.execute("DROP TABLE IF EXISTS pages")
             conn.execute("DROP TABLE IF EXISTS aliases")
             conn.execute("DELETE FROM backlinks")
+            conn.execute("DELETE FROM chunk_pages")
             conn.execute("DROP TABLE IF EXISTS pages_fts")
             conn.executescript(
                 """
@@ -440,6 +453,7 @@ class SQLiteCache:
 
             page_count = 0
             page_entries: list[tuple] = []
+            chunk_page_rows: list[tuple[str, str]] = []
             for page_id, entry in registry.pages.items():
                 # Read the page body from disk so FTS can index the
                 # full content, not just the title + summary. This is
@@ -450,7 +464,13 @@ class SQLiteCache:
                 page_path = wiki_dir / f"{page_id}.md"
                 if page_path.exists():
                     from wikiloom.frontmatter import read_page
-                    _, body_text = read_page(page_path)
+                    fm, body_text = read_page(page_path)
+                    # Frontmatter sources.chunk_ids is the authoritative
+                    # chunk<->page mapping; project it into chunk_pages.
+                    if fm is not None:
+                        chunk_page_rows.extend(
+                            (cid, page_id) for cid in fm.all_chunk_ids()
+                        )
 
                 # Collect text for batch embedding after the loop
                 embed_text = f"{entry.title}\n{entry.summary or ''}\n{body_text}"
@@ -533,6 +553,11 @@ class SQLiteCache:
                 ) VALUES (?, ?, ?, ?, ?)
                 """,
                 backlink_rows,
+            )
+            conn.executemany(
+                "INSERT OR IGNORE INTO chunk_pages (chunk_id, page_id) "
+                "VALUES (?, ?)",
+                chunk_page_rows,
             )
 
         self._invalidate_embeddings()
@@ -626,6 +651,7 @@ class SQLiteCache:
         # deprecated count without a manual rebuild.
         to_upsert: list[tuple[str, Any, str, str]] = []
         to_delete: list[str] = []
+        chunk_page_rows: list[tuple[str, str]] = []
         for page_id in changed_page_ids:
             entry = registry.pages.get(page_id)
             if entry is None:
@@ -633,7 +659,12 @@ class SQLiteCache:
                 continue
             page_path = wiki_dir / f"{page_id}.md"
             if page_path.exists():
-                _, body_text = read_page(page_path)
+                fm, body_text = read_page(page_path)
+                # Re-project this page's authoritative chunk<->page edges.
+                if fm is not None:
+                    chunk_page_rows.extend(
+                        (cid, page_id) for cid in fm.all_chunk_ids()
+                    )
             else:
                 body_text = ""
             embed_text = f"{entry.title}\n{entry.summary or ''}\n{body_text}"
@@ -696,6 +727,9 @@ class SQLiteCache:
             conn.executemany(
                 "DELETE FROM pages_fts WHERE page_id = ?", delete_ids
             )
+            conn.executemany(
+                "DELETE FROM chunk_pages WHERE page_id = ?", delete_ids
+            )
 
             conn.executemany(
                 """
@@ -716,6 +750,11 @@ class SQLiteCache:
             conn.executemany(
                 "INSERT OR IGNORE INTO aliases (alias, page_id) VALUES (?, ?)",
                 alias_rows,
+            )
+            conn.executemany(
+                "INSERT OR IGNORE INTO chunk_pages (chunk_id, page_id) "
+                "VALUES (?, ?)",
+                chunk_page_rows,
             )
 
             # Refresh backlinks. Cheap — just a JSON read + row re-insert.

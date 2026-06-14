@@ -1,14 +1,17 @@
-"""FastMCP server exposing WikiLoom's retrieval surface as 6 agent-callable tools.
+"""FastMCP server exposing WikiLoom's retrieval surface as 7 agent-callable tools.
 
 The tools follow a 3-layer pattern:
 
 - **Cheap routers** (small payloads): ``search_pages``, ``search_chunks``.
 - **Expensive payloads** (full text): ``get_pages``, ``get_chunks``.
 - **One-shot orchestrator**: ``get_context`` (page router → token-budgeted chunks).
-- **Graph hop**: ``get_outbound_links``.
+- **Graph hops**: ``get_outbound_links``, ``get_backlinks``.
 
-Cache and embedder are loaded once at startup and closed over by every tool
-so we never reopen connections or reload the embedder per call.
+Every tool is read-only, idempotent, and closed-world (it only reads the
+local wiki db), advertised via ToolAnnotations so hosts don't treat these
+queries as destructive or non-cacheable. Cache and embedder are loaded
+once at startup and closed over by every tool so we never reopen
+connections or reload the embedder per call.
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 from wikiloom.cache import SQLiteCache
 from wikiloom.chunk_store import ChunkStore
@@ -43,6 +47,16 @@ _DEFAULT_TOP_PAGES = 5
 _DEFAULT_K = 20
 _DEFAULT_BUDGET = 2000
 
+# Every tool only reads the local wiki db. Without these, MCP hosts assume
+# the conservative defaults (destructive, non-idempotent, open-world) and
+# may gate or refuse to cache otherwise-safe retrieval calls.
+_READONLY = ToolAnnotations(
+    readOnlyHint=True,
+    destructiveHint=False,
+    idempotentHint=True,
+    openWorldHint=False,
+)
+
 
 def build_server(
     cache: SQLiteCache, embedder: Any, project: Path
@@ -52,7 +66,7 @@ def build_server(
     store = ChunkStore(cache)
     wiki_dir = project / "wiki"
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READONLY)
     def search_pages(query: str, k: int = 5) -> list[PageHitOut]:
         """Cheap router. Returns up to k synthesized pages most similar to the goal.
 
@@ -84,7 +98,7 @@ def build_server(
             for h in hits
         ]
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READONLY)
     def search_chunks(query: str, k: int = 10) -> list[CitationOut]:
         """Cheap router (chunk-level). Returns up to k chunks ranked by BM25 + vector.
 
@@ -99,7 +113,7 @@ def build_server(
         cites = wikiloom_search_chunks(cache, embedder, query, k=k)
         return [CitationOut(**asdict(c)) for c in cites]
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READONLY)
     def get_pages(ids: list[str]) -> list[PageBodyOut]:
         """Expensive payload. Returns full body markdown for each page id.
 
@@ -127,7 +141,7 @@ def build_server(
             )
         return out
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READONLY)
     def get_chunks(ids: list[str]) -> list[StoredChunkOut]:
         """Expensive payload (chunk-level). Returns full text for each chunk id.
 
@@ -153,7 +167,7 @@ def build_server(
             )
         return out
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READONLY)
     def get_context(goal: str, budget: int = _DEFAULT_BUDGET) -> ContextResultOut:
         """One-shot orchestrator. Embeds the goal, routes to top pages, packs chunks.
 
@@ -186,7 +200,7 @@ def build_server(
             citations=[CitationOut(**asdict(c)) for c in result.citations],
         )
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READONLY)
     def get_outbound_links(page_id: str) -> list[OutboundLinkOut]:
         """Graph hop. Returns outbound wikilink targets from one page.
 
@@ -203,7 +217,7 @@ def build_server(
             for e in edges
         ]
 
-    @mcp.tool()
+    @mcp.tool(annotations=_READONLY)
     def get_backlinks(page_id: str, limit: int = 10) -> list[BacklinkOut]:
         """Graph hop. Returns pages that link TO ``page_id`` (inbound edges).
 

@@ -94,6 +94,16 @@ def _seed_backlinks(cache: SQLiteCache, edges: list[tuple[str, str]]) -> None:
             )
 
 
+def _seed_chunk_pages(cache: SQLiteCache, mapping: dict[str, str]) -> None:
+    """Mirror a chunk->page mapping into chunk_pages, as the frontmatter
+    projection in cache sync does. Scoped retrieval reads this table."""
+    with cache._connect() as conn:
+        conn.executemany(
+            "INSERT OR IGNORE INTO chunk_pages (chunk_id, page_id) VALUES (?, ?)",
+            list(mapping.items()),
+        )
+
+
 def _write_wiki_files(wiki_dir: Path, pages: list[tuple[str, str, str]]) -> None:
     """``pages`` items: ``(page_id, summary, body)``."""
     for page_id, summary, body in pages:
@@ -142,12 +152,14 @@ def project_setup(tmp_path: Path) -> tuple[Any, Path, _FakeEmbedder]:
         embedder_provider="fake",
         embedder_model="fake-model-1",
     )
-    store.set_page_ids({
+    mapping = {
         stored[0].chunk_id: "concepts/auth",
         stored[1].chunk_id: "concepts/auth",
         stored[2].chunk_id: "concepts/billing",
         stored[3].chunk_id: "concepts/billing",
-    })
+    }
+    store.set_page_ids(mapping)
+    _seed_chunk_pages(cache, mapping)
 
     _write_wiki_files(project / "wiki", [
         ("concepts/auth",
@@ -197,6 +209,24 @@ def test_seven_tools_are_registered(
         "get_pages", "get_chunks",
         "get_context", "get_outbound_links", "get_backlinks",
     }
+
+
+def test_all_tools_advertise_read_only_annotations(
+    project_setup: tuple[Any, Path, _FakeEmbedder],
+) -> None:
+    # Every tool only reads the local db. Without explicit annotations,
+    # MCP hosts assume the conservative defaults (destructive, non-
+    # idempotent, open-world) and may gate or refuse to cache them.
+    mcp, _, _ = project_setup
+    tools = asyncio.run(mcp.list_tools())
+    assert tools
+    for t in tools:
+        ann = t.annotations
+        assert ann is not None, f"{t.name} has no annotations"
+        assert ann.readOnlyHint is True, t.name
+        assert ann.destructiveHint is False, t.name
+        assert ann.idempotentHint is True, t.name
+        assert ann.openWorldHint is False, t.name
 
 
 def test_tool_descriptions_teach_router_vs_payload(
