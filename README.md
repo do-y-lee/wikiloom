@@ -580,9 +580,9 @@ pip install "wikiloom[mcp]"
 wikiloom mcp --print-config --project ./my-wiki
 ```
 
-The output is a complete `mcpServers` block ready to paste into your client config — for example `~/Library/Application Support/Claude/claude_desktop_config.json` on macOS (Claude Desktop) or your `mcp.json` for Claude Code. After pasting, restart the client and the six WikiLoom tools become available in the agent's tool drawer.
+The output is a complete `mcpServers` block ready to paste into your client config — for example `~/Library/Application Support/Claude/claude_desktop_config.json` on macOS (Claude Desktop) or your `mcp.json` for Claude Code. After pasting, restart the client and the seven WikiLoom tools become available in the agent's tool drawer.
 
-The six tools follow a cheap-router-vs-expensive-payload pattern:
+The seven tools follow a cheap-router-vs-expensive-payload pattern:
 
 | Tool | Layer | What it returns |
 |---|---|---|
@@ -592,8 +592,9 @@ The six tools follow a cheap-router-vs-expensive-payload pattern:
 | `get_chunks(ids)` | payload | full chunk text |
 | `get_context(goal, budget)` | orchestrator | routed pages + token-budgeted chunks |
 | `get_outbound_links(page_id)` | graph hop | outbound wikilink targets |
+| `get_backlinks(page_id, limit)` | graph hop | inbound pages that cite `page_id` |
 
-The agent decides which to call when — the tool descriptions teach the call sequence ("call `search_pages` first; if results don't fit, refine the query or pivot to `search_chunks`"). For a one-shot retrieval against a token budget, `get_context(goal, budget=2000)` does router + chunk rerank + budget packing in a single call.
+The agent decides which to call when — the tool descriptions teach the call sequence ("call `search_pages` first; if results don't fit, refine the query or pivot to `search_chunks`"). For a one-shot retrieval against a token budget, `get_context(goal, budget=2000)` does router + chunk rerank + budget packing in a single call. All seven tools are declared read-only, idempotent, and closed-world (`ToolAnnotations`), so MCP hosts can call and cache them freely instead of treating them as state-changing.
 
 **Wiring gotchas:**
 
